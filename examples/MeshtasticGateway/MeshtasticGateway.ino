@@ -23,11 +23,16 @@
 static const uint8_t GATEWAY_ID = 1;
 
 // UART to the Meshtastic node. Check these against YOUR board before wiring.
-// Avoid strapping and boot-duty pins -- on the ESP32-C6 SuperMini that rules
-// out IO4/IO5/IO6, plus IO8 and IO15 (onboard LEDs) and IO9 (boot mode).
-// IO0-IO3 are the safe picks there; 2 and 3 leave 0 and 1 free for ADC.
-#define LINK_RX_PIN 2
-#define LINK_TX_PIN 3
+//
+// On the ESP32-C6 SuperMini these are chosen for PHYSICAL convenience, not
+// just electrical availability: the silkscreen left row runs GND, 3V3, 20, 19,
+// so one 4-pin header picks up ground and both data lines in a single strip.
+// Picking electrically-fine-but-scattered pins means flying leads instead.
+//
+// Avoid strapping and boot-duty pins there: 8 and 15 drive onboard LEDs, 9 is
+// boot mode, 12 and 13 are USB, 16 and 17 are UART0.
+#define LINK_RX_PIN 19
+#define LINK_TX_PIN 20
 #define LINK_BAUD   115200
 #define LINK        Serial1
 
