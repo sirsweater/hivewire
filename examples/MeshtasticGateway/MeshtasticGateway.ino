@@ -1,40 +1,43 @@
 /*
  * Hivewire -- MeshtasticGateway
  *
- * Bridges an ESP-NOW swarm to a long-range LoRa link by talking to a Meshtastic
- * node over UART:
+ * Bridges an ESP-NOW swarm to a long-range LoRa link by acting as a Meshtastic
+ * CLIENT over UART:
  *
  *   phone / remote radio <--LoRa--> Meshtastic node <--UART--> this <--ESP-NOW--> swarm
  *
- * Configure the Meshtastic node's Serial Module in TEXTMSG mode at 115200 and
- * point its rxd/txd at whatever pins you wire to. TEXTMSG means a stock phone
- * app can read the digests and issue commands with no custom software.
+ * Set the Meshtastic node's Serial Module to PROTO mode at 115200 and point its
+ * rxd/txd at the pins below. PROTO exposes the full protobuf client API -- the
+ * same one the phone app speaks -- which is what lets us choose a channel per
+ * message and, crucially, see which channel an incoming command arrived on.
+ *
+ * That matters: the Serial Module's TEXTMSG mode publishes on the PRIMARY
+ * channel only and cannot tell you the sender's channel, so anyone in radio
+ * range could command the swarm. Here we reject anything not on our private
+ * channel, and the node's primary can stay on the public mesh.
  *
  * The uplink carries CHANGES and periodic digests, never a per-node stream --
  * LoRa airtime is shared and a packet costs the better part of a second.
- * If the LoRa link dies the swarm keeps running its last goal, which is the
- * intended behaviour rather than a failure.
+ * If the LoRa link dies the swarm keeps running its last goal, by design.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <Hivewire.h>
+#include <Meshtastic.h>
 
 static const uint8_t GATEWAY_ID = 1;
 
-// UART to the Meshtastic node. Check these against YOUR board before wiring.
-//
-// On the ESP32-C6 SuperMini these are chosen for PHYSICAL convenience, not
-// just electrical availability: the silkscreen left row runs GND, 3V3, 20, 19,
-// so one 4-pin header picks up ground and both data lines in a single strip.
-// Picking electrically-fine-but-scattered pins means flying leads instead.
-//
-// Avoid strapping and boot-duty pins there: 8 and 15 drive onboard LEDs, 9 is
-// boot mode, 12 and 13 are USB, 16 and 17 are UART0.
+// UART to the Meshtastic node. Chosen for physical convenience on the ESP32-C6
+// SuperMini: its left row runs GND, 3V3, 20, 19, so one header strip picks up
+// ground and both data lines.
 #define LINK_RX_PIN 19
 #define LINK_TX_PIN 20
 #define LINK_BAUD   115200
-#define LINK        Serial1
+
+// Channel index carrying swarm traffic. 0 is the public primary -- never use it
+// for this. Commands arriving on any other channel are refused.
+#define SWARM_CHANNEL 1
 
 static const uint32_t DIGEST_PERIOD_MS  = 900000;  // 15 min routine uplink
 static const uint32_t DIGEST_MIN_GAP_MS = 60000;   // floor between uplinks
@@ -50,8 +53,14 @@ static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 
 HivewireCoordinator coord;
 
+static bool linkReady = false;
 static uint32_t lastDigest = 0;
 static uint16_t lastFaults = 0xFFFF, lastTotal = 0xFFFF;
+
+static void uplink(const char *line) {
+  Serial.printf("[uplink ch%u] %s\n", SWARM_CHANNEL, line);
+  mt_send_text(line, BROADCAST_ADDR, SWARM_CHANNEL);
+}
 
 // Health line, then per-node slot values chunked across as many lines as
 // needed. Never one packet per node.
@@ -62,8 +71,7 @@ static void sendDigest() {
   char line[96];
   snprintf(line, sizeof(line), "HW up=%u ok=%u ep=%lu m=%u flt=%u",
            total, converged, (unsigned long)coord.epoch(), coord.mode(), faults);
-  LINK.println(line);
-  Serial.printf("[uplink] %s\n", line);
+  uplink(line);
 
   lastFaults = faults;
   lastTotal = total;
@@ -84,7 +92,7 @@ static void sendDigest() {
       if (m <= 0) continue;
       if (!n) n = snprintf(buf, sizeof(buf), "D%u", chunk);
       if (n + m >= MAX_LINE) {
-        LINK.println(buf);
+        uplink(buf);
         chunk++;
         n = snprintf(buf, sizeof(buf), "D%u", chunk);
       }
@@ -92,7 +100,7 @@ static void sendDigest() {
       n += m;
     }
   }
-  if (n > 2) LINK.println(buf);
+  if (n > 2) uplink(buf);
 }
 
 // Uplink early when the picture materially changed, rate-limited so it can
@@ -104,69 +112,91 @@ static void checkTriggers() {
   if (faults != lastFaults || total != lastTotal) sendDigest();
 }
 
-// Commands arriving from the remote operator:
+// Commands from the remote operator:
 //   mode <n> [param] [ttl]                 posture; reaches every unit
 //   set <all|rN|id> <slot> <value>         write a slot
 //   status                                 force a digest now
-static void handleCommand(char *line) {
-  if (!strncmp(line, "mode", 4)) {
+static void handleCommand(const char *line) {
+  char buf[128];
+  snprintf(buf, sizeof(buf), "%s", line);
+
+  if (!strncmp(buf, "mode", 4)) {
     int m = 0, p = 0, t = 0;
-    if (sscanf(line + 4, "%d %d %d", &m, &p, &t) >= 1 && m >= 0 && m <= 255) {
+    if (sscanf(buf + 4, "%d %d %d", &m, &p, &t) >= 1 && m >= 0 && m <= 255) {
       coord.setState((uint8_t)m, (uint8_t)p, (uint16_t)t);
-      LINK.printf("ACK mode=%d ep=%lu\n", m, (unsigned long)coord.epoch());
+      char ack[64];
+      snprintf(ack, sizeof(ack), "ACK mode=%d ep=%lu", m, (unsigned long)coord.epoch());
+      uplink(ack);
     } else {
-      LINK.println("ERR usage: mode <n> [param] [ttl]");
+      uplink("ERR usage: mode <n> [param] [ttl]");
     }
-  } else if (!strncmp(line, "set", 3)) {
+  } else if (!strncmp(buf, "set", 3)) {
     char tgt[16] = {0};
     int slot = 0;
     long val = 0;
-    if (sscanf(line + 3, "%15s %d %ld", tgt, &slot, &val) == 3) {
+    if (sscanf(buf + 3, "%15s %d %ld", tgt, &slot, &val) == 3) {
       uint8_t id = HIVEWIRE_TARGET_ALL, role = HW_ROLE_ANY;
       if (!strcmp(tgt, "all"))  { /* wildcards already set */ }
       else if (tgt[0] == 'r')   role = (uint8_t)atoi(tgt + 1);
       else                      id = (uint8_t)atoi(tgt);
 
+      char ack[64];
       if (coord.set(id, role, (uint8_t)slot, (int32_t)val))
-        LINK.printf("ACK set %u=%ld\n", slot, val);
+        snprintf(ack, sizeof(ack), "ACK set %d=%ld", slot, val);
       else
-        LINK.printf("ERR slot %d not declared writable\n", slot);
+        snprintf(ack, sizeof(ack), "ERR slot %d not writable", slot);
+      uplink(ack);
     } else {
-      LINK.println("ERR usage: set <all|rN|id> <slot> <value>");
+      uplink("ERR usage: set <all|rN|id> <slot> <value>");
     }
-  } else if (!strncmp(line, "status", 6)) {
+  } else if (!strncmp(buf, "status", 6)) {
     sendDigest();
-  } else {
-    LINK.println("ERR unknown cmd");
+  }
+  // Anything else is ignored in silence -- this channel carries human chat too.
+}
+
+// Incoming text from the mesh. THIS is the check the Serial Module could not
+// do: refuse anything that did not arrive on our private channel.
+static void onMeshText(uint32_t from, uint32_t to, uint8_t channel,
+                       const char *text) {
+  if (channel != SWARM_CHANNEL) {
+    Serial.printf("[cmd] REFUSED ch=%u (not swarm channel): %s\n", channel, text);
+    return;
+  }
+  Serial.printf("[cmd] ch=%u from=0x%08lx: %s\n", channel, (unsigned long)from, text);
+  handleCommand(text);
+}
+
+static void onMeshConnected(mt_node_t *node, mt_nr_progress_t progress) {
+  if (!linkReady) {
+    linkReady = true;
+    Serial.println("[mt] connected to Meshtastic node");
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  LINK.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_PIN, LINK_TX_PIN);
-  delay(200);
+  delay(600);
 
   if (!coord.begin(GATEWAY_ID, WRITABLE, N_WRITABLE)) {
     Serial.println("hivewire: begin failed");
     ESP.restart();
   }
+
+  mt_serial_init(LINK_RX_PIN, LINK_TX_PIN, LINK_BAUD);
+  set_text_message_callback(onMeshText);
+  mt_request_node_report(onMeshConnected);
+
+  lastDigest = millis();
   Serial.println("hivewire gateway up");
 }
 
 void loop() {
   coord.loop();
+  bool ready = mt_loop(millis());
 
-  if (millis() - lastDigest > DIGEST_PERIOD_MS) sendDigest();
-  checkTriggers();
-
-  static char buf[128];
-  static size_t n = 0;
-  while (LINK.available()) {
-    char c = LINK.read();
-    if (c == '\n' || c == '\r') {
-      if (n) { buf[n] = 0; handleCommand(buf); n = 0; }
-    } else if (n < sizeof(buf) - 1) {
-      buf[n++] = c;
-    }
+  if (ready) {
+    if (millis() - lastDigest > DIGEST_PERIOD_MS) sendDigest();
+    checkTriggers();
   }
 }
