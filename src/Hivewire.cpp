@@ -47,22 +47,54 @@ static uint32_t hwDelta(uint8_t type, const uint8_t *a, const uint8_t *b) {
 }
 
 static void hwOnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+#if HIVEWIRE_DEBUG
+  Serial.printf("[hw] RX len=%d magic=%02x ver=%u type=%u src=%u\n", len,
+                len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
+                len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
+#endif
   if (g_node) g_node->_ingest(data, len);
   if (g_coord) g_coord->_ingest(data, len);
 }
 
+#ifndef HIVEWIRE_DEBUG
+#define HIVEWIRE_DEBUG 0
+#endif
+#if HIVEWIRE_DEBUG
+#define HWLOG(...) Serial.printf(__VA_ARGS__)
+static void hwOnSent(const wifi_tx_info_t *info, esp_now_send_status_t st) {
+  HWLOG("[hw] send status %s\n", st == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+}
+#else
+#define HWLOG(...) do {} while (0)
+#endif
+
 static bool hwRadioBegin(uint8_t channel) {
   WiFi.mode(WIFI_STA);
-  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-  if (esp_now_init() != ESP_OK) return false;
+  delay(500);                              // let USB CDC enumerate before we log
+  esp_err_t ce = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  HWLOG("[hw] set_channel(%u) -> %d\n", channel, (int)ce);
+
+  esp_err_t ie = esp_now_init();
+  HWLOG("[hw] esp_now_init -> %d\n", (int)ie);
+  if (ie != ESP_OK) return false;
   esp_now_register_recv_cb(hwOnRecv);
+#if HIVEWIRE_DEBUG
+  esp_now_register_send_cb(hwOnSent);
+#endif
 
   esp_now_peer_info_t peer{};
   memcpy(peer.peer_addr, HW_BCAST, 6);
-  peer.channel = channel;
+  peer.channel = 0;                        // 0 = use the interface's channel
+  peer.ifidx = WIFI_IF_STA;
   peer.encrypt = false;
-  esp_now_add_peer(&peer);
-  return true;
+  esp_err_t pe = esp_now_add_peer(&peer);
+  HWLOG("[hw] add_peer -> %d  (mac %02x:%02x:%02x:%02x:%02x:%02x)\n", (int)pe,
+        HW_BCAST[0], HW_BCAST[1], HW_BCAST[2], HW_BCAST[3], HW_BCAST[4], HW_BCAST[5]);
+
+  uint8_t pch = 0; wifi_second_chan_t sec;
+  esp_wifi_get_channel(&pch, &sec);
+  HWLOG("[hw] radio is on channel %u\n", pch);
+  return pe == ESP_OK;
 }
 
 // ---------------------------------------------------------------------------

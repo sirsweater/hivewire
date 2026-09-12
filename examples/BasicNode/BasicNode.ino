@@ -68,11 +68,15 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
 
+  // Register BEFORE begin(): the radio starts inside begin(), and a beacon can
+  // arrive before the next line runs. Registering after would let the first
+  // state adoption happen silently, and it never repeats for the same epoch.
+  node.onMode(onMode);
+
   if (!node.begin(NODE_ID, HW_ROLE_ACTUATOR, SLOTS, N_SLOTS)) {
     Serial.println("hivewire: begin failed");
     ESP.restart();
   }
-  node.onMode(onMode);
   Serial.printf("hivewire node %u up, %u slots\n", NODE_ID, N_SLOTS);
 }
 
