@@ -1,0 +1,21 @@
+# Meshtastic config exports contain security.privateKey -- never commit these
+*.yaml
+*.yml
+!.github/**/*.yml
+info*.txt
+nodes*.txt
+cfg*.yaml
+contact.txt
+*.log
+
+# build output
+build/
+.pio/
+.pioenvs/
+*.bin
+*.elf
+*.hex
+
+.vscode/
+.DS_Store
+Thumbs.db
