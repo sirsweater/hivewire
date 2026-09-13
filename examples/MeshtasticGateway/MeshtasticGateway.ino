@@ -24,7 +24,7 @@
  */
 
 #include <Hivewire.h>
-#include <Meshtastic.h>
+#include "MeshtasticUplink.h"
 
 static const uint8_t GATEWAY_ID = 1;
 
@@ -53,13 +53,16 @@ static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 
 HivewireCoordinator coord;
 
-static bool linkReady = false;
+// The only Meshtastic-aware object in this sketch. Swap this line for another
+// HivewireUplink implementation and nothing below changes.
+MeshtasticUplink gwUplink(LINK_RX_PIN, LINK_TX_PIN, SWARM_CHANNEL, LINK_BAUD);
+
 static uint32_t lastDigest = 0;
 static uint16_t lastFaults = 0xFFFF, lastTotal = 0xFFFF;
 
 static void uplink(const char *line) {
   Serial.printf("[uplink ch%u] %s\n", SWARM_CHANNEL, line);
-  mt_send_text(line, BROADCAST_ADDR, SWARM_CHANNEL);
+  gwUplink.send(line);
 }
 
 // Health line, then per-node slot values chunked across as many lines as
@@ -155,25 +158,6 @@ static void handleCommand(const char *line) {
   // Anything else is ignored in silence -- this channel carries human chat too.
 }
 
-// Incoming text from the mesh. THIS is the check the Serial Module could not
-// do: refuse anything that did not arrive on our private channel.
-static void onMeshText(uint32_t from, uint32_t to, uint8_t channel,
-                       const char *text) {
-  if (channel != SWARM_CHANNEL) {
-    Serial.printf("[cmd] REFUSED ch=%u (not swarm channel): %s\n", channel, text);
-    return;
-  }
-  Serial.printf("[cmd] ch=%u from=0x%08lx: %s\n", channel, (unsigned long)from, text);
-  handleCommand(text);
-}
-
-static void onMeshConnected(mt_node_t *node, mt_nr_progress_t progress) {
-  if (!linkReady) {
-    linkReady = true;
-    Serial.println("[mt] connected to Meshtastic node");
-  }
-}
-
 void setup() {
   Serial.begin(115200);
   delay(600);
@@ -183,9 +167,13 @@ void setup() {
     ESP.restart();
   }
 
-  mt_serial_init(LINK_RX_PIN, LINK_TX_PIN, LINK_BAUD);
-  set_text_message_callback(onMeshText);
-  mt_request_node_report(onMeshConnected);
+  // The uplink is responsible for rejecting untrusted senders before this
+  // callback is ever reached -- see MeshtasticUplink::onText.
+  gwUplink.onCommand(handleCommand);
+  if (!gwUplink.begin()) {
+    Serial.println("hivewire: uplink begin failed");
+    ESP.restart();
+  }
 
   lastDigest = millis();
   Serial.println("hivewire gateway up");
@@ -193,9 +181,9 @@ void setup() {
 
 void loop() {
   coord.loop();
-  bool ready = mt_loop(millis());
+  gwUplink.loop();
 
-  if (ready) {
+  if (gwUplink.ready()) {
     if (millis() - lastDigest > DIGEST_PERIOD_MS) sendDigest();
     checkTriggers();
   }

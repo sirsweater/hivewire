@@ -163,6 +163,40 @@ struct HwConfig {
 };
 
 // ---------------------------------------------------------------------------
+// Uplink
+// ---------------------------------------------------------------------------
+//
+// The long-haul link out of the swarm. Deliberately tiny and deliberately not
+// Meshtastic: this library's core is pure ESP-NOW and must stay that way, so a
+// dead or diverging uplink project costs you ONE implementation file rather
+// than the protocol.
+//
+// Implementations live in examples/ (or your own sketch), never in src/, so the
+// library never acquires a dependency on any particular radio stack. See
+// examples/MeshtasticGateway for one built on the Meshtastic client API.
+//
+// Contract:
+//   begin()  once, from setup(). false = unusable.
+//   loop()   serviced every pass; may do connection work.
+//   ready()  true once it can actually carry traffic.
+//   send()   one short line. Implementations may drop when !ready().
+//   onCommand() delivers inbound lines that the transport considers
+//               TRUSTED -- an implementation is responsible for rejecting
+//               anything from an unauthenticated source before calling back.
+
+class HivewireUplink {
+ public:
+  typedef void (*CommandCallback)(const char *line);
+
+  virtual ~HivewireUplink() {}
+  virtual bool begin() = 0;
+  virtual void loop() = 0;
+  virtual bool ready() = 0;
+  virtual void send(const char *line) = 0;
+  virtual void onCommand(CommandCallback cb) = 0;
+};
+
+// ---------------------------------------------------------------------------
 // Node
 // ---------------------------------------------------------------------------
 
