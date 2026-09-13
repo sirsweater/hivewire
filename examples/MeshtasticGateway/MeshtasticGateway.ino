@@ -28,11 +28,29 @@
 
 static const uint8_t GATEWAY_ID = 1;
 
-// UART to the Meshtastic node. Chosen for physical convenience on the ESP32-C6
-// SuperMini: its left row runs GND, 3V3, 20, 19, so one header strip picks up
-// ground and both data lines.
-#define LINK_RX_PIN 19
-#define LINK_TX_PIN 20
+// UART to the Meshtastic node.
+//
+// These pins let an ESP32-C6 SuperMini sit BACK-TO-BACK on a Heltec V4 with the
+// pads meeting directly -- no jumper wires at all. Reversed, the C6's left row
+// lands on the Heltec's top row such that GND meets GND and 3V3 meets 3V3:
+//
+//   C6  8 -> Heltec 40      C6 20  -> Heltec 3V3
+//   C6  9 -> Heltec 41      C6 3V3 -> Heltec 3V3
+//   C6 14 -> Heltec 42      C6 GND -> Heltec GND
+//
+// CAREFUL: 8 and 9 are ESP32-C6 strapping pins, so the direction assignment is
+// NOT arbitrary. GPIO9 is the boot-mode pin -- low at reset puts the chip in
+// download mode instead of running this sketch. So GPIO9 must be the pin WE
+// drive (TX): at reset it is high-Z with an internal pullup and always boots.
+// The externally-driven line goes to GPIO8, where a low at reset only affects
+// ROM log printing.
+//
+// Reverse these two and you get intermittent boot-into-bootloader failures.
+//
+// GPIO8 also drives the onboard RGB LED on SuperMini boards, so it will flicker
+// with inbound traffic. Cosmetic; the WS2812 data input is high-impedance.
+#define LINK_RX_PIN 8    // <- Heltec pad 40 (its TX)
+#define LINK_TX_PIN 9    // -> Heltec pad 41 (its RX)
 #define LINK_BAUD   115200
 
 // Channel index carrying swarm traffic. 0 is the public primary -- never use it
