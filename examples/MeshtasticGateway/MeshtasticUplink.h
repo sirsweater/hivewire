@@ -36,11 +36,22 @@ class MeshtasticUplink : public HivewireUplink {
     g_mtUplink = this;
     mt_serial_init(_rx, _tx, _baud);
     set_text_message_callback(&MeshtasticUplink::onText);
-    mt_request_node_report(&MeshtasticUplink::onConnected);
+    handshake();
     return true;
   }
 
-  void loop() override { _ready = mt_loop(millis()); }
+  void loop() override {
+    uint32_t now = millis();
+    _ready = mt_loop(now);
+
+    // The node only forwards received packets to a client that has completed a
+    // want_config handshake. If the NODE reboots, it forgets us -- but our
+    // heartbeats keep succeeding, so nothing looks wrong: digests still go out
+    // and inbound commands silently vanish. A roof-mounted node WILL reboot on
+    // a power blip, so re-handshake periodically rather than assuming the one
+    // at boot lasts forever.
+    if (_ready && now - _lastHandshake >= HANDSHAKE_REFRESH_MS) handshake();
+  }
   bool ready() override { return _ready; }
 
   void send(const char *line) override {
@@ -53,6 +64,17 @@ class MeshtasticUplink : public HivewireUplink {
   uint8_t channel() const { return _ch; }
 
  private:
+  // Cheap: this is a UART exchange with the attached node, not LoRa airtime.
+  static const uint32_t HANDSHAKE_REFRESH_MS = 240000;   // 4 min
+
+  void handshake() {
+    _lastHandshake = millis();
+    // Always pass the callback: the library nulls its stored pointer once a
+    // handshake completes, and calls it without a null check if another
+    // config_complete arrives. Re-arming it every time avoids that.
+    mt_request_node_report(&MeshtasticUplink::onConnected);
+  }
+
   static void onConnected(mt_node_t *node, mt_nr_progress_t progress) {
     if (g_mtUplink && !g_mtUplink->_announced) {
       g_mtUplink->_announced = true;
@@ -80,5 +102,6 @@ class MeshtasticUplink : public HivewireUplink {
   uint32_t _baud;
   bool _ready = false;
   bool _announced = false;
+  uint32_t _lastHandshake = 0;
   CommandCallback _cb = nullptr;
 };

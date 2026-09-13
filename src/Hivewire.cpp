@@ -401,6 +401,19 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
 
   if (h->type == HW_MSG_STATUS && len >= (int)sizeof(HwStatusHdr)) {
     const HwStatusHdr *sh = (const HwStatusHdr *)data;
+
+    // Epoch recovery. A coordinator restarts its counter at 1, but the swarm
+    // remembers whatever it last adopted -- and nodes only take a HIGHER epoch.
+    // So a rebooted coordinator is silently ignored: digests still arrive, slot
+    // data still flows, and every command is discarded. One power blip does
+    // this, and nothing looks wrong.
+    //
+    // Nodes report the epoch they hold, so climb above the highest we see.
+    //
+    // Strictly GREATER THAN. Using >= here creates a runaway: a converged node
+    // reports our own epoch back, we read it as "higher", bump, the node adopts
+    // and reports the new one, and the counter escalates forever.
+    if (sh->epoch > _epoch) _epoch = sh->epoch + 1;
     NodeRec &r = _nodes[h->srcId];
     r.seen = true;
     r.lastHeard = millis();
