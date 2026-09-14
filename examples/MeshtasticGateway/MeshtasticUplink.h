@@ -133,8 +133,20 @@ class MeshtasticUplink : public HivewireUplink {
     // handshakes or leaves you broken for most of its interval.
     if (now - lastInboundAt() >= STALE_AFTER_MS &&
         now - _lastHandshake >= HANDSHAKE_MIN_GAP_MS) {
-      Serial.println("[uplink] inbound silent, re-establishing session");
-      note("link stale, rehandshake");
+      // Say WHICH kind of silence this is. "Nothing has arrived" covers two
+      // very different faults, and from the log alone they are identical:
+      // a genuinely quiet mesh, or a node that has stopped driving the wire.
+      // Distinguishing them cost a full day here -- the node went on reporting
+      // successful sends into a line its own GPS power-down had pulled low, so
+      // every layer above looked healthy. One pin read separates them.
+      if (rxLineDead()) {
+        Serial.println("[uplink] inbound silent AND rx line is low: "
+                       "the node is not driving the wire");
+        note("rx line dead, not idle");
+      } else {
+        Serial.println("[uplink] inbound silent, re-establishing session");
+        note("link stale, rehandshake");
+      }
       _session = false;
       handshake();
     }
@@ -174,10 +186,35 @@ class MeshtasticUplink : public HivewireUplink {
   static const size_t   RX_BUFFER_BYTES      = 4096;
   // Unchanging non-zero fill for this long means wedged, not busy.
   static const uint32_t PARSER_STALL_MS      = 3000;
+  // ~3 ms of sampling, well over 30 bit times at 115200.
+  static const uint8_t  RX_LINE_SAMPLES      = 16;
+  static const uint32_t RX_LINE_SAMPLE_US    = 200;
 
   // Treat boot as the first "inbound" so we do not re-handshake immediately.
   uint32_t lastInboundAt() const {
     return _lastInbound ? _lastInbound : _startedAt;
+  }
+
+  // Is the wire itself dead, as opposed to merely quiet?
+  //
+  // A UART transmitter holds its line HIGH between bytes, so an idle healthy
+  // link reads high. Traffic only ever pulls it low briefly -- a byte at 115200
+  // lasts ~87 us and always ends with a high stop bit -- so a window spanning
+  // many bit times that never once reads high means nobody is driving the line
+  // at all. That is a dead peer, not a quiet one.
+  //
+  // digitalRead() works here even though the pin is muxed to the UART: it reads
+  // the pad's input register, which the peripheral does not take away. Sampling
+  // is read-only and cannot disturb reception, which is why this does not touch
+  // the pull resistors -- a pull-down would tell us more (driven high versus
+  // floating high) at the cost of corrupting whatever is arriving.
+  bool rxLineDead() const {
+    if (_rx < 0) return false;
+    for (uint8_t i = 0; i < RX_LINE_SAMPLES; i++) {
+      if (digitalRead(_rx)) return false;      // a high: the line is alive
+      delayMicroseconds(RX_LINE_SAMPLE_US);
+    }
+    return true;
   }
 
   // Watch the library's receive buffer for the deadlock described above. Bytes

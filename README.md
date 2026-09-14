@@ -196,6 +196,13 @@ Things that cost real time, in case they save you some:
   rather than adding to them, and silently kills USB serial.
 - **A Meshtastic node serves one API client at a time.** Attaching a second over
   USB stops packets reaching your gateway.
+- **Check what else on the node owns your UART pin.** A Meshtastic node with no
+  GPS still runs its GPS subsystem: it searched for 900 s, gave up, moved the
+  GPS to `HARDSLEEP`, and pulled the pad low — the pad carrying the node's
+  serial TX. The node went on logging `Config Send Complete` into a dead wire,
+  so every layer above looked healthy. `position.gps_mode = NOT_PRESENT` fixes
+  it. The tell was the 15-minute period: anything that survives exactly N
+  minutes and dies is a timer, not a loose connection.
 - **If a link works, dies, then returns after you reseat something — stop
   debugging software.** Intermittent contacts produce contradictory results that
   look exactly like protocol bugs. The inverse trap is just as expensive: this
@@ -217,13 +224,15 @@ around both from outside — the library is GPL-3.0 and cannot be vendored here.
   The reboot then cuts a UART frame in half and desyncs the *node's* parser too,
   so the link stays dead afterwards. Re-arm the pointer directly; calling
   `mt_request_node_report()` to re-arm sends another `want_config` and loops.
-- **The 512-byte receive buffer can deadlock permanently.**
+- **The 512-byte receive buffer looks like it can deadlock permanently.**
   `mt_protocol_check_packet()` has two paths that abandon the buffer without
   clearing it, and `mt_loop()` only ever offers the reader `PB_BUFSIZE - pb_size`
-  bytes of space. Once it holds a frame that can never complete, no byte is read
-  and no packet parsed, forever. Nothing looks wrong: sends still succeed and the
-  node still accepts heartbeats. Watch for a non-zero fill level that stops
-  changing, and reset it.
+  bytes of space. Once it held a frame that could never complete, no byte would
+  be read and no packet parsed again. **Read from the source, never observed:**
+  the guard against it has not once fired on hardware here, and the deafness it
+  was written to explain turned out to be the GPS problem above. It is cheap
+  insurance against a real-looking hazard, not a diagnosed bug — treat it as
+  such, and don't let its presence talk you out of looking elsewhere.
 
 Also, `ready()` cannot be built on `mt_loop()`'s return value — in serial mode
 `mt_serial_loop()` is `return true;` unconditionally, so it reports success even
