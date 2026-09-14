@@ -90,8 +90,10 @@ static void sendDigest() {
   coord.census(&total, &converged, &faults, NODE_STALE_MS);
 
   char line[96];
+  // This example's convention: byte 0 of the opaque state is a "mode".
+  uint8_t mode = coord.stateLen() > 0 ? coord.state()[0] : 0;
   snprintf(line, sizeof(line), "HW up=%u ok=%u ep=%lu m=%u flt=%u",
-           total, converged, (unsigned long)coord.epoch(), coord.mode(), faults);
+           total, converged, (unsigned long)coord.epoch(), mode, faults);
   uplink(line);
 
   lastFaults = faults;
@@ -144,7 +146,9 @@ static void handleCommand(const char *line) {
   if (!strncmp(buf, "mode", 4)) {
     int m = 0, p = 0, t = 0;
     if (sscanf(buf + 4, "%d %d %d", &m, &p, &t) >= 1 && m >= 0 && m <= 255) {
-      coord.setState((uint8_t)m, (uint8_t)p, (uint16_t)t);
+      // Encode this example's {mode, param} into the opaque state payload.
+      uint8_t st[2] = {(uint8_t)m, (uint8_t)p};
+      coord.setState(st, sizeof(st), (uint16_t)t);
       char ack[64];
       snprintf(ack, sizeof(ack), "ACK mode=%d ep=%lu", m, (unsigned long)coord.epoch());
       uplink(ack);

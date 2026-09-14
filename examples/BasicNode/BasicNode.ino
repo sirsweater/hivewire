@@ -51,12 +51,21 @@ static const HwSlotDef SLOTS[] = {
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
-static void onMode(uint8_t mode, uint8_t param) {
-  Serial.printf("[mode] -> %u (param %u)\n", mode, param);
-  if (mode == HW_MODE_SAFE) {
-    relayState = 0;
-    digitalWrite(RELAY_PIN, LOW);     // safe state costs nothing to reach
-  }
+// The library carries state as an opaque payload. THIS EXAMPLE's convention is
+// byte 0 = mode, byte 1 = param -- a choice made here, not in the protocol.
+// A task-allocation application would decode the same bytes differently.
+static void onState(const uint8_t *state, uint8_t len) {
+  uint8_t mode  = len > 0 ? state[0] : 0;
+  uint8_t param = len > 1 ? state[1] : 0;
+  Serial.printf("[state] mode=%u param=%u\n", mode, param);
+}
+
+// Fires when the node gives up its state on its own -- beacons stopped, or the
+// TTL expired. Nothing arrived to tell it; that is the point.
+static void onSafe() {
+  Serial.println("[safe] state expired or coordinator lost");
+  relayState = 0;
+  digitalWrite(RELAY_PIN, LOW);
 }
 
 void setup() {
@@ -71,7 +80,8 @@ void setup() {
   // Register BEFORE begin(): the radio starts inside begin(), and a beacon can
   // arrive before the next line runs. Registering after would let the first
   // state adoption happen silently, and it never repeats for the same epoch.
-  node.onMode(onMode);
+  node.onState(onState);
+  node.onSafe(onSafe);
 
   if (!node.begin(NODE_ID, HW_ROLE_ACTUATOR, SLOTS, N_SLOTS)) {
     Serial.println("hivewire: begin failed");

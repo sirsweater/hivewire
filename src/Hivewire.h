@@ -26,7 +26,8 @@
 #define HIVEWIRE_VERSION_MINOR 1
 
 #define HIVEWIRE_MAGIC      0x5B
-#define HIVEWIRE_PROTOCOL   3
+#define HIVEWIRE_PROTOCOL   4
+#define HIVEWIRE_MAX_STATE  16   // application payload carried by a beacon
 #define HIVEWIRE_MAX_PAYLOAD 240  // ESP-NOW caps near 250; leave headroom
 #define HIVEWIRE_MAX_SLOTS   24   // per node, coordinator-side storage
 #define HIVEWIRE_TARGET_ALL  0    // MSG_SET addressed to every node
@@ -61,11 +62,19 @@ enum HwRole : uint8_t {
   HW_ROLE_ANY = 0, HW_ROLE_SENSOR, HW_ROLE_ACTUATOR, HW_ROLE_BOT, HW_ROLE_RELAY,
 };
 
-// Mode 0 must always mean "safe". It is what a unit falls back to on its own
-// when beacons stop arriving.
-enum HwMode : uint8_t {
-  HW_MODE_SAFE = 0,
-};
+// The library has NO concept of a "mode". A beacon carries an opaque
+// application payload and deciding what it means is the application's job --
+// exactly as it already is for slots. The bundled examples happen to encode
+// {mode, param} in the first two bytes, but that is their convention, not the
+// protocol's.
+//
+// What the library does own is ORDERING (monotonic epoch, higher wins),
+// PROPAGATION (Trickle gossip) and EXPIRY (TTL, plus falling back when beacons
+// stop). Those are transport properties. Meaning is not.
+//
+// The safe state is likewise the application's: on TTL expiry or beacon loss
+// the library guarantees onSafe() fires, and the application decides what
+// reaching safety involves.
 
 #define HW_FLAG_SENSOR_FAIL 0x01
 #define HW_FLAG_LOW_BATT    0x02
@@ -78,21 +87,23 @@ struct __attribute__((packed)) HwHeader {
   uint8_t srcId;
 };
 
+// Followed by exactly `len` bytes of application payload.
 struct __attribute__((packed)) HwBeacon {
   HwHeader h;
   uint32_t epoch;    // monotonic; higher always wins
-  uint8_t  mode;
-  uint8_t  param;
   uint16_t ttlSecs;  // 0 = no expiry
   uint8_t  hops;     // diagnostic only; not used for routing
+  uint8_t  len;      // application payload length, <= HIVEWIRE_MAX_STATE
 };
 
 // HW_MSG_STATUS and HW_MSG_SET both carry slotCount records, each a HwSlotRec
 // followed by exactly rec.len value bytes.
+// No "mode" field: the epoch alone says whether a node has converged, which is
+// all the transport needs. An application wanting to report what it is actually
+// doing publishes that as a slot, where it belongs.
 struct __attribute__((packed)) HwStatusHdr {
   HwHeader h;
   uint32_t epoch;
-  uint8_t  mode;
   uint8_t  role;
   uint8_t  flags;
   uint8_t  neighbors;
@@ -158,7 +169,7 @@ struct HwConfig {
   uint32_t trickleIminMs  = 500;
   uint32_t trickleImaxMs  = 16000;
   uint8_t  trickleK       = 3;      // suppress once this many neighbours agree
-  uint32_t failsafeMs     = 30000;  // no beacon for this long -> HW_MODE_SAFE
+  uint32_t failsafeMs     = 30000;  // no beacon for this long -> onSafe()
   uint32_t minTxGapMs     = 2000;   // floor on transmit rate
 };
 
@@ -202,16 +213,24 @@ class HivewireUplink {
 
 class HivewireNode {
  public:
-  typedef void (*ModeCallback)(uint8_t mode, uint8_t param);
+  // Fires when the node adopts a NEW state -- a higher epoch whose payload
+  // differs from the one it currently holds. Not called for re-advertisements
+  // of state already held.
+  typedef void (*StateCallback)(const uint8_t *state, uint8_t len);
+  // Fires when the node gives up its state on its own: beacons stopped, or the
+  // TTL expired. The application decides what reaching safety involves; the
+  // library only guarantees this is called. Never depends on a packet arriving.
+  typedef void (*SafeCallback)(void);
 
   bool begin(uint8_t nodeId, uint8_t role,
              const HwSlotDef *slots, uint8_t slotCount,
              const HwConfig &cfg = HwConfig());
   void loop();
-  void onMode(ModeCallback cb) { _modeCb = cb; }
+  void onState(StateCallback cb) { _stateCb = cb; }
+  void onSafe(SafeCallback cb)   { _safeCb = cb; }
 
-  uint8_t  mode()  const { return _mode; }
-  uint8_t  param() const { return _param; }
+  const uint8_t *state() const { return _state; }
+  uint8_t  stateLen() const { return _stateLen; }
   uint32_t epoch() const { return _epoch; }
   uint8_t  neighbors() const;
   bool     orphaned() const;
@@ -238,10 +257,13 @@ class HivewireNode {
   uint8_t _slotCount = 0;
   uint8_t _id = 0, _role = 0;
   HwConfig _cfg;
-  ModeCallback _modeCb = nullptr;
+  StateCallback _stateCb = nullptr;
+  SafeCallback  _safeCb = nullptr;
 
   uint32_t _epoch = 0, _adoptedAt = 0, _lastBeacon = 0, _lastTx = 0;
-  uint8_t  _mode = HW_MODE_SAFE, _param = 0;
+  uint8_t  _state[HIVEWIRE_MAX_STATE] = {0};
+  uint8_t  _stateLen = 0;
+  bool     _holding = false;      // have we adopted anything we must give up?
   uint16_t _ttl = 0;
 
   uint32_t _tInterval = 0, _tStart = 0, _tFireAt = 0;
@@ -261,7 +283,7 @@ class HivewireCoordinator {
   struct NodeRec {
     bool     seen;
     uint32_t lastHeard, epoch;
-    uint8_t  mode, role, flags, neighbors;
+    uint8_t  role, flags, neighbors;
     SlotVal  slots[HIVEWIRE_MAX_SLOTS];
   };
 
@@ -270,15 +292,17 @@ class HivewireCoordinator {
              const HwConfig &cfg = HwConfig());
   void loop();
 
-  // Bump the epoch so the whole swarm converges on a new posture.
-  void setState(uint8_t mode, uint8_t param, uint16_t ttlSecs);
+  // Publish new state to the whole swarm. The payload is opaque to the
+  // library; bump happens automatically so higher-epoch-wins ordering holds.
+  void setState(const uint8_t *state, uint8_t len, uint16_t ttlSecs);
 
   // Write into HW_DIR_IN / HW_DIR_INOUT slots. targetId HIVEWIRE_TARGET_ALL and
   // targetRole HW_ROLE_ANY are wildcards. Returns false if the slot was not
   // declared writable.
   bool set(uint8_t targetId, uint8_t targetRole, uint8_t slotId, int32_t value);
 
-  uint8_t  mode()  const { return _mode; }
+  const uint8_t *state() const { return _state; }
+  uint8_t  stateLen() const { return _stateLen; }
   uint32_t epoch() const { return _epoch; }
 
   // Swarm rollup. Any argument may be null.
@@ -302,7 +326,9 @@ class HivewireCoordinator {
   HwConfig _cfg;
 
   uint32_t _epoch = 1;
-  uint8_t  _mode = HW_MODE_SAFE, _param = 0, _seq = 0;
+  uint8_t  _state[HIVEWIRE_MAX_STATE] = {0};
+  uint8_t  _stateLen = 0;
+  uint8_t  _seq = 0;
   uint16_t _ttl = 0;
 
   uint32_t _tInterval = 0, _tStart = 0, _tFireAt = 0;

@@ -159,11 +159,15 @@ void HivewireNode::serviceTrickle(uint32_t now) {
 }
 
 void HivewireNode::sendBeacon(uint8_t hops) {
-  HwBeacon b{};
-  b.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_BEACON, _id};
-  b.epoch = _epoch; b.mode = _mode; b.param = _param;
-  b.ttlSecs = _ttl; b.hops = hops;
-  esp_now_send(HW_BCAST, (uint8_t *)&b, sizeof(b));
+  uint8_t buf[sizeof(HwBeacon) + HIVEWIRE_MAX_STATE];
+  HwBeacon *b = (HwBeacon *)buf;
+  b->h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_BEACON, _id};
+  b->epoch = _epoch;
+  b->ttlSecs = _ttl;
+  b->hops = hops;
+  b->len = _stateLen;
+  memcpy(buf + sizeof(HwBeacon), _state, _stateLen);
+  esp_now_send(HW_BCAST, buf, sizeof(HwBeacon) + _stateLen);
 }
 
 void HivewireNode::sendStatus() {
@@ -171,7 +175,6 @@ void HivewireNode::sendStatus() {
   HwStatusHdr *hdr = (HwStatusHdr *)buf;
   hdr->h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_STATUS, _id};
   hdr->epoch = _epoch;
-  hdr->mode = _mode;
   hdr->role = _role;
   hdr->flags = orphaned() ? HW_FLAG_NO_COORD : 0;
   hdr->neighbors = neighbors();
@@ -246,11 +249,22 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
   if (h->type == HW_MSG_BEACON && len >= (int)sizeof(HwBeacon)) {
     const HwBeacon *b = (const HwBeacon *)data;
     _lastBeacon = millis();
+
+    uint8_t plen = b->len;
+    if (plen > HIVEWIRE_MAX_STATE) return;                       // malformed
+    if (len < (int)sizeof(HwBeacon) + plen) return;              // truncated
+    const uint8_t *payload = data + sizeof(HwBeacon);
+
     if (b->epoch > _epoch) {
       _epoch = b->epoch; _ttl = b->ttlSecs; _adoptedAt = millis();
-      if (b->mode != _mode || b->param != _param) {
-        _mode = b->mode; _param = b->param;
-        if (_modeCb) _modeCb(_mode, _param);
+      _holding = true;
+      // Only surface genuinely new state. A re-advertisement of what we already
+      // hold must not re-fire the callback -- applications act on these.
+      bool changed = (plen != _stateLen) || memcmp(payload, _state, plen) != 0;
+      if (changed) {
+        memcpy(_state, payload, plen);
+        _stateLen = plen;
+        if (_stateCb) _stateCb(_state, _stateLen);
       }
       trickleReset();
     } else if (b->epoch == _epoch && _tCount < 255) {
@@ -284,11 +298,14 @@ void HivewireNode::loop() {
   if (now - _lastTx >= _cfg.minTxGapMs) sendStatus();
   serviceTrickle(now);
 
-  // Orphaned, or the commanded state expired: go safe without being told.
+  // Orphaned, or the state expired: give it up without being told. The library
+  // guarantees this fires; what "safe" involves is the application's business.
   bool expired = _ttl && (now - _adoptedAt > (uint32_t)_ttl * 1000UL);
-  if (_mode != HW_MODE_SAFE && (orphaned() || expired)) {
-    _mode = HW_MODE_SAFE; _param = 0; _ttl = 0;
-    if (_modeCb) _modeCb(_mode, _param);
+  if (_holding && (orphaned() || expired)) {
+    _holding = false;
+    _stateLen = 0;
+    _ttl = 0;
+    if (_safeCb) _safeCb();
   }
 }
 
@@ -338,16 +355,24 @@ void HivewireCoordinator::serviceTrickle(uint32_t now) {
 }
 
 void HivewireCoordinator::sendBeacon() {
-  HwBeacon b{};
-  b.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_BEACON, _id};
-  b.epoch = _epoch; b.mode = _mode; b.param = _param;
-  b.ttlSecs = _ttl; b.hops = 0;
-  esp_now_send(HW_BCAST, (uint8_t *)&b, sizeof(b));
+  uint8_t buf[sizeof(HwBeacon) + HIVEWIRE_MAX_STATE];
+  HwBeacon *b = (HwBeacon *)buf;
+  b->h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_BEACON, _id};
+  b->epoch = _epoch;
+  b->ttlSecs = _ttl;
+  b->hops = 0;
+  b->len = _stateLen;
+  memcpy(buf + sizeof(HwBeacon), _state, _stateLen);
+  esp_now_send(HW_BCAST, buf, sizeof(HwBeacon) + _stateLen);
 }
 
-void HivewireCoordinator::setState(uint8_t mode, uint8_t param, uint16_t ttlSecs) {
+void HivewireCoordinator::setState(const uint8_t *state, uint8_t len,
+                                   uint16_t ttlSecs) {
+  if (len > HIVEWIRE_MAX_STATE) len = HIVEWIRE_MAX_STATE;
   _epoch++;
-  _mode = mode; _param = param; _ttl = ttlSecs;
+  memcpy(_state, state, len);
+  _stateLen = len;
+  _ttl = ttlSecs;
   trickleReset();
   sendBeacon();
 }
@@ -418,7 +443,6 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
     r.seen = true;
     r.lastHeard = millis();
     r.epoch = sh->epoch;
-    r.mode = sh->mode;
     r.role = sh->role;
     r.flags = sh->flags;
     r.neighbors = sh->neighbors;
