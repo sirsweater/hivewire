@@ -40,6 +40,8 @@ enum HwMsgType : uint8_t {
   HW_MSG_BEACON = 1,  // coordinator -> all: desired state, gossiped by everyone
   HW_MSG_STATUS = 2,  // node -> all: health + slot values
   HW_MSG_SET    = 3,  // coordinator -> node(s): write into IN/INOUT slots
+  HW_MSG_LOGREQ = 4,  // coordinator -> node: replay your diagnostic ring
+  HW_MSG_LOGRSP = 5,  // node -> coordinator: ring entries
 };
 
 enum HwSlotType : uint8_t {
@@ -122,6 +124,33 @@ struct __attribute__((packed)) HwSlotRec {
   uint8_t id;
   uint8_t type;
   uint8_t len;
+};
+
+// ---------------------------------------------------------------------------
+// Diagnostic ring
+//
+// Every unit keeps a short history of its own and can be asked to replay it
+// over the air. A deployed node has no USB port anyone can reach -- and on a
+// board with native USB, attaching a cable RESETS it, destroying the state you
+// were trying to inspect. A unit that cannot account for itself remotely
+// cannot be debugged once it leaves the bench.
+//
+// RAM only, deliberately: flash has write endurance, and a ring that survives
+// reboots would buy the one case (why did it restart) at the cost of wearing
+// out the part. Log the boot instead and accept losing what came before it.
+// ---------------------------------------------------------------------------
+#define HIVEWIRE_LOG_LINES 8
+#define HIVEWIRE_LOG_WIDTH 40
+
+struct __attribute__((packed)) HwLogReq {
+  HwHeader h;
+  uint8_t targetId;    // HIVEWIRE_TARGET_ALL, or one node
+};
+
+// Followed by `count` entries, each a length byte then that many chars.
+struct __attribute__((packed)) HwLogRsp {
+  HwHeader h;
+  uint8_t count;
 };
 
 uint8_t hwSlotTypeLen(uint8_t type);
@@ -235,6 +264,10 @@ class HivewireNode {
   uint8_t  neighbors() const;
   bool     orphaned() const;
 
+  // Append to this unit's diagnostic ring. The library records its own
+  // transport events here too; applications can add their own.
+  void log(const char *fmt, ...);
+
   // Called from the ESP-NOW receive callback; not for application use.
   void _ingest(const uint8_t *data, int len);
 
@@ -248,6 +281,7 @@ class HivewireNode {
   void sendBeacon(uint8_t hops);
   void sendStatus();
   void handleSet(const uint8_t *data, int len);
+  void handleLogReq(const uint8_t *data, int len);
   void trickleReset();
   void serviceTrickle(uint32_t now);
   int  findSlot(uint8_t id) const;
@@ -271,6 +305,10 @@ class HivewireNode {
   bool     _tScheduled = false;
 
   uint32_t _seen[256];
+
+  char    _log[HIVEWIRE_LOG_LINES][HIVEWIRE_LOG_WIDTH];
+  uint8_t _logHead = 0;
+  uint8_t _logCount = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -300,6 +338,12 @@ class HivewireCoordinator {
   // targetRole HW_ROLE_ANY are wildcards. Returns false if the slot was not
   // declared writable.
   bool set(uint8_t targetId, uint8_t targetRole, uint8_t slotId, int32_t value);
+
+  // Ask a node to replay its diagnostic ring. Entries arrive asynchronously
+  // through the callback, one per line, oldest first.
+  typedef void (*NodeLogCallback)(uint8_t nodeId, const char *line);
+  void requestLog(uint8_t nodeId);
+  void onNodeLog(NodeLogCallback cb) { _logCb = cb; }
 
   const uint8_t *state() const { return _state; }
   uint8_t  stateLen() const { return _stateLen; }
@@ -334,4 +378,5 @@ class HivewireCoordinator {
   uint32_t _tInterval = 0, _tStart = 0, _tFireAt = 0;
   uint8_t  _tCount = 0;
   bool     _tScheduled = false;
+  NodeLogCallback _logCb = nullptr;
 };

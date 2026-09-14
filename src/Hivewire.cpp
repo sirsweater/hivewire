@@ -7,6 +7,7 @@
 #include <esp_wifi.h>
 #include <string.h>
 #include <math.h>
+#include <stdarg.h>
 
 static uint8_t HW_BCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -116,7 +117,44 @@ bool HivewireNode::begin(uint8_t nodeId, uint8_t role,
   if (!hwRadioBegin(_cfg.channel)) return false;
   randomSeed(esp_random());
   trickleReset();
+  log("boot id=%u role=%u", nodeId, role);
   return true;
+}
+
+void HivewireNode::log(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(_log[_logHead], HIVEWIRE_LOG_WIDTH, fmt, ap);
+  va_end(ap);
+  _logHead = (_logHead + 1) % HIVEWIRE_LOG_LINES;
+  if (_logCount < HIVEWIRE_LOG_LINES) _logCount++;
+}
+
+// Replay the ring to whoever asked. Oldest first, packed into one message --
+// the ring is sized so it always fits.
+void HivewireNode::handleLogReq(const uint8_t *data, int len) {
+  if (len < (int)sizeof(HwLogReq)) return;
+  const HwLogReq *rq = (const HwLogReq *)data;
+  if (rq->targetId != HIVEWIRE_TARGET_ALL && rq->targetId != _id) return;
+
+  uint8_t buf[HIVEWIRE_MAX_PAYLOAD];
+  HwLogRsp *rsp = (HwLogRsp *)buf;
+  rsp->h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_LOGRSP, _id};
+
+  size_t off = sizeof(HwLogRsp);
+  uint8_t n = 0;
+  uint8_t start = (_logHead + HIVEWIRE_LOG_LINES - _logCount) % HIVEWIRE_LOG_LINES;
+  for (uint8_t k = 0; k < _logCount; k++) {
+    const char *e = _log[(start + k) % HIVEWIRE_LOG_LINES];
+    uint8_t elen = (uint8_t)strnlen(e, HIVEWIRE_LOG_WIDTH);
+    if (off + 1 + elen > HIVEWIRE_MAX_PAYLOAD) break;
+    buf[off++] = elen;
+    memcpy(buf + off, e, elen);
+    off += elen;
+    n++;
+  }
+  rsp->count = n;
+  esp_now_send(HW_BCAST, buf, off);
 }
 
 int HivewireNode::findSlot(uint8_t id) const {
@@ -225,13 +263,16 @@ void HivewireNode::handleSet(const uint8_t *data, int len) {
     off += r.len;
 
     int i = findSlot(r.id);
-    if (i < 0) continue;                                  // unknown slot
-    if (!(_slots[i].dir & HW_DIR_IN)) continue;           // not writable
-    if (!_slots[i].apply) continue;                       // no applier
-    if (r.type != _slots[i].type) continue;               // wrong type
-    if (r.len != hwSlotTypeLen(_slots[i].type)) continue; // wrong length
+    if (i < 0)                    { log("set %u: unknown", r.id); continue; }
+    if (!(_slots[i].dir & HW_DIR_IN)) { log("set %u: read-only", r.id); continue; }
+    if (!_slots[i].apply)         { log("set %u: no applier", r.id); continue; }
+    if (r.type != _slots[i].type) { log("set %u: bad type", r.id); continue; }
+    if (r.len != hwSlotTypeLen(_slots[i].type)) { log("set %u: bad len", r.id); continue; }
     int32_t v = hwSlotAsInt(r.type, val);
-    if (v < _slots[i].minVal || v > _slots[i].maxVal) continue;  // out of range
+    if (v < _slots[i].minVal || v > _slots[i].maxVal) {
+      log("set %u: %ld out of range", r.id, (long)v);
+      continue;
+    }
 
     _slots[i].apply(val);
     memcpy(_st[i].raw, val, r.len);
@@ -264,6 +305,7 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
       if (changed) {
         memcpy(_state, payload, plen);
         _stateLen = plen;
+        log("adopt ep=%lu len=%u", (unsigned long)_epoch, plen);
         if (_stateCb) _stateCb(_state, _stateLen);
       }
       trickleReset();
@@ -272,6 +314,8 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
     }
   } else if (h->type == HW_MSG_SET) {
     handleSet(data, len);
+  } else if (h->type == HW_MSG_LOGREQ) {
+    handleLogReq(data, len);
   }
 }
 
@@ -305,6 +349,7 @@ void HivewireNode::loop() {
     _holding = false;
     _stateLen = 0;
     _ttl = 0;
+    log(orphaned() ? "safe: no coord" : "safe: ttl expired");
     if (_safeCb) _safeCb();
   }
 }
@@ -404,6 +449,13 @@ bool HivewireCoordinator::set(uint8_t targetId, uint8_t targetRole,
   return true;
 }
 
+void HivewireCoordinator::requestLog(uint8_t nodeId) {
+  HwLogReq rq{};
+  rq.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_LOGREQ, _id};
+  rq.targetId = nodeId;
+  esp_now_send(HW_BCAST, (uint8_t *)&rq, sizeof(rq));
+}
+
 void HivewireCoordinator::storeSlot(NodeRec &r, const HwSlotRec &rec,
                                     const uint8_t *val) {
   int free = -1;
@@ -460,6 +512,19 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
   } else if (h->type == HW_MSG_BEACON && len >= (int)sizeof(HwBeacon)) {
     const HwBeacon *b = (const HwBeacon *)data;
     if (b->epoch == _epoch && _tCount < 255) _tCount++;
+  } else if (h->type == HW_MSG_LOGRSP && len >= (int)sizeof(HwLogRsp)) {
+    const HwLogRsp *rsp = (const HwLogRsp *)data;
+    size_t off = sizeof(HwLogRsp);
+    char line[HIVEWIRE_LOG_WIDTH + 1];
+    for (uint8_t k = 0; k < rsp->count; k++) {
+      if (off >= (size_t)len) break;
+      uint8_t elen = data[off++];
+      if (elen > HIVEWIRE_LOG_WIDTH || off + elen > (size_t)len) break;
+      memcpy(line, data + off, elen);
+      line[elen] = 0;
+      off += elen;
+      if (_logCb) _logCb(h->srcId, line);
+    }
   }
 }
 

@@ -222,7 +222,15 @@ static void handleCommand(const char *line) {
   } else if (!strncmp(buf, "status", 6)) {
     sendDigest();
   } else if (!strncmp(buf, "log", 3)) {
-    sendLog();
+    int who = 0;
+    // "log" alone replays the gateway's own ring; "log <id>" asks that node
+    // for its history over the air. A deployed node has no reachable USB port.
+    if (sscanf(buf + 3, "%d", &who) == 1 && who > 0) {
+      coord.requestLog((uint8_t)who);
+      logf("log req node %d", who);
+    } else {
+      sendLog();
+    }
   }
   // Anything else is ignored in silence -- this channel carries human chat too.
 }
@@ -240,6 +248,13 @@ void setup() {
   // callback is ever reached -- see MeshtasticUplink::onText.
   gwUplink.onCommand(handleCommand);
   gwUplink.onLog([](const char *m) { logf("%s", m); });
+
+  // A node's replayed history arrives a line at a time; relay each one out.
+  coord.onNodeLog([](uint8_t nodeId, const char *line) {
+    char out[96];
+    snprintf(out, sizeof(out), "N%u | %s", nodeId, line);
+    uplink(out);
+  });
   if (!gwUplink.begin()) {
     Serial.println("hivewire: uplink begin failed");
     ESP.restart();
