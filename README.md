@@ -183,17 +183,51 @@ same `HwConfig::channel`.
 
 Things that cost real time, in case they save you some:
 
-- **Avoid strapping pins.** On the ESP32-C6 SuperMini that rules out `IO4`–`IO6`,
-  `IO8`/`IO15` (LEDs) and `IO9` (boot mode). If you must use `IO9`, it has to be
-  an **output** — driven low at reset it enters download mode instead of running
-  your sketch.
-- **`--build-property build.extra_flags=...` clobbers `ARDUINO_USB_CDC_ON_BOOT`**
-  and silently kills USB serial. Use `compiler.cpp.extra_flags`.
+- **Mind the strapping pins,** but don't over-avoid them. On the ESP32-C6
+  SuperMini `IO4`–`IO6`, `IO8`/`IO15` (LEDs) and `IO9` (boot mode) all carry
+  boot-time meaning. `IO8` is fine as a **UART RX** — an idle UART line sits
+  high, which is what the strap wants anyway, and the LED on that net does not
+  degrade it. `IO9` must be an **output**: driven low at reset it enters
+  download mode instead of running your sketch.
+- **Enable USB CDC through the board menu,** `--fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc`.
+  Without it `Serial` is UART0 on other pins and your sketch appears to boot and
+  print nothing. Do not reach for `--build-property build.extra_flags=...` to
+  define `ARDUINO_USB_CDC_ON_BOOT` by hand: that *replaces* the core's flags
+  rather than adding to them, and silently kills USB serial.
 - **A Meshtastic node serves one API client at a time.** Attaching a second over
   USB stops packets reaching your gateway.
 - **If a link works, dies, then returns after you reseat something — stop
   debugging software.** Intermittent contacts produce contradictory results that
-  look exactly like protocol bugs.
+  look exactly like protocol bugs. The inverse trap is just as expensive: this
+  gateway's symptom looked *exactly* like a bad contact — worked once, then
+  never — and was entirely in software. What separated them was a control test,
+  re-running the sketch that had worked rather than reasoning about the one that
+  hadn't.
+
+### Two defects in Meshtastic-arduino worth knowing about
+
+Both are in the receive path, both present as "transmits fine, hears nothing",
+and [`MeshtasticUplink.h`](examples/MeshtasticGateway/MeshtasticUplink.h) works
+around both from outside — the library is GPL-3.0 and cannot be vendored here.
+
+- **`handle_config_complete_id()` calls a null callback.** It nulls
+  `node_report_callback` when a handshake completes, then calls it with no null
+  check if a later `config_complete` arrives — which a node sends every time it
+  reboots. On RISC-V that is an instruction fetch at `0x0`: an immediate panic.
+  The reboot then cuts a UART frame in half and desyncs the *node's* parser too,
+  so the link stays dead afterwards. Re-arm the pointer directly; calling
+  `mt_request_node_report()` to re-arm sends another `want_config` and loops.
+- **The 512-byte receive buffer can deadlock permanently.**
+  `mt_protocol_check_packet()` has two paths that abandon the buffer without
+  clearing it, and `mt_loop()` only ever offers the reader `PB_BUFSIZE - pb_size`
+  bytes of space. Once it holds a frame that can never complete, no byte is read
+  and no packet parsed, forever. Nothing looks wrong: sends still succeed and the
+  node still accepts heartbeats. Watch for a non-zero fill level that stops
+  changing, and reset it.
+
+Also, `ready()` cannot be built on `mt_loop()`'s return value — in serial mode
+`mt_serial_loop()` is `return true;` unconditionally, so it reports success even
+with the node unplugged.
 
 ## Known rough edges
 
@@ -201,8 +235,10 @@ Things that cost real time, in case they save you some:
   it will under-suppress.
 - The coordinator allocates a 256-entry node table; shrink it if RAM is tight.
 - A node's slot table fills at `HIVEWIRE_MAX_SLOTS`; further ids are dropped.
-- Status messages are **not** relayed. A node out of direct range of the
-  coordinator will adopt state via gossip but its slot data will not get back.
+- Status relay (`relayHops`, default 2) is implemented and dedupes on
+  `(node, msgId)`, but has only been exercised with every unit in range of every
+  other. It has not been tested where a node is genuinely reachable only via a
+  relay.
 
 ## License
 
