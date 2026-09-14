@@ -78,9 +78,52 @@ MeshtasticUplink gwUplink(LINK_RX_PIN, LINK_TX_PIN, SWARM_CHANNEL, LINK_BAUD);
 static uint32_t lastDigest = 0;
 static uint16_t lastFaults = 0xFFFF, lastTotal = 0xFFFF;
 
+// ---------------------------------------------------------------------------
+// Diagnostic ring
+//
+// Attaching to this board's USB RESETS it, which destroys the very session you
+// are trying to inspect -- debugging by USB changes the thing being debugged.
+// So the gateway keeps its own short history in RAM and reports it over the
+// mesh on request, and nobody has to plug anything in.
+//
+// Deliberately small and only sent when asked: LoRa airtime is shared.
+// ---------------------------------------------------------------------------
+#define LOG_LINES 10
+#define LOG_WIDTH 52
+
+static char     logRing[LOG_LINES][LOG_WIDTH];
+static uint8_t  logHead = 0;      // next slot to write
+static uint8_t  logCount = 0;     // how many are populated
+
+static void logf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(logRing[logHead], LOG_WIDTH, fmt, ap);
+  va_end(ap);
+  Serial.printf("%lus %s\n", (unsigned long)(millis() / 1000), logRing[logHead]);
+  logHead = (logHead + 1) % LOG_LINES;
+  if (logCount < LOG_LINES) logCount++;
+}
+
 static void uplink(const char *line) {
   Serial.printf("[uplink ch%u] %s\n", SWARM_CHANNEL, line);
   gwUplink.send(line);
+}
+
+// Dump the ring oldest-first, packed into as few messages as will hold it.
+static void sendLog() {
+  if (!logCount) { uplink("LOG empty"); return; }
+  char buf[MAX_LINE];
+  size_t n = 0;
+  uint8_t start = (logHead + LOG_LINES - logCount) % LOG_LINES;
+  for (uint8_t k = 0; k < logCount; k++) {
+    const char *entry = logRing[(start + k) % LOG_LINES];
+    size_t need = strlen(entry) + 3;
+    if (n && n + need >= MAX_LINE) { uplink(buf); n = 0; }
+    if (!n) n = snprintf(buf, sizeof(buf), "L");
+    n += snprintf(buf + n, sizeof(buf) - n, " | %s", entry);
+  }
+  if (n > 1) uplink(buf);
 }
 
 // Health line, then per-node slot values chunked across as many lines as
@@ -139,9 +182,11 @@ static void checkTriggers() {
 //   mode <n> [param] [ttl]                 posture; reaches every unit
 //   set <all|rN|id> <slot> <value>         write a slot
 //   status                                 force a digest now
+//   log                                    replay the diagnostic ring
 static void handleCommand(const char *line) {
   char buf[128];
   snprintf(buf, sizeof(buf), "%s", line);
+  logf("cmd %.40s", buf);
 
   if (!strncmp(buf, "mode", 4)) {
     int m = 0, p = 0, t = 0;
@@ -176,6 +221,8 @@ static void handleCommand(const char *line) {
     }
   } else if (!strncmp(buf, "status", 6)) {
     sendDigest();
+  } else if (!strncmp(buf, "log", 3)) {
+    sendLog();
   }
   // Anything else is ignored in silence -- this channel carries human chat too.
 }
@@ -192,12 +239,14 @@ void setup() {
   // The uplink is responsible for rejecting untrusted senders before this
   // callback is ever reached -- see MeshtasticUplink::onText.
   gwUplink.onCommand(handleCommand);
+  gwUplink.onLog([](const char *m) { logf("%s", m); });
   if (!gwUplink.begin()) {
     Serial.println("hivewire: uplink begin failed");
     ESP.restart();
   }
 
   lastDigest = millis();
+  logf("boot ok");
   Serial.println("hivewire gateway up");
 }
 

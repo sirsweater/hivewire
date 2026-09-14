@@ -65,6 +65,7 @@ class MeshtasticUplink : public HivewireUplink {
     if (now - lastInboundAt() >= STALE_AFTER_MS &&
         now - _lastHandshake >= HANDSHAKE_MIN_GAP_MS) {
       Serial.println("[uplink] inbound silent, re-establishing session");
+      note("link stale, rehandshake");
       handshake();
     }
   }
@@ -76,6 +77,13 @@ class MeshtasticUplink : public HivewireUplink {
   }
 
   void onCommand(CommandCallback cb) override { _cb = cb; }
+
+  // Optional: route session events into the caller's diagnostic log, so they
+  // can be replayed remotely instead of only reaching a USB cable that nobody
+  // can attach without resetting the board.
+  static const uint8_t LOG_NOTE_MAX = 40;
+  typedef void (*LogFn)(const char *);
+  void onLog(LogFn fn) { _log = fn; }
 
   uint8_t channel() const { return _ch; }
 
@@ -99,6 +107,8 @@ class MeshtasticUplink : public HivewireUplink {
     // config_complete arrives. Re-arming it every time avoids that.
     mt_request_node_report(&MeshtasticUplink::onConnected);
   }
+
+  void note(const char *msg) { if (_log) _log(msg); }
 
   static void markInbound() {
     if (g_mtUplink) g_mtUplink->_lastInbound = millis();
@@ -125,6 +135,7 @@ class MeshtasticUplink : public HivewireUplink {
     if (g_mtUplink && !g_mtUplink->_announced) {
       g_mtUplink->_announced = true;
       Serial.println("[uplink] Meshtastic node connected");
+      g_mtUplink->note("node connected");
     }
   }
 
@@ -137,6 +148,9 @@ class MeshtasticUplink : public HivewireUplink {
     if (channel != g_mtUplink->_ch) {
       Serial.printf("[uplink] REFUSED ch=%u (not swarm channel): %s\n",
                     channel, text);
+      char m[LOG_NOTE_MAX];
+      snprintf(m, sizeof(m), "refused ch=%u", channel);
+      g_mtUplink->note(m);
       return;
     }
     Serial.printf("[uplink] cmd ch=%u from=0x%08lx: %s\n", channel,
@@ -153,4 +167,5 @@ class MeshtasticUplink : public HivewireUplink {
   uint32_t _lastInbound = 0;
   uint32_t _startedAt = 0;
   CommandCallback _cb = nullptr;
+  LogFn _log = nullptr;
 };
