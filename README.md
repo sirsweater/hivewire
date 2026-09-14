@@ -243,3 +243,13 @@ with the node unplugged.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+One caveat if you redistribute binaries. The library core has no third-party
+dependencies, but [`examples/MeshtasticGateway`](examples/MeshtasticGateway)
+links [Meshtastic-arduino](https://github.com/meshtastic/Meshtastic-arduino),
+which is **GPL-3.0**. Apache-2.0 source may be combined into a GPL-3.0 work, so
+this is fine — but a binary you build from that example is covered by GPL-3.0,
+not Apache-2.0. The source in this repository stays Apache-2.0 either way, and
+nothing outside that one example is affected. That separation is deliberate:
+Meshtastic is a dependency of a single file, so a differently-licensed uplink is
+a new `HivewireUplink`, not a fork.
