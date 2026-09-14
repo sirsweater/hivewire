@@ -26,6 +26,45 @@
 class MeshtasticUplink;
 static MeshtasticUplink *g_mtUplink = nullptr;
 
+// Reaching into the library's internals, deliberately. handle_config_complete_id()
+// nulls this pointer the moment a handshake completes and then calls it without
+// a null check if any later config_complete arrives:
+//
+//     want_config_id = 0;
+//     node_report_callback(NULL, MT_NR_DONE);
+//     node_report_callback = NULL;
+//   } else {
+//     node_report_callback(NULL, MT_NR_INVALID);   // no null check
+//
+// On RISC-V that is an instruction fetch at 0x0 -- an immediate panic and
+// reboot, not a soft failure. It fires whenever the node sends a config dump we
+// did not ask for, which a node does every time IT reboots. So the gateway
+// reboots too, mid-sentence, spraying a partial UART frame at the node on the
+// way down; that desyncs the node's own frame parser and the link stays dead
+// until something power-cycles it. One crash, two dead ends.
+//
+// Re-arming through mt_request_node_report() would transmit another want_config
+// and start a handshake loop, so set the pointer directly instead. It has
+// external linkage, so no library patch is needed.
+extern void (*node_report_callback)(mt_node_t *, mt_nr_progress_t);
+
+// Same reasoning, second defect. mt_protocol_check_packet() has two paths that
+// give up on the 512-byte receive buffer without clearing it:
+//
+//     if (payload_len > PB_BUFSIZE) { ...; return; }          // never resets
+//     if (payload_len + 4 > pb_size) { delay(25); return; }   // waits for more
+//
+// Both leave pb_size where it was. mt_loop() then offers the reader only
+// PB_BUFSIZE - pb_size bytes of space, so once the buffer is full of a frame
+// that can never be completed, no further byte is ever read and no packet is
+// ever parsed again. The link looks alive -- we keep transmitting, the node
+// keeps accepting our heartbeats -- but nothing inbound arrives, permanently,
+// until a reboot. That is exactly the failure this gateway was showing: it
+// received for the first minute after boot and was deaf from then on.
+//
+// pb_size has external linkage, so the stall is both observable and clearable.
+extern size_t pb_size;
+
 class MeshtasticUplink : public HivewireUplink {
  public:
   MeshtasticUplink(int8_t rxPin, int8_t txPin, uint8_t channelIndex,
@@ -35,6 +74,12 @@ class MeshtasticUplink : public HivewireUplink {
   bool begin() override {
     g_mtUplink = this;
     _startedAt = millis();
+    // A want_config reply is ~2.7 kB arriving back to back at 115200. The
+    // library reads the port only once per mt_loop() and sleeps 25 ms inside
+    // its own parser whenever a packet is incomplete, so the default 256-byte
+    // driver buffer overruns and drops bytes mid-dump. Must precede begin(),
+    // which mt_serial_init() calls.
+    Serial1.setRxBufferSize(RX_BUFFER_BYTES);
     mt_serial_init(_rx, _tx, _baud);
     set_text_message_callback(&MeshtasticUplink::onText);
     // Register these purely as liveness evidence: any inbound packet, of any
@@ -47,9 +92,33 @@ class MeshtasticUplink : public HivewireUplink {
   }
 
   void loop() override {
+    // Before parsing anything: never let the library hold a null report
+    // callback (see the note above the extern). Cheap, and it has to happen on
+    // every pass because the library re-nulls it after each completed
+    // handshake.
+    if (node_report_callback == nullptr)
+      node_report_callback = &MeshtasticUplink::onConnected;
+
+    // Note this is NOT a health signal: in serial mode mt_serial_loop() is
+    // `return true;` unconditionally, so mt_loop() always reports success and
+    // tells us nothing about whether the node is listening. Transmission does
+    // not depend on a session either -- mt_send_text() just writes a frame. So
+    // treat this as "transport initialised" and keep sending regardless; a
+    // gateway that cannot complete a handshake can still get its telemetry
+    // out, and going mute would throw that away too. Whether the node is
+    // actually feeding us packets is tracked separately, below.
+    _ready = mt_loop(millis());
+
+    // Read the clock AFTER mt_loop, not before. That call can block for over a
+    // second on a config dump -- the library sleeps 25 ms for every incomplete
+    // packet -- and the callbacks it fires stamp _lastInbound with millis() as
+    // of then. A `now` sampled beforehand is therefore older than _lastInbound,
+    // and the unsigned subtraction below underflows to ~49 days: the staleness
+    // check trips at the precise moment traffic is arriving, which is the one
+    // time it must not. Elapsed-time maths has to sample the clock after
+    // anything that can move the timestamp it is compared against.
     uint32_t now = millis();
-    _ready = mt_loop(now);
-    if (!_ready) return;
+    checkParserStall(now);
 
     // The node only forwards received packets to a client that has completed a
     // want_config handshake. If the NODE reboots it forgets us -- but our
@@ -66,10 +135,16 @@ class MeshtasticUplink : public HivewireUplink {
         now - _lastHandshake >= HANDSHAKE_MIN_GAP_MS) {
       Serial.println("[uplink] inbound silent, re-establishing session");
       note("link stale, rehandshake");
+      _session = false;
       handshake();
     }
   }
   bool ready() override { return _ready; }
+
+  // Whether the node has actually completed a want_config handshake with us,
+  // which is what makes it forward received packets. Distinct from ready():
+  // we can transmit without this, but we will never hear anything without it.
+  bool sessionUp() const { return _session; }
 
   void send(const char *line) override {
     if (!_ready) return;
@@ -94,10 +169,41 @@ class MeshtasticUplink : public HivewireUplink {
   static const uint32_t STALE_AFTER_MS      = 90000;   // 90 s
   // Floor between handshakes so a genuinely quiet mesh cannot make us spin.
   static const uint32_t HANDSHAKE_MIN_GAP_MS = 60000;  // 60 s
+  // Big enough to hold a whole want_config reply without the driver dropping
+  // bytes while the library is asleep in its parser.
+  static const size_t   RX_BUFFER_BYTES      = 4096;
+  // Unchanging non-zero fill for this long means wedged, not busy.
+  static const uint32_t PARSER_STALL_MS      = 3000;
 
   // Treat boot as the first "inbound" so we do not re-handshake immediately.
   uint32_t lastInboundAt() const {
     return _lastInbound ? _lastInbound : _startedAt;
+  }
+
+  // Watch the library's receive buffer for the deadlock described above. Bytes
+  // sitting in it that never resolve into a packet mean the parser is wedged;
+  // clearing pb_size drops the unparseable fragment and lets reading resume.
+  //
+  // Only a stuck level counts as a stall. A buffer that is merely busy changes
+  // size constantly as packets are consumed, and a genuinely partial frame
+  // completes in milliseconds -- a 512-byte frame takes 45 ms on the wire -- so
+  // several seconds of a perfectly unchanging non-zero level is not a slow
+  // link, it is a buffer that can no longer move.
+  void checkParserStall(uint32_t now) {
+    if (pb_size == 0 || pb_size != _lastPbSize) {
+      _lastPbSize = pb_size;
+      _stallSince = now;
+      return;
+    }
+    if (now - _stallSince < PARSER_STALL_MS) return;
+    Serial.printf("[uplink] rx parser wedged at %u bytes, resyncing\n",
+                  (unsigned)pb_size);
+    char m[LOG_NOTE_MAX];
+    snprintf(m, sizeof(m), "rx wedge %u, resync", (unsigned)pb_size);
+    note(m);
+    pb_size = 0;
+    _lastPbSize = 0;
+    _stallSince = now;
   }
 
   void handshake() {
@@ -130,13 +236,16 @@ class MeshtasticUplink : public HivewireUplink {
     markInbound();   // undecodable by us, but still proof of a live session
   }
 
+  // Log every transition rather than announcing once. A session that drops and
+  // comes back is exactly the event worth seeing, and a one-shot flag hides it.
   static void onConnected(mt_node_t *node, mt_nr_progress_t progress) {
     markInbound();
-    if (g_mtUplink && !g_mtUplink->_announced) {
-      g_mtUplink->_announced = true;
-      Serial.println("[uplink] Meshtastic node connected");
-      g_mtUplink->note("node connected");
-    }
+    if (!g_mtUplink || progress == MT_NR_IN_PROGRESS) return;
+    bool up = (progress == MT_NR_DONE);
+    if (up == g_mtUplink->_session) return;
+    g_mtUplink->_session = up;
+    Serial.printf("[uplink] session %s\n", up ? "established" : "rejected");
+    g_mtUplink->note(up ? "mt session up" : "mt session rejected");
   }
 
   // Refuse anything that did not arrive on our private channel. This is the
@@ -162,8 +271,10 @@ class MeshtasticUplink : public HivewireUplink {
   uint8_t _ch;
   uint32_t _baud;
   bool _ready = false;
-  bool _announced = false;
+  bool _session = false;
   uint32_t _lastHandshake = 0;
+  size_t   _lastPbSize = 0;
+  uint32_t _stallSince = 0;
   uint32_t _lastInbound = 0;
   uint32_t _startedAt = 0;
   CommandCallback _cb = nullptr;
