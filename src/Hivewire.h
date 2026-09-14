@@ -26,7 +26,7 @@
 #define HIVEWIRE_VERSION_MINOR 1
 
 #define HIVEWIRE_MAGIC      0x5B
-#define HIVEWIRE_PROTOCOL   4
+#define HIVEWIRE_PROTOCOL   5
 #define HIVEWIRE_MAX_STATE  16   // application payload carried by a beacon
 #define HIVEWIRE_MAX_PAYLOAD 240  // ESP-NOW caps near 250; leave headroom
 #define HIVEWIRE_MAX_SLOTS   24   // per node, coordinator-side storage
@@ -103,9 +103,16 @@ struct __attribute__((packed)) HwBeacon {
 // No "mode" field: the epoch alone says whether a node has converged, which is
 // all the transport needs. An application wanting to report what it is actually
 // doing publishes that as a slot, where it belongs.
+//
+// msgId + hops exist so status can be RELAYED. Beacons gossip outward, so a
+// distant node adopts state fine -- but without relay its readings never get
+// back, and the coordinator sees a swarm smaller than it is. msgId lets a relay
+// drop duplicates; hops bounds how far one report travels.
 struct __attribute__((packed)) HwStatusHdr {
   HwHeader h;
   uint32_t epoch;
+  uint16_t msgId;      // unique per originating report, for dedup
+  uint8_t  hops;       // incremented by each relay
   uint8_t  role;
   uint8_t  flags;
   uint8_t  neighbors;
@@ -200,6 +207,12 @@ struct HwConfig {
   uint8_t  trickleK       = 3;      // suppress once this many neighbours agree
   uint32_t failsafeMs     = 30000;  // no beacon for this long -> onSafe()
   uint32_t minTxGapMs     = 2000;   // floor on transmit rate
+
+  // How many times a status report may be relayed onward. 0 disables relaying
+  // entirely, which is right when every unit can hear the coordinator: each
+  // extra hop multiplies airtime, and a swarm in one room does not need it.
+  uint8_t  relayHops      = 2;
+  uint32_t relayJitterMs  = 120;    // spread relays so neighbours do not collide
 };
 
 // ---------------------------------------------------------------------------
@@ -282,6 +295,9 @@ class HivewireNode {
   void sendStatus();
   void handleSet(const uint8_t *data, int len);
   void handleLogReq(const uint8_t *data, int len);
+  void maybeRelay(const uint8_t *data, int len);
+  void serviceRelay(uint32_t now);
+  bool seenBefore(uint8_t src, uint16_t msgId);
   void trickleReset();
   void serviceTrickle(uint32_t now);
   int  findSlot(uint8_t id) const;
@@ -309,6 +325,16 @@ class HivewireNode {
   char    _log[HIVEWIRE_LOG_LINES][HIVEWIRE_LOG_WIDTH];
   uint8_t _logHead = 0;
   uint8_t _logCount = 0;
+
+  // Recently relayed reports, so a report crossing a loop dies instead of
+  // circulating. Small on purpose: it only has to outlive one propagation.
+  static const uint8_t RELAY_SEEN = 16;
+  struct { uint8_t src; uint16_t id; } _seenMsg[RELAY_SEEN];
+  uint8_t  _seenHead = 0;
+  uint16_t _msgSeq = 0;
+  uint8_t  _relayBuf[HIVEWIRE_MAX_PAYLOAD];
+  uint16_t _relayLen = 0;
+  uint32_t _relayAt = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -322,6 +348,8 @@ class HivewireCoordinator {
     bool     seen;
     uint32_t lastHeard, epoch;
     uint8_t  role, flags, neighbors;
+    uint8_t  hopsAway;      // 0 = heard directly
+    uint16_t lastMsgId;
     SlotVal  slots[HIVEWIRE_MAX_SLOTS];
   };
 

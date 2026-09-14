@@ -157,6 +157,49 @@ void HivewireNode::handleLogReq(const uint8_t *data, int len) {
   esp_now_send(HW_BCAST, buf, off);
 }
 
+bool HivewireNode::seenBefore(uint8_t src, uint16_t msgId) {
+  for (uint8_t i = 0; i < RELAY_SEEN; i++)
+    if (_seenMsg[i].src == src && _seenMsg[i].id == msgId) return true;
+  _seenMsg[_seenHead].src = src;
+  _seenMsg[_seenHead].id = msgId;
+  _seenHead = (_seenHead + 1) % RELAY_SEEN;
+  return false;
+}
+
+// Carry another node's report one hop further toward the coordinator.
+//
+// Beacons gossip outward on their own, so distant units adopt state fine. The
+// return path is what is missing: without this a node two hops out is adopting
+// orders nobody can see it obey, and the coordinator undercounts the swarm.
+//
+// Bounded three ways, because relaying is how broadcast networks melt:
+// a hop limit, a duplicate cache so a report crossing a loop dies, and random
+// jitter so neighbours hearing the same report do not all repeat it at once.
+void HivewireNode::maybeRelay(const uint8_t *data, int len) {
+  if (!_cfg.relayHops) return;
+  if (len < (int)sizeof(HwStatusHdr) || len > HIVEWIRE_MAX_PAYLOAD) return;
+
+  const HwStatusHdr *sh = (const HwStatusHdr *)data;
+  if (sh->h.srcId == _id) return;                 // never repeat ourselves
+  if (sh->hops >= _cfg.relayHops) return;         // travelled far enough
+  if (seenBefore(sh->h.srcId, sh->msgId)) return; // already carried this one
+
+  // Queue it rather than sending here. This runs in the ESP-NOW receive
+  // callback -- WiFi task context -- where blocking for jitter would risk
+  // dropped packets and a watchdog reset. loop() does the actual send.
+  if (_relayLen) return;                          // one in flight is enough
+  memcpy(_relayBuf, data, len);
+  ((HwStatusHdr *)_relayBuf)->hops = sh->hops + 1;
+  _relayLen = len;
+  _relayAt = millis() + (_cfg.relayJitterMs ? random(_cfg.relayJitterMs) : 0);
+}
+
+void HivewireNode::serviceRelay(uint32_t now) {
+  if (!_relayLen || (int32_t)(now - _relayAt) < 0) return;
+  esp_now_send(HW_BCAST, _relayBuf, _relayLen);
+  _relayLen = 0;
+}
+
 int HivewireNode::findSlot(uint8_t id) const {
   for (uint8_t i = 0; i < _slotCount; i++) if (_slots[i].id == id) return i;
   return -1;
@@ -213,6 +256,8 @@ void HivewireNode::sendStatus() {
   HwStatusHdr *hdr = (HwStatusHdr *)buf;
   hdr->h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_STATUS, _id};
   hdr->epoch = _epoch;
+  hdr->msgId = ++_msgSeq;
+  hdr->hops = 0;
   hdr->role = _role;
   hdr->flags = orphaned() ? HW_FLAG_NO_COORD : 0;
   hdr->neighbors = neighbors();
@@ -316,6 +361,8 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
     handleSet(data, len);
   } else if (h->type == HW_MSG_LOGREQ) {
     handleLogReq(data, len);
+  } else if (h->type == HW_MSG_STATUS) {
+    maybeRelay(data, len);
   }
 }
 
@@ -341,6 +388,7 @@ void HivewireNode::loop() {
 
   if (now - _lastTx >= _cfg.minTxGapMs) sendStatus();
   serviceTrickle(now);
+  serviceRelay(now);
 
   // Orphaned, or the state expired: give it up without being told. The library
   // guarantees this fires; what "safe" involves is the application's business.
@@ -492,6 +540,11 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
     // and reports the new one, and the counter escalates forever.
     if (sh->epoch > _epoch) _epoch = sh->epoch + 1;
     NodeRec &r = _nodes[h->srcId];
+    // The same report can arrive directly AND via a relay. Keep the first copy
+    // and ignore the rest, so a node is not counted twice or aged oddly.
+    if (r.seen && r.lastMsgId == sh->msgId) return;
+    r.lastMsgId = sh->msgId;
+    r.hopsAway = sh->hops;
     r.seen = true;
     r.lastHeard = millis();
     r.epoch = sh->epoch;
