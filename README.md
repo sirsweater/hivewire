@@ -19,15 +19,23 @@ lossy radio that machinery is where the bugs live.
 Hivewire advertises **state** instead. A coordinator continuously beacons the
 desired state alongside a monotonic epoch. Every unit adopts any epoch higher
 than its own and gossips it onward, so a node that rebooted, missed the change,
-or wandered out of range picks it up on the next beacon. There is no retry
-logic anywhere in this library, because nothing needs retrying — convergence is
-the default behaviour rather than something built on top.
+or wandered out of range picks it up on the next beacon. **State needs no retry
+logic**, because the next beacon carries the same thing — convergence is the
+default behaviour rather than something built on top.
+
+That guarantee covers state, and only state. A `set` write and a log request are
+*requests*: nothing follows them carrying the same information, so a lost one
+stays lost. Writes are one-shot by design; log requests are retried. Both are
+spelled out below, because "no retries anywhere" would be a comfortable thing to
+claim and not quite true.
 
 [Trickle (RFC 6206)](https://datatracker.ietf.org/doc/html/rfc6206) keeps that
 from becoming a broadcast storm: a unit stays quiet when it has already heard
 `K` neighbours agreeing with the state it holds, and intervals double while the
-network is consistent. A settled swarm goes nearly silent; a state change snaps
-it back to fast propagation instantly.
+network is consistent. A settled swarm quietens to one beacon per
+`trickleImaxMs`; a state change snaps it back to fast propagation instantly.
+**Quiet, not silent** — the coordinator is exempt from suppression, because its
+beacon is what every unit's failsafe is measured against.
 
 ## The transport carries meaning, it does not define it
 
@@ -142,7 +150,7 @@ node2 | boot id=2 role=2
 node2 | adopt ep=4 len=2
 node2 | set 1: read-only
 node2 | set 3: 9 out of range
-node2 | safe: ttl expired
+node2 | safe: no beacon 71s
 ```
 
 The library records its own transport events; `node.log()` is public for yours.
