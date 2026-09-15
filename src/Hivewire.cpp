@@ -124,8 +124,8 @@ bool HivewireNode::begin(uint8_t nodeId, uint8_t role,
   // their state at random on a perfectly healthy network -- which on a machine
   // means an actuator releasing for no reason. Correct it loudly rather than
   // honouring a combination that cannot work.
-  if (_cfg.failsafeMs < _cfg.trickleImaxMs * 3) {
-    uint32_t want = _cfg.trickleImaxMs * 4;
+  if (_cfg.failsafeMs < _cfg.trickleImaxMs * 6) {
+    uint32_t want = _cfg.trickleImaxMs * 8;
     log("failsafe %lu->%lu (too near trickle)",
         (unsigned long)_cfg.failsafeMs, (unsigned long)want);
     _cfg.failsafeMs = want;

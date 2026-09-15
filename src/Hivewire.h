@@ -203,7 +203,20 @@ struct HwWritableSlot {
 struct HwConfig {
   uint8_t  channel        = 6;      // must match on every unit
   uint32_t trickleIminMs  = 500;
-  uint32_t trickleImaxMs  = 16000;
+  // A settled swarm beacons this often. It also decides how many chances a node
+  // gets to hear ANYTHING before failsafeMs expires, which is the number that
+  // actually matters. At 16 s against a 64 s failsafe a node had four chances,
+  // so three consecutive losses disarmed it -- and on a channel dropping ~30%
+  // of frames that is not rare. Measured: seven failsafes in two hours on a node
+  // whose MEDIAN RSSI was -71 dBm. Good signal, lossy channel; 2.4 GHz is shared
+  // with WiFi and with whatever sits nearby (a node beside a PC saw a third the
+  // beacon rate of one across the house, USB 3 being a well-known broadband
+  // noise source at this frequency).
+  //
+  // At 8 s a node gets eight chances instead of four. An ESP-NOW beacon is ~30
+  // bytes; the extra traffic is nothing set against disarming a machine because
+  // a few packets went missing.
+  uint32_t trickleImaxMs  = 8000;
   uint8_t  trickleK       = 3;      // suppress once this many neighbours agree
   // No beacon for this long -> onSafe().
   //
@@ -216,7 +229,8 @@ struct HwConfig {
   //
   // Spurious failsafe is not a harmless false alarm. It is an actuator
   // releasing, and on a machine that is the expensive direction to be wrong in.
-  // Four intervals tolerates three consecutive losses before giving up.
+  // Eight intervals at the default trickleImaxMs, so seven consecutive losses
+  // are tolerated before a unit gives up. Sized from measured loss, not taste.
   uint32_t failsafeMs     = 64000;
   uint32_t minTxGapMs     = 2000;   // floor on transmit rate
   // Say something at least this often even with nothing to report.
