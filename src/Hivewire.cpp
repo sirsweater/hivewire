@@ -549,7 +549,21 @@ void HivewireCoordinator::trickleReset() {
 
 void HivewireCoordinator::serviceTrickle(uint32_t now) {
   if (_tScheduled && (int32_t)(now - _tFireAt) >= 0) {
-    if (_tCount < _cfg.trickleK) sendBeacon();
+    // The coordinator does NOT suppress. Trickle's redundancy check is right
+    // for gossip -- a node has no reason to repeat what its neighbours already
+    // echoed -- but this beacon is the liveness signal every node's failsafe is
+    // measured against. Suppressing it means a swarm goes quiet precisely
+    // because it is converged and healthy, and then every unit in it drops to
+    // safe state for exactly that reason.
+    //
+    // Observed: nodes failing safe with "no beacon 64s" while reporting a live
+    // neighbour on both sides of the event. The worst failure mode this design
+    // can have -- an actuator releasing because nothing was wrong.
+    //
+    // Interval doubling is kept, so a settled swarm still quietens to one
+    // beacon per trickleImaxMs. Quiet, not silent; the distinction is the whole
+    // safety property.
+    sendBeacon();
     _tScheduled = false;
   }
   if (!_tScheduled && now - _tStart >= _tInterval) {
