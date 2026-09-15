@@ -300,6 +300,10 @@ class HivewireNode {
   uint32_t epoch() const { return _epoch; }
   uint8_t  neighbors() const;
   bool     orphaned() const;
+  // Underflow-safe; see the definition. Public because the age is worth
+  // publishing as telemetry -- a climbing value is the earliest warning that a
+  // link is degrading, long before anything actually fails.
+  uint32_t beaconAgeMs() const;
 
   // Signal strength of received traffic, in dBm. `last` answers "is it
   // reachable"; `worst` answers "is there any margin", which is the one that
@@ -314,9 +318,7 @@ class HivewireNode {
   // is a different and much blunter thing -- it cannot see packet loss while
   // the link is still nominally up, which is the whole edge-of-range signature.
   uint32_t beaconsRx() const { return _beaconsRx; }
-  uint32_t msSinceBeacon() const {
-    return _lastBeacon ? (millis() - _lastBeacon) : 0;
-  }
+  uint32_t msSinceBeacon() const { return _lastBeacon ? beaconAgeMs() : 0; }
   bool     everHeardBeacon() const { return _lastBeacon != 0; }
   void     resetBeaconCount() { _beaconsRx = 0; }
 
@@ -391,7 +393,8 @@ class HivewireNode {
   StateCallback _stateCb = nullptr;
   SafeCallback  _safeCb = nullptr;
 
-  uint32_t _epoch = 0, _adoptedAt = 0, _lastBeacon = 0, _lastTx = 0;
+  uint32_t _epoch = 0, _adoptedAt = 0, _lastTx = 0;
+  volatile uint32_t _lastBeacon = 0;   // written from the ESP-NOW callback
   uint8_t  _state[HIVEWIRE_MAX_STATE] = {0};
   uint8_t  _stateLen = 0;
   bool     _holding = false;      // have we adopted anything we must give up?

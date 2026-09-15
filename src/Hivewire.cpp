@@ -300,8 +300,26 @@ uint8_t HivewireNode::neighbors() const {
   return n;
 }
 
+// How long since a beacon, computed so it can never run backwards.
+//
+// _lastBeacon is written from the ESP-NOW receive callback, so it can move
+// AFTER millis() has been read here. The unsigned subtraction then wraps to
+// about 49 days and every caller concludes the opposite of the truth. In
+// orphaned() that meant a node failed safe at the exact instant a beacon
+// arrived -- which is why every spurious failsafe had a healthy beacon age
+// logged on both sides of it, and why it looked like the network was fine at
+// precisely the moments units were dropping their state.
+//
+// Snapshot the value once, then compare signed: a negative age means a beacon
+// landed mid-calculation, which is the strongest possible evidence of liveness.
+uint32_t HivewireNode::beaconAgeMs() const {
+  uint32_t last = _lastBeacon;            // one read; the ISR may move it after
+  int32_t age = (int32_t)(millis() - last);
+  return age > 0 ? (uint32_t)age : 0;
+}
+
 bool HivewireNode::orphaned() const {
-  return millis() - _lastBeacon > _cfg.failsafeMs;
+  return beaconAgeMs() > _cfg.failsafeMs;
 }
 
 void HivewireNode::trickleReset() {
@@ -509,7 +527,7 @@ void HivewireNode::loop() {
     _holding = false;
     _stateLen = 0;
     if (isOrphan) log("safe: no beacon %lus",
-                      (unsigned long)((now - _lastBeacon) / 1000UL));
+                      (unsigned long)(beaconAgeMs() / 1000UL));
     else          log("safe: ttl %us elapsed", _ttl);
     _ttl = 0;
     if (_safeCb) _safeCb();
