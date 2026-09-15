@@ -159,6 +159,49 @@ A coordinator fetches a node's ring with `requestLog(id)`.
 The refusal entries are the highest-value ones: from outside, a refused write
 and a message that never arrived look identical. Now the node says which.
 
+## Updating a deployed unit
+
+[`src/HivewireOta.h`](src/HivewireOta.h) is **opt-in and header-only** — include
+it and you get WiFi firmware updates triggered over the swarm; ignore it and the
+library core stays pure ESP-NOW with no dependencies.
+
+**The swarm carries the trigger, WiFi carries the bytes.** That split is
+deliberate:
+
+| Transport | ~1 MB image | Verdict |
+|---|---|---|
+| WiFi | seconds | what this uses |
+| ESP-NOW | minutes, on a good link | ~4000 packets, and needs the acks and windowing this library exists to avoid |
+| LoRa | **65+ hours** of airtime | not viable at any speed |
+
+Credentials are compile-time, so nothing site-specific is ever committed:
+
+```bash
+arduino-cli compile --build-property 'compiler.cpp.extra_flags=-DHW_OTA_SSID="net" -DHW_OTA_PASS="pw" -DHW_OTA_URL="http://host/fw.bin"'
+```
+
+Two gates, both there to prevent the failure that cannot be undone remotely:
+
+- **Arming names one node.** `set <id> 23 <that same id>` then `set <id> 22 5`.
+  A broadcast arm only matches the node it names, so `set all 22 5` cannot brick
+  a whole swarm at once. The arm expires on its own.
+- **Self-revert.** The node records "updated, unconfirmed" before rebooting. If
+  the new image cannot hear the swarm within three minutes it switches the boot
+  partition back and restarts. Done in application code, because the Arduino
+  core does not enable the bootloader's own rollback.
+
+The unit also reaches its safe state *before* the radio goes down — an update is
+a deliberate outage and should release anything being driven, exactly as a lost
+coordinator would.
+
+**Limits worth knowing before you rely on it.** Self-revert covers an image that
+runs but cannot reach the swarm; it does **not** cover one that crashes before
+`ota.begin()`, because nothing is left executing to perform the revert. Test a
+build on a reachable node first. The updater is plain HTTP — HTTPS needs a
+`WiFiClientSecure` and a cert. And a node that includes it grows by roughly
+150 KB, which on a 1.25 MB partition is real: the RangeNode example goes from
+74% to 86% full.
+
 ## Roles
 
 `HW_ROLE_SENSOR / ACTUATOR / BOT / RELAY` allow group addressing without

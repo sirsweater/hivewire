@@ -309,6 +309,7 @@ class HivewireNode {
   void onState(StateCallback cb) { _stateCb = cb; }
   void onSafe(SafeCallback cb)   { _safeCb = cb; }
 
+  uint8_t  id() const { return _id; }
   const uint8_t *state() const { return _state; }
   uint8_t  stateLen() const { return _stateLen; }
   uint32_t epoch() const { return _epoch; }

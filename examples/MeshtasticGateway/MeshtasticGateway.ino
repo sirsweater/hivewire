@@ -68,7 +68,8 @@ static const HwWritableSlot WRITABLE[] = {
   {  3, HW_U8 },     // relay on/off            (BasicNode)
   { 20, HW_U8 },     // deafen to node id, 0=clear   (RangeNode)
   { 21, HW_U16 },    // deafen duration, seconds     (RangeNode)
-  { 22, HW_U8 },     // 1=zero counters 2=reset rssi 3=forget epoch 4=reboot
+  { 22, HW_U8 },     // 1=counters 2=rssi 3=forget epoch 4=reboot 5=OTA
+  { 23, HW_U8 },     // arm OTA for THIS node id (see HivewireOta.h)
 };
 static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 

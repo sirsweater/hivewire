@@ -29,6 +29,7 @@
  */
 
 #include <Hivewire.h>
+#include <HivewireOta.h>
 #include <Preferences.h>
 
 // One firmware, one id per board, chosen at flash time:
@@ -46,7 +47,8 @@
 static const uint8_t NODE_ID = HW_NODE_ID;   // must be unique across the swarm
 
 HivewireNode node;
-Preferences prefs;
+HivewireOta  ota(node);
+Preferences  prefs;
 
 // --- observed --------------------------------------------------------------
 static uint32_t bootCount    = 0;
@@ -79,6 +81,15 @@ static void sDeafTarget(void *o) { uint8_t  v = node.deafTarget(); memcpy(o, &v,
 static void sDeafLeft(void *o)   { uint16_t v = node.deafSecsLeft(); memcpy(o, &v, 2); }
 static void sDeafSecsCfg(void *o){ memcpy(o, &deafenSecs, 2); }
 static void sAction(void *o)     { memcpy(o, &lastAction, 1); }
+static uint8_t otaArm = 0;
+static void sOtaArm(void *o)     { memcpy(o, &otaArm, 1); }
+
+// Arming names ONE node, so a broadcast cannot start an update everywhere at
+// once -- the one mistake this feature could not recover from.
+static void aOtaArm(const void *in) {
+  otaArm = *(const uint8_t *)in;
+  ota.arm(otaArm);
+}
 
 // Seconds since a beacon last arrived -- the most direct range signal there is.
 // It climbs as soon as the link starts dropping packets, long before the node
@@ -122,6 +133,9 @@ static void aAction(const void *in) {
       delay(50);
       ESP.restart();
       break;
+    case 5:                                  // update firmware (must be armed)
+      ota.trigger();
+      break;
   }
 }
 
@@ -145,7 +159,8 @@ static const HwSlotDef SLOTS[] = {
   { 13, HW_U16, HW_DIR_OUT,     15000, 600000,    30,   0,     0, sDeafLeft,    nullptr },
   { 20, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sDeafTarget,  aDeafTarget },
   { 21, HW_U16, HW_DIR_INOUT,       0, 600000,     0,   0,  1800, sDeafSecsCfg, aDeafSecs   },
-  { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,     4, sAction,      aAction     },
+  { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,     5, sAction,      aAction     },
+  { 23, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sOtaArm,      aOtaArm     },
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
@@ -177,18 +192,25 @@ void setup() {
   node.onState(onState);
   node.onSafe(onSafe);
 
+  // An update is a deliberate outage: the node stops hearing the swarm for the
+  // duration, so it must reach the same safe state a lost coordinator would
+  // before the radio goes down.
+  ota.onBeforeUpdate([] { onSafe(); });
+
   if (!node.begin(NODE_ID, HW_ROLE_SENSOR, SLOTS, N_SLOTS)) {
     Serial.println("hivewire: begin failed");
     delay(1000);
     ESP.restart();                  // never sit dead where nobody can reach it
   }
   node.log("boot #%lu", (unsigned long)bootCount);
+  ota.begin();                      // picks up an unconfirmed update, if any
   Serial.printf("RangeNode %u up, boot #%lu, %u slots\n",
                 NODE_ID, (unsigned long)bootCount, N_SLOTS);
 }
 
 void loop() {
   node.loop();
+  ota.loop();
   uint32_t now = millis();
   uint8_t n = node.neighbors();
 
