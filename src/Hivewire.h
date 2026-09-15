@@ -219,6 +219,18 @@ struct HwConfig {
   // Four intervals tolerates three consecutive losses before giving up.
   uint32_t failsafeMs     = 64000;
   uint32_t minTxGapMs     = 2000;   // floor on transmit rate
+  // Say something at least this often even with nothing to report.
+  //
+  // Without it the quietest, healthiest units are the ones that vanish. A node
+  // whose readings are stable crosses no thresholds, so it transmits nothing
+  // and the coordinator marks it stale -- while a node on a marginal link
+  // rattles its readings, reports constantly and looks perfectly present.
+  // Observed exactly that: the near node appeared in 27 digests and the distant
+  // one in 78, and half of all censuses reported a swarm one unit smaller than
+  // it was. Keep this well under the coordinator's staleness window; an empty
+  // status still carries epoch, role, flags and neighbour count, which is
+  // everything "up" and "ok" are computed from.
+  uint32_t statusKeepaliveMs = 45000;
 
   // How many times a status report may be relayed onward. 0 disables relaying
   // entirely, which is right when every unit can hear the coordinator: each
@@ -448,6 +460,11 @@ class HivewireCoordinator {
   // through the callback, one per line, oldest first.
   typedef void (*NodeLogCallback)(uint8_t nodeId, const char *line);
   void requestLog(uint8_t nodeId);
+  // A log request is the only exchange that needs retrying: unlike a beacon,
+  // nothing follows it carrying the same information, so one dropped packet is
+  // simply silence. Retries stop as soon as the node answers.
+  static const uint8_t  LOGREQ_TRIES    = 4;
+  static const uint32_t LOGREQ_RETRY_MS = 1500;
   void onNodeLog(NodeLogCallback cb) { _logCb = cb; }
 
   const uint8_t *state() const { return _state; }
@@ -475,6 +492,11 @@ class HivewireCoordinator {
   HwConfig _cfg;
 
   uint32_t _epoch = 1;
+  void     serviceLogReq(uint32_t now);
+  uint8_t  _logReqTarget = 0;
+  uint8_t  _logReqTries = 0;
+  uint32_t _logReqAt = 0;
+
   uint8_t  _state[HIVEWIRE_MAX_STATE] = {0};
   uint8_t  _stateLen = 0;
   uint8_t  _seq = 0;

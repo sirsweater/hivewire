@@ -369,7 +369,9 @@ void HivewireNode::sendStatus() {
     _st[i].lastReport = now;
     count++;
   }
-  if (!count) return;
+  // Nothing to report is still worth reporting, occasionally -- see
+  // statusKeepaliveMs. Being silent is what makes a healthy node look absent.
+  if (!count && (now - _lastTx) < _cfg.statusKeepaliveMs) return;
 
   hdr->slotCount = count;
   esp_now_send(HW_BCAST, buf, off);
@@ -494,12 +496,22 @@ void HivewireNode::loop() {
 
   // Orphaned, or the state expired: give it up without being told. The library
   // guarantees this fires; what "safe" involves is the application's business.
-  bool expired = _ttl && (now - _adoptedAt > (uint32_t)_ttl * 1000UL);
-  if (_holding && (orphaned() || expired)) {
+  // Evaluate each condition ONCE. Calling orphaned() again to choose the log
+  // message is a race: beacons arrive from the ESP-NOW receive callback, so one
+  // landing between the test and the message turns a beacon-loss failsafe into
+  // a reported "ttl expired". A diagnostic that lies about the only thing it
+  // exists to explain is worse than none -- this one cost a wrong diagnosis
+  // before it was caught. Record the measured gap too, so the next occurrence
+  // can be judged instead of guessed at.
+  bool isOrphan = orphaned();
+  bool expired  = _ttl && (now - _adoptedAt > (uint32_t)_ttl * 1000UL);
+  if (_holding && (isOrphan || expired)) {
     _holding = false;
     _stateLen = 0;
+    if (isOrphan) log("safe: no beacon %lus",
+                      (unsigned long)((now - _lastBeacon) / 1000UL));
+    else          log("safe: ttl %us elapsed", _ttl);
     _ttl = 0;
-    log(orphaned() ? "safe: no coord" : "safe: ttl expired");
     if (_safeCb) _safeCb();
   }
 }
@@ -599,11 +611,36 @@ bool HivewireCoordinator::set(uint8_t targetId, uint8_t targetRole,
   return true;
 }
 
+// Ask, and keep asking until answered.
+//
+// This is the one exchange in the protocol that genuinely needs retrying, and
+// the reason is that it is a REQUEST, not an advertisement. Everything else
+// here converges on its own: a lost beacon is followed by another carrying the
+// same state, so nothing needs to be re-sent. A dropped log request converges
+// on nothing -- it just vanishes, and the operator sees silence that is
+// indistinguishable from a dead node.
+//
+// Measured: on a link healthy enough to carry every beacon, write and status
+// report, a log request still went missing often enough that consecutive
+// fetches returned nothing at all. Diagnostics are rare and on demand, so a
+// handful of extra small packets costs nothing and is the difference between a
+// feature that works and one that works most of the time.
 void HivewireCoordinator::requestLog(uint8_t nodeId) {
+  _logReqTarget = nodeId;
+  _logReqTries  = LOGREQ_TRIES;
+  _logReqAt     = 0;                 // send the first one immediately
+}
+
+void HivewireCoordinator::serviceLogReq(uint32_t now) {
+  if (!_logReqTries || (_logReqAt && (int32_t)(now - _logReqAt) < 0)) return;
+
   HwLogReq rq{};
   rq.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_LOGREQ, _id};
-  rq.targetId = nodeId;
+  rq.targetId = _logReqTarget;
   esp_now_send(HW_BCAST, (uint8_t *)&rq, sizeof(rq));
+
+  _logReqTries--;
+  _logReqAt = now + LOGREQ_RETRY_MS;
 }
 
 void HivewireCoordinator::storeSlot(NodeRec &r, const HwSlotRec &rec,
@@ -668,6 +705,10 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
     const HwBeacon *b = (const HwBeacon *)data;
     if (b->epoch == _epoch && _tCount < 255) _tCount++;
   } else if (h->type == HW_MSG_LOGRSP && len >= (int)sizeof(HwLogRsp)) {
+    // Answered: stop asking. Retries exist only to survive a dropped request,
+    // and the ring arrives as several frames, so this must not stop after the
+    // first one -- it clears the whole retry schedule, not one attempt.
+    if (h->srcId == _logReqTarget) _logReqTries = 0;
     const HwLogRsp *rsp = (const HwLogRsp *)data;
     size_t off = sizeof(HwLogRsp);
     char line[HIVEWIRE_LOG_WIDTH + 1];
@@ -703,5 +744,7 @@ void HivewireCoordinator::census(uint16_t *total, uint16_t *converged,
 }
 
 void HivewireCoordinator::loop() {
-  serviceTrickle(millis());
+  uint32_t now = millis();
+  serviceTrickle(now);
+  serviceLogReq(now);
 }
