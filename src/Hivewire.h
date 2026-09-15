@@ -205,7 +205,19 @@ struct HwConfig {
   uint32_t trickleIminMs  = 500;
   uint32_t trickleImaxMs  = 16000;
   uint8_t  trickleK       = 3;      // suppress once this many neighbours agree
-  uint32_t failsafeMs     = 30000;  // no beacon for this long -> onSafe()
+  // No beacon for this long -> onSafe().
+  //
+  // MUST stay well clear of trickleImaxMs. A converged swarm deliberately goes
+  // quiet: intervals double to trickleImaxMs, so the normal gap between beacons
+  // approaches 16 s even when everything is perfect, and a single lost packet
+  // makes it 32 s. At the old default of 30 s that tripped failsafe on a
+  // healthy network -- observed twice in one hour of soaking, a node dropping
+  // its state and recovering seconds later with nothing actually wrong.
+  //
+  // Spurious failsafe is not a harmless false alarm. It is an actuator
+  // releasing, and on a machine that is the expensive direction to be wrong in.
+  // Four intervals tolerates three consecutive losses before giving up.
+  uint32_t failsafeMs     = 64000;
   uint32_t minTxGapMs     = 2000;   // floor on transmit rate
 
   // How many times a status report may be relayed onward. 0 disables relaying
@@ -346,6 +358,12 @@ class HivewireNode {
   void sendStatus();
   void handleSet(const uint8_t *data, int len);
   void handleLogReq(const uint8_t *data, int len);
+  void serviceLogRsp(uint32_t now);
+  // Small frames survive a marginal link far better than one big one, and the
+  // ring is wanted precisely when the link is marginal.
+  static const uint8_t  LOGRSP_LINES_PER_PKT = 2;
+  static const size_t   LOGRSP_SOFT_MAX      = 96;
+  static const uint32_t LOGRSP_GAP_MS        = 150;
   void maybeRelay(const uint8_t *data, int len);
   void serviceRelay(uint32_t now);
   bool seenBefore(uint8_t src, uint16_t msgId);
@@ -388,6 +406,9 @@ class HivewireNode {
   struct { uint8_t src; uint16_t id; } _seenMsg[RELAY_SEEN];
   uint8_t  _seenHead = 0;
   uint16_t _msgSeq = 0;
+  uint8_t  _logRspLeft = 0;      // ring lines still to send, oldest first
+  uint32_t _logRspAt = 0;
+
   uint8_t  _relayBuf[HIVEWIRE_MAX_PAYLOAD];
   uint16_t _relayLen = 0;
   uint32_t _relayAt = 0;

@@ -65,6 +65,11 @@ extern void (*node_report_callback)(mt_node_t *, mt_nr_progress_t);
 // pb_size has external linkage, so the stall is both observable and clearable.
 extern size_t pb_size;
 
+// The library's raw send. Not in any header, but it has external linkage, and
+// it is the only way to transmit a packet this file builds itself rather than
+// accepting mt_send_text()'s hardcoded want_ack. See send() below.
+extern bool _mt_send_toRadio(meshtastic_ToRadio toRadio);
+
 class MeshtasticUplink : public HivewireUplink {
  public:
   MeshtasticUplink(int8_t rxPin, int8_t txPin, uint8_t channelIndex,
@@ -158,9 +163,37 @@ class MeshtasticUplink : public HivewireUplink {
   // we can transmit without this, but we will never hear anything without it.
   bool sessionUp() const { return _session; }
 
+  // Build the packet here instead of calling mt_send_text(), which hardcodes
+  // want_ack = true even for a broadcast. On a broadcast that is actively
+  // harmful: the node keeps retransmitting until it hears someone rebroadcast,
+  // so every digest goes out TWICE. Observed on the wire -- "Sending
+  // retransmission ... tries left=2" after every single uplink, then "Received
+  // a ACK ... stopping retransmissions". Double airtime, on the one resource
+  // this design is built to be frugal with.
+  //
+  // Nothing is waiting for an acknowledgement of a broadcast telemetry line. If
+  // one is lost the next carries the same state, which is the entire premise of
+  // advertising state rather than commanding it.
   void send(const char *line) override {
     if (!_ready) return;
-    mt_send_text(line, BROADCAST_ADDR, _ch);
+
+    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_default;
+    p.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    p.id       = random(0x7FFFFFFF);
+    p.to       = BROADCAST_ADDR;
+    p.channel  = _ch;
+    p.want_ack = false;
+    p.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+
+    size_t n = strlen(line);
+    if (n > sizeof(p.decoded.payload.bytes)) n = sizeof(p.decoded.payload.bytes);
+    p.decoded.payload.size = n;
+    memcpy(p.decoded.payload.bytes, line, n);
+
+    meshtastic_ToRadio tr = meshtastic_ToRadio_init_default;
+    tr.which_payload_variant = meshtastic_ToRadio_packet_tag;
+    tr.packet = p;
+    _mt_send_toRadio(tr);
   }
 
   void onCommand(CommandCallback cb) override { _cb = cb; }

@@ -117,6 +117,20 @@ bool HivewireNode::begin(uint8_t nodeId, uint8_t role,
   _cfg = cfg;
   memset(_seen, 0, sizeof(_seen));
 
+  // Raising trickleImaxMs without raising failsafeMs re-creates a fault that is
+  // very hard to read from the outside: a converged swarm goes quiet by design,
+  // so the gap between beacons approaches trickleImaxMs even when nothing is
+  // wrong, and one lost packet doubles it. Set the two too close and nodes drop
+  // their state at random on a perfectly healthy network -- which on a machine
+  // means an actuator releasing for no reason. Correct it loudly rather than
+  // honouring a combination that cannot work.
+  if (_cfg.failsafeMs < _cfg.trickleImaxMs * 3) {
+    uint32_t want = _cfg.trickleImaxMs * 4;
+    log("failsafe %lu->%lu (too near trickle)",
+        (unsigned long)_cfg.failsafeMs, (unsigned long)want);
+    _cfg.failsafeMs = want;
+  }
+
   _st = (SlotState *)calloc(slotCount ? slotCount : 1, sizeof(SlotState));
   if (!_st) return false;
 
@@ -139,29 +153,54 @@ void HivewireNode::log(const char *fmt, ...) {
 
 // Replay the ring to whoever asked. Oldest first, packed into one message --
 // the ring is sized so it always fits.
+// Queue the reply rather than sending it here. Two reasons, both learned the
+// hard way: this runs in the ESP-NOW receive callback, where doing real work
+// stalls the radio; and the whole ring in one packet is the largest frame the
+// protocol ever sends -- roughly 190 bytes against a status report's ~110.
+//
+// That size is the problem. A long frame is more likely to be corrupted, and a
+// node at the edge of range is exactly where you most need its history and
+// least likely to get it. Observed: a node at -86 dBm answered every SET and
+// every status for an hour, yet returned its ring zero times out of two, while
+// a closer node returned all 64 lines. Diagnostics are rare and on demand, so
+// spending a few extra small packets to make them actually arrive is the right
+// trade every time.
 void HivewireNode::handleLogReq(const uint8_t *data, int len) {
   if (len < (int)sizeof(HwLogReq)) return;
   const HwLogReq *rq = (const HwLogReq *)data;
   if (rq->targetId != HIVEWIRE_TARGET_ALL && rq->targetId != _id) return;
+  _logRspLeft = _logCount;      // send the whole ring, a little at a time
+  _logRspAt = millis();
+}
+
+void HivewireNode::serviceLogRsp(uint32_t now) {
+  if (!_logRspLeft || (int32_t)(now - _logRspAt) < 0) return;
 
   uint8_t buf[HIVEWIRE_MAX_PAYLOAD];
   HwLogRsp *rsp = (HwLogRsp *)buf;
   rsp->h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_LOGRSP, _id};
 
+  // Oldest first, resuming where the last packet stopped.
+  uint8_t start = (_logHead + HIVEWIRE_LOG_LINES - _logCount) % HIVEWIRE_LOG_LINES;
+  uint8_t from  = _logCount - _logRspLeft;
+
   size_t off = sizeof(HwLogRsp);
   uint8_t n = 0;
-  uint8_t start = (_logHead + HIVEWIRE_LOG_LINES - _logCount) % HIVEWIRE_LOG_LINES;
-  for (uint8_t k = 0; k < _logCount; k++) {
-    const char *e = _log[(start + k) % HIVEWIRE_LOG_LINES];
+  while (_logRspLeft && n < LOGRSP_LINES_PER_PKT) {
+    const char *e = _log[(start + from + n) % HIVEWIRE_LOG_LINES];
     uint8_t elen = (uint8_t)strnlen(e, HIVEWIRE_LOG_WIDTH);
-    if (off + 1 + elen > HIVEWIRE_MAX_PAYLOAD) break;
+    if (off + 1 + elen > LOGRSP_SOFT_MAX) break;
     buf[off++] = elen;
     memcpy(buf + off, e, elen);
     off += elen;
     n++;
+    _logRspLeft--;
   }
+  if (!n) { _logRspLeft = 0; return; }        // a line too long to ever fit
+
   rsp->count = n;
   esp_now_send(HW_BCAST, buf, off);
+  _logRspAt = now + LOGRSP_GAP_MS;            // let the air clear between frames
 }
 
 bool HivewireNode::seenBefore(uint8_t src, uint16_t msgId) {
@@ -451,6 +490,7 @@ void HivewireNode::loop() {
   if (now - _lastTx >= _cfg.minTxGapMs) sendStatus();
   serviceTrickle(now);
   serviceRelay(now);
+  serviceLogRsp(now);
 
   // Orphaned, or the state expired: give it up without being told. The library
   // guarantees this fires; what "safe" involves is the application's business.
