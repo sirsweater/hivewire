@@ -244,10 +244,12 @@ with the node unplugged.
   it will under-suppress.
 - The coordinator allocates a 256-entry node table; shrink it if RAM is tight.
 - A node's slot table fills at `HIVEWIRE_MAX_SLOTS`; further ids are dropped.
-- Status relay (`relayHops`, default 2) is implemented and dedupes on
-  `(node, msgId)`, but has only been exercised with every unit in range of every
-  other. It has not been tested where a node is genuinely reachable only via a
-  relay.
+- Relay has now been exercised where a node really was reachable only through
+  another — a unit on the far side of a house, deafened to the coordinator, so
+  `coordinator → relay → node` was the only path. It adopted two successive
+  epochs it could only have heard via gossip, and its slots kept arriving via
+  the relay; the census held at `up=2 ok=2` throughout. Still only ever **two**
+  hops and three units.
 
 ## License
 
