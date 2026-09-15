@@ -31,7 +31,19 @@
 #include <Hivewire.h>
 #include <Preferences.h>
 
-static const uint8_t NODE_ID = 2;          // unique across the swarm
+// One firmware, one id per board, chosen at flash time:
+//
+//   arduino-cli compile --build-property compiler.cpp.extra_flags=-DHW_NODE_ID=3
+//
+// Use compiler.cpp.extra_flags, NOT build.extra_flags -- the latter REPLACES
+// the core's own flags instead of adding to them, which silently drops
+// ARDUINO_USB_CDC_ON_BOOT and leaves you with a board that boots and prints
+// nothing. Keeping the id out of the source means adding a unit never means
+// editing, and two boards can never end up flashed from divergent copies.
+#ifndef HW_NODE_ID
+#define HW_NODE_ID 2
+#endif
+static const uint8_t NODE_ID = HW_NODE_ID;   // must be unique across the swarm
 
 HivewireNode node;
 Preferences prefs;

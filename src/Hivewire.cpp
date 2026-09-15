@@ -379,6 +379,13 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
   const HwHeader *h = (const HwHeader *)data;
   if (h->magic != HIVEWIRE_MAGIC || h->version != HIVEWIRE_PROTOCOL) return;
 
+  // Our own report, handed back by a neighbour that relayed it. Two reasons to
+  // drop it before anything else looks at it: it would count us as our own
+  // neighbour, inflating every neighbour count by one the moment a relay is in
+  // range; and maybeRelay() would forward it onward again, because the dedup
+  // table only remembers reports we relayed, never the ones we originated.
+  if (h->srcId == _id) return;
+
   // Test filter, checked before anything is recorded: a node we are pretending
   // not to hear must not show up as a neighbour either, or the topology we are
   // trying to force would still be visible in the telemetry.
