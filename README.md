@@ -5,7 +5,10 @@ bridge to a Meshtastic LoRa node.
 
 Verified on ESP32-C6 hardware: `7 passed, 0 failed` from
 [`examples/SelfTest`](examples/SelfTest), which asserts the safety properties
-against live radios rather than in simulation.
+against live radios rather than in simulation, plus an overnight soak driving
+real LoRa and ESP-NOW traffic across a house — several hundred commands, each
+checked against an expectation. That soak found eight bugs the self-test could
+not, every one of which survived short tests and only appeared over hours.
 
 ## The idea
 
@@ -86,6 +89,15 @@ slot exists → is HW_DIR_IN → has an applier
 Nothing partially validated reaches `apply()`, and a bad value is rejected
 rather than coerced. Both refusal paths are covered by the self-test.
 
+**Writes are one-shot.** There is no retry and no acknowledgement: a `set` that
+is lost on the air is simply lost. That is a deliberate consequence of
+advertising state rather than commanding it — a beacon needs no retry because
+the next one carries the same state, but nothing follows a write to carry it
+again. If a write must land, make it a slot the coordinator beacons as state, or
+read the slot back and reissue. The one exception is a log request, which is
+retried until answered, because it is a request whose loss is indistinguishable
+from a dead node.
+
 **This gates logic, not silicon.** It cannot save a pin physically wired to
 something that drives it. Set pin directions once at boot and never change them.
 
@@ -93,8 +105,23 @@ something that drives it. Set pin directions once at boot and never change them.
 
 Units reach safety **on their own**:
 
-- No beacon for `failsafeMs` (default 30 s) → `onSafe()`
+- No beacon for `failsafeMs` (default 64 s) → `onSafe()`
 - State may carry a TTL, after which it expires → `onSafe()`
+
+Two constraints make that work, both learned by soaking rather than reasoning:
+
+**`failsafeMs` must stay well clear of `trickleImaxMs`.** A converged swarm goes
+quiet on purpose, so the normal beacon gap approaches `trickleImaxMs` even when
+everything is healthy, and one lost packet doubles it. The default is four
+intervals; `begin()` corrects a configuration that puts them closer rather than
+honouring one that cannot work.
+
+**The coordinator never suppresses its own beacon.** Trickle's redundancy check
+is right for gossip and wrong for the source: that beacon is the liveness signal
+every failsafe is measured against, so suppressing it makes a swarm fall silent
+*because* it converged, and every unit then drops state for exactly that reason.
+Interval doubling is kept, so a settled swarm still quietens to one beacon per
+`trickleImaxMs`. Quiet, not silent — that distinction is the safety property.
 
 Nothing in the design requires a packet to arrive in order to stop. Packets
 don't arrive; that's the one guarantee radio gives you.
@@ -210,6 +237,21 @@ Things that cost real time, in case they save you some:
   never — and was entirely in software. What separated them was a control test,
   re-running the sketch that had worked rather than reasoning about the one that
   hadn't.
+- **Never compute elapsed time against a value another context can move.**
+  `millis() - _lastBeacon` looks harmless until you notice the timestamp is
+  written from a radio callback. When one lands mid-calculation the subtraction
+  wraps to ~49 days, so a node concluded it had heard nothing for seven weeks at
+  the exact instant a packet proved it alive. Two separate bugs of this shape
+  turned up in one night. Snapshot once, compare **signed**, and treat a
+  negative age as zero.
+- **Fix a lying diagnostic before chasing what it reports.** The failsafe path
+  re-evaluated its condition to choose a log message, so beacon loss was
+  reported as a TTL expiry — for a TTL never set. That cost twenty minutes
+  chasing a phantom. Once it told the truth it printed `no beacon 4294967s`,
+  and the real bug was obvious in seconds.
+- **Soak before believing.** Every bug on this page survived short tests and
+  died in long ones. A three-minute check will confirm almost any broken thing
+  is working.
 
 ### Two defects in Meshtastic-arduino worth knowing about
 
