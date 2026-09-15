@@ -65,7 +65,10 @@ static const size_t   MAX_LINE          = 180;     // Meshtastic caps near 237
 // HW_DIR_IN slots are never published, so the coordinator cannot learn their
 // type from traffic. Declare anything you intend to write.
 static const HwWritableSlot WRITABLE[] = {
-  { 3, HW_U8 },      // relay on/off
+  {  3, HW_U8 },     // relay on/off            (BasicNode)
+  { 20, HW_U8 },     // deafen to node id, 0=clear   (RangeNode)
+  { 21, HW_U16 },    // deafen duration, seconds     (RangeNode)
+  { 22, HW_U8 },     // 1=zero counters 2=reset rssi 3=forget epoch 4=reboot
 };
 static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 

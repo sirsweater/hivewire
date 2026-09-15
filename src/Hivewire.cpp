@@ -53,6 +53,13 @@ static void hwOnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int l
                 len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
                 len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 #endif
+  // Signal strength exists only here, in the driver callback -- by the time a
+  // packet reaches _ingest the radio metadata is gone. Capturing it is what
+  // separates "it converged" from "it converged with 3 dB to spare", which is
+  // the difference that matters when deciding where a unit can live.
+  if (g_node && info && info->rx_ctrl)
+    g_node->_noteRssi((int8_t)info->rx_ctrl->rssi);
+
   if (g_node) g_node->_ingest(data, len);
   if (g_coord) g_coord->_ingest(data, len);
 }
@@ -205,6 +212,47 @@ int HivewireNode::findSlot(uint8_t id) const {
   return -1;
 }
 
+void HivewireNode::_noteRssi(int8_t rssi) {
+  if (!rssi) return;
+  _rssiLast = rssi;
+  // More negative is weaker. Seed on the first reading rather than comparing
+  // against the 0 sentinel, which would look like the strongest signal possible.
+  if (!_rssiWorst || rssi < _rssiWorst) _rssiWorst = rssi;
+}
+
+void HivewireNode::deafenTo(uint8_t srcId, uint16_t secs) {
+  if (!srcId || !secs) {
+    if (_deafId) log("deaf cleared");
+    _deafId = 0;
+    _deafUntil = 0;
+    return;
+  }
+  if (secs > DEAF_MAX_SECS) secs = DEAF_MAX_SECS;
+  _deafId = srcId;
+  _deafUntil = millis() + (uint32_t)secs * 1000;
+  log("deaf to %u for %us", srcId, secs);
+}
+
+uint16_t HivewireNode::deafSecsLeft() const {
+  if (!_deafId || !_deafUntil) return 0;
+  int32_t left = (int32_t)(_deafUntil - millis());
+  return left > 0 ? (uint16_t)(left / 1000) : 0;
+}
+
+uint8_t HivewireNode::deafTarget() const {
+  return deafSecsLeft() ? _deafId : 0;
+}
+
+void HivewireNode::forgetEpoch() {
+  if (!_epoch) return;
+  log("forget ep=%lu", (unsigned long)_epoch);
+  _epoch = 0;
+  _holding = false;
+  _ttl = 0;
+  _stateLen = 0;
+  trickleReset();          // advertise again promptly once something arrives
+}
+
 uint8_t HivewireNode::neighbors() const {
   uint8_t n = 0;
   uint32_t now = millis();
@@ -330,11 +378,18 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
   if (len < (int)sizeof(HwHeader)) return;
   const HwHeader *h = (const HwHeader *)data;
   if (h->magic != HIVEWIRE_MAGIC || h->version != HIVEWIRE_PROTOCOL) return;
+
+  // Test filter, checked before anything is recorded: a node we are pretending
+  // not to hear must not show up as a neighbour either, or the topology we are
+  // trying to force would still be visible in the telemetry.
+  if (h->srcId == _deafId && deafSecsLeft()) return;
+
   _seen[h->srcId] = millis();
 
   if (h->type == HW_MSG_BEACON && len >= (int)sizeof(HwBeacon)) {
     const HwBeacon *b = (const HwBeacon *)data;
     _lastBeacon = millis();
+    _beaconsRx++;
 
     uint8_t plen = b->len;
     if (plen > HIVEWIRE_MAX_STATE) return;                       // malformed

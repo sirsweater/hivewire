@@ -277,12 +277,63 @@ class HivewireNode {
   uint8_t  neighbors() const;
   bool     orphaned() const;
 
+  // Signal strength of received traffic, in dBm. `last` answers "is it
+  // reachable"; `worst` answers "is there any margin", which is the one that
+  // decides whether a placement survives someone shutting a door. 0 = nothing
+  // heard yet.
+  int8_t   lastRssi()  const { return _rssiLast; }
+  int8_t   worstRssi() const { return _rssiWorst; }
+  void     resetRssi() { _rssiLast = 0; _rssiWorst = 0; }
+
+  // Beacons actually received, and how long since the last one. Inferring
+  // these from neighbors() instead measures "a neighbour was visible", which
+  // is a different and much blunter thing -- it cannot see packet loss while
+  // the link is still nominally up, which is the whole edge-of-range signature.
+  uint32_t beaconsRx() const { return _beaconsRx; }
+  uint32_t msSinceBeacon() const {
+    return _lastBeacon ? (millis() - _lastBeacon) : 0;
+  }
+  bool     everHeardBeacon() const { return _lastBeacon != 0; }
+  void     resetBeaconCount() { _beaconsRx = 0; }
+
+  // Test aid: ignore everything from one node, to force a topology on a bench
+  // where every unit can hear every other. Without it multi-hop relay cannot be
+  // exercised indoors at all, because there is never a second hop to take.
+  //
+  // ALWAYS expires, capped, and never persisted across a reboot. A filter that
+  // could outlive its experiment would be able to strand a deployed unit --
+  // deafen a node to the only neighbour that can reach it and the sole remedy
+  // is to walk over and reflash it. Expiry makes the worst case a wait rather
+  // than a trip. Passing id 0 clears it immediately.
+  static const uint16_t DEAF_MAX_SECS = 1800;      // hard 30-minute ceiling
+  void     deafenTo(uint8_t srcId, uint16_t secs);
+  uint8_t  deafTarget() const;
+  uint16_t deafSecsLeft() const;
+
+  // Forget the adopted epoch, so the next beacon of ANY epoch is accepted.
+  //
+  // The escape hatch for the one way a node can be permanently stranded.
+  // Adoption requires a strictly higher epoch, and a coordinator that reboots
+  // restarts its counter at 1. It normally climbs back above the swarm by
+  // reading the epochs nodes report -- but that needs the node's status to
+  // reach it. A node whose status does not get back is deaf to its coordinator
+  // for good, and no packet can fix it, because rejecting the packet is the
+  // bug.
+  //
+  // Policy belongs to the caller, not here. The sane trigger is a node that has
+  // already failed safe and stayed orphaned a long time: it is holding nothing,
+  // so there is no state to lose, and accepting a low epoch is strictly better
+  // than being unreachable. Call it too eagerly and a node will flap between a
+  // live coordinator and a stale one.
+  void forgetEpoch();
+
   // Append to this unit's diagnostic ring. The library records its own
   // transport events here too; applications can add their own.
   void log(const char *fmt, ...);
 
   // Called from the ESP-NOW receive callback; not for application use.
   void _ingest(const uint8_t *data, int len);
+  void _noteRssi(int8_t rssi);
 
  private:
   struct SlotState {
@@ -321,6 +372,11 @@ class HivewireNode {
   bool     _tScheduled = false;
 
   uint32_t _seen[256];
+
+  int8_t   _rssiLast = 0, _rssiWorst = 0;
+  uint32_t _beaconsRx = 0;
+  uint8_t  _deafId = 0;
+  uint32_t _deafUntil = 0;
 
   char    _log[HIVEWIRE_LOG_LINES][HIVEWIRE_LOG_WIDTH];
   uint8_t _logHead = 0;
