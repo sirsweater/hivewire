@@ -200,8 +200,27 @@ struct HwWritableSlot {
 // Tunables
 // ---------------------------------------------------------------------------
 
+// A blind default channel is a real cost, not a formality. Scanning a home
+// network (2026-09) with `arduino-cli` and `WiFi.scanNetworks()` found direct
+// co-channel neighbours sitting on 6 -- the single most common factory default
+// for consumer routers, and exactly why 6 is a bad choice for a low-power
+// broadcast protocol with no MAC-layer retry: collisions on a shared channel
+// are not survived the way a unicast WiFi client's would be. Nine channels
+// nearby were completely silent the same scan. There is no universal right
+// answer -- it depends on the deployment's own neighbours -- so this is a
+// compile-time override, not a changed default: existing swarms keep working
+// exactly as before unless a build explicitly asks otherwise.
+//
+//   --build-property compiler.cpp.extra_flags=-DHW_SWARM_CHANNEL=4
+//
+// Scan your own environment before committing to a deployment; whichever
+// value you choose, every unit in the swarm must use the SAME one.
+#ifndef HW_SWARM_CHANNEL
+#define HW_SWARM_CHANNEL 6
+#endif
+
 struct HwConfig {
-  uint8_t  channel        = 6;      // must match on every unit
+  uint8_t  channel        = HW_SWARM_CHANNEL;   // must match on every unit
   uint32_t trickleIminMs  = 500;
   // A settled swarm beacons this often. It also decides how many chances a node
   // gets to hear ANYTHING before failsafeMs expires, which is the number that

@@ -244,11 +244,21 @@ desync, the receiver's ordinary swarm traffic (beacons, status) continuing
 completely normally through the exact stretch where firmware packets stopped
 arriving. That pattern points at physical RF interference, not software: the
 node nearest the interruptions sat on this PC's USB, a documented broadband
-noise source in the 2.4 GHz band, for the entire test. The retry patience is
-now wide enough (on the order of a minute of tolerance, matched to the
-receiver's own give-up timeout) to outlast an ordinary blackout, but has not yet
-been proven against nodes on independent power and clear of USB-adjacent
-interference — that is the next thing to test, not the next thing to code.
+noise source in the 2.4 GHz band, for the entire test.
+
+That diagnosis was tested, not just inferred: a scan found the swarm's default
+ESP-NOW channel sharing direct co-channel WiFi neighbours, while several
+adjacent channels were completely silent, so a controlled comparison ran the
+same burn suite unchanged except for `HW_SWARM_CHANNEL`. A clear channel
+transferred **no better** than the busy default (roughly the same fraction of
+the image before the receiver went quiet, run to run). WiFi congestion and
+broadband noise are different failure shapes and moving off a busy channel
+only ever fixes the first one, so a result unmoved by that change points more,
+not less, at USB-adjacent noise as the cause. The retry patience is now wide
+enough (on the order of a minute of tolerance, matched to the receiver's own
+give-up timeout) to outlast an ordinary blackout, but has not yet been proven
+against nodes on independent power and clear of USB-adjacent interference —
+that is the next thing to test, not the next thing to code.
 
 ## Roles
 
@@ -351,6 +361,18 @@ Things that cost real time, in case they save you some:
 - **Soak before believing.** Every bug on this page survived short tests and
   died in long ones. A three-minute check will confirm almost any broken thing
   is working.
+- **Scan before trusting a default ESP-NOW channel.** 6 is the library's
+  default and the single most common factory default for consumer WiFi
+  routers, which makes it a bad choice for a broadcast protocol with no
+  MAC-layer retry: a collision on a shared channel is not survived the way a
+  unicast client's would be. `WiFi.scanNetworks()` on one board is enough to
+  see what is actually occupied nearby; `HW_SWARM_CHANNEL` (a compile-time
+  define, every unit must agree) lets you act on it without touching library
+  internals. One caution from testing it: switching to a channel with zero
+  WiFi neighbours did **not** meaningfully change a reliability problem that
+  turned out to be USB-noise-shaped (see the firmware distribution section) --
+  co-channel WiFi congestion and broadband RF noise are different problems,
+  and moving off a busy channel only fixes the first one.
 
 ### Two defects in Meshtastic-arduino worth knowing about
 
