@@ -8,7 +8,11 @@ Verified on ESP32-C6 hardware: `7 passed, 0 failed` from
 against live radios rather than in simulation, plus an overnight soak driving
 real LoRa and ESP-NOW traffic across a house — several hundred commands, each
 checked against an expectation. That soak found eight bugs the self-test could
-not, every one of which survived short tests and only appeared over hours.
+not, every one of which survived short tests and only appeared over hours. A
+separate nine-cycle burn test of firmware distribution (see below) found seven
+more the same way, and proved the one property that matters most for a unit
+nobody can reach: across every single cycle, a node that received a corrupted
+or interrupted image refused it and kept running, with no exceptions.
 
 ## The idea
 
@@ -201,6 +205,50 @@ build on a reachable node first. The updater is plain HTTP — HTTPS needs a
 `WiFiClientSecure` and a cert. And a node that includes it grows by roughly
 150 KB, which on a 1.25 MB partition is real: the RangeNode example goes from
 74% to 86% full.
+
+## Distributing firmware from the hive, with no WiFi on the nodes at all
+
+[`src/HivewireFirmware.h`](src/HivewireFirmware.h) is the other half of the
+update story, and answers a different question than `HivewireOta.h` above: what
+if a node has no WiFi credentials, or no WiFi coverage at all, and the only
+thing with internet access is the hive itself? [`examples/FirmwarePush`](examples/FirmwarePush)
+is a hive that takes an image from **a USB cable and nothing else** — no WiFi,
+no server — and pushes it into the swarm over ESP-NOW, broadcast, so one pass
+updates every node at once rather than one at a time.
+
+The image moves in small windows (12 KB), each verified by NACK before the next
+one starts, so a node needs 12 KB of RAM regardless of image size, and out-of-
+order chunks never have to touch flash out of order. A CRC32 covers the whole
+image; a node that receives a corrupted or incomplete transfer **refuses it and
+keeps running what it already had** rather than boot anything unverified.
+
+**That refusal is the one property proven completely solid.** Across nine
+separate burn-test cycles — a deliberately corrupted image, and a transfer cut
+off mid-flight, both repeated with a fresh build after every fix — the node
+refused or abandoned and kept running **every single time**, with zero
+exceptions: no crash, no boot of a bad image, no bricked unit. That is the
+property that actually matters for a node nobody can walk to, and it held
+throughout, including through several real bugs found and fixed along the way
+(a USB burst overrunning the host's receive path, an end-of-transfer heuristic
+that trusted a single short read instead of cumulative progress, a sender that
+could not tell a truly dead receiver from a temporarily quiet one and reported
+false success, and a failed radio send that could busy-loop instead of backing
+off).
+
+**What is not yet solid: a full ~1.1 MB image completing in one pass under real
+RF conditions.** Every fix measurably improved how far a transfer got before the
+node stopped hearing it, but transfers in the test environment used to build
+this did not yet finish end to end. Live tracing ruled out the library's own
+logic as the remaining cause — heap stable on both ends throughout, no state
+desync, the receiver's ordinary swarm traffic (beacons, status) continuing
+completely normally through the exact stretch where firmware packets stopped
+arriving. That pattern points at physical RF interference, not software: the
+node nearest the interruptions sat on this PC's USB, a documented broadband
+noise source in the 2.4 GHz band, for the entire test. The retry patience is
+now wide enough (on the order of a minute of tolerance, matched to the
+receiver's own give-up timeout) to outlast an ordinary blackout, but has not yet
+been proven against nodes on independent power and clear of USB-adjacent
+interference — that is the next thing to test, not the next thing to code.
 
 ## Roles
 
