@@ -25,6 +25,10 @@
 
 #include <Hivewire.h>
 #include "MeshtasticUplink.h"
+#include <HivewireMultiUplink.h>
+#include <HivewireHttpUplink.h>
+#include <HivewireFirmware.h>
+#include <HivewireHttpFetch.h>
 
 static const uint8_t GATEWAY_ID = 1;
 
@@ -79,6 +83,25 @@ HivewireCoordinator coord;
 // HivewireUplink implementation and nothing below changes.
 MeshtasticUplink gwUplink(LINK_RX_PIN, LINK_TX_PIN, SWARM_CHANNEL, LINK_BAUD);
 
+// LoRa always exists here and needs no configuration to work. The internet
+// uplink is a bonus on top of it, not a replacement -- if HW_NET_SSID is left
+// unset, HivewireHttpUplink::begin() returns false and this gateway is simply
+// LoRa-only, exactly as it was before this uplink existed. Set with:
+//   --build-property 'compiler.cpp.extra_flags=-DHW_NET_SSID="net" -DHW_NET_PASS="pw" -DHW_NET_CMD_URL="http://host/cmd.txt"'
+HivewireHttpUplink netUplink;
+
+// Every command handler below reads from this instead of from gwUplink
+// directly, so a command typed on LoRa and one dropped in the internet
+// uplink's polled file both reach the exact same code path.
+HivewireMultiUplink links;
+
+// Lets a command trigger the hive to pull an image from a URL and push it into
+// the swarm over ESP-NOW -- see the "fetch" command below. Built on the same
+// HivewireFwSender used by the FirmwarePush example; only the Provider (where
+// the bytes come from) differs.
+HivewireFwSender    fwSender(coord);
+HivewireHttpFetcher fetcher;
+
 static uint32_t lastDigest = 0;
 static uint16_t lastFaults = 0xFFFF, lastTotal = 0xFFFF;
 
@@ -111,7 +134,7 @@ static void logf(const char *fmt, ...) {
 
 static void uplink(const char *line) {
   Serial.printf("[uplink ch%u] %s\n", SWARM_CHANNEL, line);
-  gwUplink.send(line);
+  links.send(line);   // replicated to every transport that is currently up
 }
 
 // Dump the ring oldest-first, packed into as few messages as will hold it.
@@ -182,13 +205,21 @@ static void checkTriggers() {
   if (faults != lastFaults || total != lastTotal) sendDigest();
 }
 
-// Commands from the remote operator:
+// Commands from the remote operator, arriving over LoRa, the internet uplink,
+// or both:
 //   mode <n> [param] [ttl]                 posture; reaches every unit
 //   set <all|rN|id> <slot> <value>         write a slot
 //   status                                 force a digest now
 //   log                                    replay the diagnostic ring
+//   fetch <url> <len> <crc32>              pull an image and push it to the
+//                                          swarm over ESP-NOW -- see below
 static void handleCommand(const char *line) {
-  char buf[128];
+  // Wide enough for "fetch <url> <len> <crc32>" -- the other commands never
+  // came close to 128, but a URL can, and truncating one silently would send
+  // fetch() off to a corrupted address rather than refuse it outright. Sized
+  // to Meshtastic's own ceiling (see MAX_LINE above) so nothing this receives
+  // over LoRa could have arrived any longer anyway.
+  char buf[200];
   snprintf(buf, sizeof(buf), "%s", line);
   logf("cmd %.40s", buf);
 
@@ -235,6 +266,34 @@ static void handleCommand(const char *line) {
     } else {
       sendLog();
     }
+  } else if (!strncmp(buf, "fetch", 5)) {
+    // No arm/trigger split here, unlike HivewireOta.h's per-node WiFi pull.
+    // That split exists specifically because a broadcast trigger there would
+    // let ONE command update every node's own WiFi credentials/URL handling
+    // at once with no independent safety net underneath. This path is
+    // different: the hive fetches ONCE, then hands the bytes to the SAME
+    // ESP-NOW distributor proven over nine burn cycles to always refuse a
+    // corrupt or incomplete image and keep every node running its current
+    // firmware. The access control that matters is already in place -- only
+    // someone with the private channel's key can issue any command at all.
+    if (fwSender.active()) {
+      uplink("ERR fetch already in progress");
+    } else {
+      char url[128] = {0};
+      unsigned long len = 0, crc = 0;
+      if (sscanf(buf + 5, "%127s %lu %lu", url, &len, &crc) == 3 && len) {
+        if (fetcher.begin(url)) {
+          fwSender.begin(HIVEWIRE_TARGET_ALL, (uint32_t)len, (uint32_t)crc,
+                         HivewireHttpFetcher::feed);
+          logf("fetch %.30s", url);
+          uplink("fetch started");
+        } else {
+          uplink("ERR fetch: connect failed");
+        }
+      } else {
+        uplink("ERR usage: fetch <url> <len> <crc32>");
+      }
+    }
   }
   // Anything else is ignored in silence -- this channel carries human chat too.
 }
@@ -249,8 +308,14 @@ void setup() {
   }
 
   // The uplink is responsible for rejecting untrusted senders before this
-  // callback is ever reached -- see MeshtasticUplink::onText.
-  gwUplink.onCommand(handleCommand);
+  // callback is ever reached -- see MeshtasticUplink::onText. HivewireHttpUplink
+  // has no equivalent notion of "channel" to police; its own access control is
+  // whatever protects the URL it polls (network reachability, an unguessable
+  // path, HTTP auth if the host in front of it adds one -- Hivewire does not
+  // impose a scheme here).
+  links.add(&gwUplink);
+  links.add(&netUplink);
+  links.onCommand(handleCommand);
   gwUplink.onLog([](const char *m) { logf("%s", m); });
 
   // A node's replayed history arrives a line at a time; relay each one out.
@@ -259,21 +324,30 @@ void setup() {
     snprintf(out, sizeof(out), "N%u | %s", nodeId, line);
     uplink(out);
   });
-  if (!gwUplink.begin()) {
+  // Firmware bytes for the swarm arrive on message types the core does not
+  // define; onRaw() is exactly the escape hatch built for that.
+  coord.onRaw([](const uint8_t *d, int n) { fwSender.ingest(d, n); });
+
+  if (!links.begin()) {
+    // Both transports failed, or neither was configured -- the LoRa path is
+    // the one that must always work, so treat total failure here the same as
+    // the old single-uplink gateway always did.
     Serial.println("hivewire: uplink begin failed");
     ESP.restart();
   }
 
   lastDigest = millis();
   logf("boot ok");
-  Serial.println("hivewire gateway up");
+  Serial.printf("hivewire gateway up (%u/%u uplinks live)\n",
+                links.upCount(), links.linkCount());
 }
 
 void loop() {
   coord.loop();
-  gwUplink.loop();
+  links.loop();
+  fwSender.loop();
 
-  if (gwUplink.ready()) {
+  if (links.ready()) {
     if (millis() - lastDigest > DIGEST_PERIOD_MS) sendDigest();
     checkTriggers();
   }
