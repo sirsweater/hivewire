@@ -270,39 +270,49 @@ currently up. Nothing here tries to pick the "best" uplink — redundancy is the
 whole point, and it is cheap because nothing carried on this channel is bulk
 data.
 
-[`src/HivewireHttpUplink.h`](src/HivewireHttpUplink.h) is a second transport
-for [`examples/MeshtasticGateway`](examples/MeshtasticGateway) alongside LoRa:
-an internet command channel that needs no server software at all — it
-periodically GETs one URL and treats new text there as one command. Any static
-file host works. Leave its credentials unset and it simply never becomes
-ready, so a gateway built without them is exactly the LoRa-only gateway that
-existed before it.
+**The second transport is deliberately not WiFi on the gateway chip itself.**
+The obvious design — give the gateway its own WiFi station connection for
+internet reach — runs straight into a real, documented ESP32 limitation:
+`WiFi.begin()` forces the radio onto the access point's channel, and the
+swarm's ESP-NOW peers are fixed on a different one unless the AP happens to
+match, which is not something to rely on when most routers can change
+channels on their own. The WiFi connection succeeding would silently kill
+ESP-NOW to the swarm. (`src/HivewireHttpUplink.h` and `HivewireHttpFetch.h`
+still exist for the case where that conflict cannot arise — a pure
+LoRa-to-internet relay with no ESP-NOW swarm at all — with the tradeoff
+documented in their own headers.)
+
+[`src/HivewireSerialUplink.h`](src/HivewireSerialUplink.h) sidesteps the
+problem by construction: it is a second uplink fed over the gateway's own USB
+port, from anything with its **own, separate** WiFi hardware — a Raspberry Pi
+is the obvious choice. No shared radio, no conflict. The same header carries
+`HivewireSerialProvider`, the same sub-chunked, byte-exact transfer logic
+`examples/FirmwarePush` already proves, lifted out so the gateway does not
+need its own copy.
 
 That second uplink is what makes a new command possible:
 
 ```
-fetch <url> <len> <crc32>
+push <len> <crc32>
 ```
 
-sent over *either* uplink, tells the hive to connect to `url` and hand the
-response body straight to the same ESP-NOW distributor documented above —
-[`src/HivewireHttpFetch.h`](src/HivewireHttpFetch.h) is a `Provider` reading
-from an HTTP stream instead of a UART, matching the interface exactly. This is
-the concrete shape of "reach the hive from anywhere with a radio, and let it do
-the heavy lifting once it's home": a LoRa command sent from far away, a couple
-dozen bytes, triggers a megabyte download and swarm-wide push that never
-touches the LoRa link at all.
+sent over *either* uplink, arms a transfer; the bytes are then expected over
+the USB link from whatever is plugged in there. This is the concrete shape of
+"reach the hive from anywhere with a radio, and let it do the heavy lifting
+once it's home": a LoRa command sent from far away, a couple dozen bytes, arms
+a push that a Pi (already having fetched the real bytes over its own internet
+connection) then streams down over USB and out to the whole swarm over
+ESP-NOW — none of which ever touches the LoRa link.
 
-**What's verified, and what isn't.** The multi-uplink wrapper introduces no
-regression to the LoRa path — confirmed on hardware, status/mode/ACK all
-round-tripping through it exactly as before any of this existed. The internet
-uplink and the fetch command's download path both compile clean with
-credentials set or unset, and route through the exact same EOF-by-cumulative
--progress and bounded-retry logic already proven against a USB source above —
-but neither has been exercised against a real network and a real URL, because
-neither exists in the environment this was built in. That is a real gap, not a
-formality: test both before trusting `fetch` on a deployment you cannot walk
-to.
+**Verified on hardware**, and specifically because this design needs no
+external credentials to test: the multi-uplink wrapper introduces no
+regression to the LoRa path (status/mode/ACK all round-tripped through it
+exactly as before), and a full push arrived byte-exact over the new USB path —
+the receiving node correctly refused to boot a test blob that was not a valid
+firmware image and stayed running, the command channel resumed correctly the
+moment the transfer ended, and the reply to a status command sent afterward
+came back over **both** transports, `[uplink ch1]` and `[uplink-usb]`, with
+identical content — the multi-uplink replication working exactly as intended.
 
 ## Roles
 

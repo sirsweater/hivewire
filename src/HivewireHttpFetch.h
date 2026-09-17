@@ -23,6 +23,13 @@
 // One instance per sketch, same constraint as every other uplink/provider
 // here: the Provider function pointer has no user-data slot, so the active
 // fetch has to be reached through a static.
+//
+// Same caution as HivewireHttpUplink.h, and for the same underlying reason:
+// this needs an active WiFi station connection to work at all, and that is
+// not compatible with a device also running ESP-NOW for a swarm -- see that
+// header for the documented channel conflict. On a gateway that bridges to a
+// swarm, prefer HivewireSerialProvider (in HivewireSerialUplink.h) instead,
+// fed over USB by something with its own separate WiFi hardware.
 
 #pragma once
 #include <WiFi.h>

@@ -21,6 +21,19 @@
 // simply LoRa-only -- the internet uplink is a bonus, never a requirement.
 // (HivewireMultiUplink already handles one transport failing to begin(); this
 // is that path exercised on purpose.)
+//
+// DO NOT use this on a device that also runs a HivewireCoordinator or
+// HivewireNode over ESP-NOW. WiFi.begin() (station mode) forces the radio
+// onto the access point's channel -- a documented ESP32 limitation, not a
+// guess -- and if the swarm's ESP-NOW peers are fixed on a different channel,
+// which they will be unless the AP happens to match, the WiFi connection
+// succeeding silently kills ESP-NOW to the swarm. examples/MeshtasticGateway
+// hit exactly this and now uses HivewireSerialUplink.h instead, fed by a
+// separate device (a Raspberry Pi, say) with its own WiFi hardware and
+// therefore no shared radio to fight over. This uplink is for a device with
+// no ESP-NOW swarm at all -- a pure LoRa-to-internet relay -- where the
+// conflict cannot arise because there is no second radio user to conflict
+// with.
 
 #pragma once
 #include <Hivewire.h>
