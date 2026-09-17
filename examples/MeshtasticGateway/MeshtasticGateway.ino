@@ -26,9 +26,8 @@
 #include <Hivewire.h>
 #include "MeshtasticUplink.h"
 #include <HivewireMultiUplink.h>
-#include <HivewireHttpUplink.h>
+#include <HivewireSerialUplink.h>
 #include <HivewireFirmware.h>
-#include <HivewireHttpFetch.h>
 
 static const uint8_t GATEWAY_ID = 1;
 
@@ -83,24 +82,32 @@ HivewireCoordinator coord;
 // HivewireUplink implementation and nothing below changes.
 MeshtasticUplink gwUplink(LINK_RX_PIN, LINK_TX_PIN, SWARM_CHANNEL, LINK_BAUD);
 
-// LoRa always exists here and needs no configuration to work. The internet
-// uplink is a bonus on top of it, not a replacement -- if HW_NET_SSID is left
-// unset, HivewireHttpUplink::begin() returns false and this gateway is simply
-// LoRa-only, exactly as it was before this uplink existed. Set with:
-//   --build-property 'compiler.cpp.extra_flags=-DHW_NET_SSID="net" -DHW_NET_PASS="pw" -DHW_NET_CMD_URL="http://host/cmd.txt"'
-HivewireHttpUplink netUplink;
+// LoRa always exists here and needs no configuration to work. The second
+// uplink is deliberately NOT a WiFi one on this chip: this gateway already
+// runs ESP-NOW for the swarm, and WiFi.begin() (station mode) forces the
+// radio onto the access point's channel -- documented ESP32 behaviour, not a
+// guess -- which silently kills ESP-NOW to the swarm the moment it connects,
+// unless the AP happens to sit on the exact same channel the swarm uses.
+// HivewireSerialUplink sidesteps the problem by construction: feed commands
+// (and, via HivewireSerialProvider below, firmware bytes) to this gateway
+// over USB from something with its OWN separate WiFi hardware -- a Raspberry
+// Pi is the obvious choice -- and there is no shared radio to fight over.
+// (HivewireHttpUplink.h still exists for a gateway that does NOT also run
+// ESP-NOW -- a pure LoRa<->internet relay with no swarm -- where this
+// conflict cannot arise; its own header explains the tradeoff.)
+HivewireSerialUplink netUplink;
 
 // Every command handler below reads from this instead of from gwUplink
-// directly, so a command typed on LoRa and one dropped in the internet
-// uplink's polled file both reach the exact same code path.
+// directly, so a command arriving on LoRa and one arriving over the USB link
+// both reach the exact same code path.
 HivewireMultiUplink links;
 
-// Lets a command trigger the hive to pull an image from a URL and push it into
-// the swarm over ESP-NOW -- see the "fetch" command below. Built on the same
+// Lets a command trigger the hive to pull an image and push it into the swarm
+// over ESP-NOW -- see the "push" command below. Built on the same
 // HivewireFwSender used by the FirmwarePush example; only the Provider (where
-// the bytes come from) differs.
-HivewireFwSender    fwSender(coord);
-HivewireHttpFetcher fetcher;
+// the bytes come from) differs, and here it is the USB link itself.
+HivewireFwSender      fwSender(coord);
+HivewireSerialProvider fwBytes;
 
 static uint32_t lastDigest = 0;
 static uint16_t lastFaults = 0xFFFF, lastTotal = 0xFFFF;
@@ -205,20 +212,18 @@ static void checkTriggers() {
   if (faults != lastFaults || total != lastTotal) sendDigest();
 }
 
-// Commands from the remote operator, arriving over LoRa, the internet uplink,
-// or both:
+// Commands from the remote operator, arriving over LoRa, the USB link, or
+// both:
 //   mode <n> [param] [ttl]                 posture; reaches every unit
 //   set <all|rN|id> <slot> <value>         write a slot
 //   status                                 force a digest now
 //   log                                    replay the diagnostic ring
-//   fetch <url> <len> <crc32>              pull an image and push it to the
-//                                          swarm over ESP-NOW -- see below
+//   push <len> <crc32>                     arm a firmware transfer; the bytes
+//                                          come over USB -- see below
 static void handleCommand(const char *line) {
-  // Wide enough for "fetch <url> <len> <crc32>" -- the other commands never
-  // came close to 128, but a URL can, and truncating one silently would send
-  // fetch() off to a corrupted address rather than refuse it outright. Sized
-  // to Meshtastic's own ceiling (see MAX_LINE above) so nothing this receives
-  // over LoRa could have arrived any longer anyway.
+  // Sized to Meshtastic's own ceiling (see MAX_LINE above), comfortably wider
+  // than any command here actually needs -- so nothing this receives over
+  // LoRa could have arrived any longer anyway.
   char buf[200];
   snprintf(buf, sizeof(buf), "%s", line);
   logf("cmd %.40s", buf);
@@ -266,32 +271,41 @@ static void handleCommand(const char *line) {
     } else {
       sendLog();
     }
-  } else if (!strncmp(buf, "fetch", 5)) {
+  } else if (!strncmp(buf, "push", 4)) {
+    // Triggered over LoRa or the internet (whichever reaches this gateway),
+    // but the BYTES only ever come over the USB link to whatever is plugged
+    // in there -- a Raspberry Pi with its own internet access, matching the
+    // architecture note above the uplink declarations. This command just
+    // arms the transfer and announces size/CRC; the Pi is expected to have
+    // already fetched the image and to start streaming it the moment it sees
+    // "READY", using the exact MORE-driven protocol FirmwarePush.ino documents.
+    //
     // No arm/trigger split here, unlike HivewireOta.h's per-node WiFi pull.
     // That split exists specifically because a broadcast trigger there would
     // let ONE command update every node's own WiFi credentials/URL handling
     // at once with no independent safety net underneath. This path is
-    // different: the hive fetches ONCE, then hands the bytes to the SAME
-    // ESP-NOW distributor proven over nine burn cycles to always refuse a
-    // corrupt or incomplete image and keep every node running its current
+    // different: the hive is fed ONCE over USB, then hands the bytes to the
+    // SAME ESP-NOW distributor proven over nine burn cycles to always refuse
+    // a corrupt or incomplete image and keep every node running its current
     // firmware. The access control that matters is already in place -- only
-    // someone with the private channel's key can issue any command at all.
+    // someone with the private channel's key, or access to the USB host,
+    // can issue this at all.
     if (fwSender.active()) {
-      uplink("ERR fetch already in progress");
+      uplink("ERR push already in progress");
     } else {
-      char url[128] = {0};
       unsigned long len = 0, crc = 0;
-      if (sscanf(buf + 5, "%127s %lu %lu", url, &len, &crc) == 3 && len) {
-        if (fetcher.begin(url)) {
-          fwSender.begin(HIVEWIRE_TARGET_ALL, (uint32_t)len, (uint32_t)crc,
-                         HivewireHttpFetcher::feed);
-          logf("fetch %.30s", url);
-          uplink("fetch started");
-        } else {
-          uplink("ERR fetch: connect failed");
-        }
+      if (sscanf(buf + 4, "%lu %lu", &len, &crc) == 2 && len) {
+        // Stop the command-line reader from fighting the byte-transfer reader
+        // over the same Serial stream -- see HivewireSerialUplink.h. Resumed
+        // in loop() the moment fwSender goes inactive again.
+        netUplink.pause();
+        fwBytes.start(len);
+        fwSender.begin(HIVEWIRE_TARGET_ALL, (uint32_t)len, (uint32_t)crc,
+                       HivewireSerialProvider::feed);
+        logf("push %lu b", len);
+        Serial.println("READY");
       } else {
-        uplink("ERR usage: fetch <url> <len> <crc32>");
+        uplink("ERR usage: push <len> <crc32>");
       }
     }
   }
@@ -346,6 +360,14 @@ void loop() {
   coord.loop();
   links.loop();
   fwSender.loop();
+
+  // Resume the command reader the moment the transfer it was paused for ends
+  // -- successfully or not. Tracking the transition (not just "is active")
+  // is what stops this from calling resume() every single iteration; harmless
+  // either way, but the edge is the actual event worth noticing.
+  static bool wasActive = false;
+  if (wasActive && !fwSender.active()) netUplink.resume();
+  wasActive = fwSender.active();
 
   if (links.ready()) {
     if (millis() - lastDigest > DIGEST_PERIOD_MS) sendDigest();
