@@ -260,6 +260,50 @@ give-up timeout) to outlast an ordinary blackout, but has not yet been proven
 against nodes on independent power and clear of USB-adjacent interference —
 that is the next thing to test, not the next thing to code.
 
+## More than one uplink, and telling the hive to fetch something itself
+
+A gateway does not have to depend on exactly one path home.
+[`src/HivewireMultiUplink.h`](src/HivewireMultiUplink.h) combines any number of
+`HivewireUplink` implementations into one: a command is acted on from whichever
+transport delivers it first, and a status line replicates to every transport
+currently up. Nothing here tries to pick the "best" uplink — redundancy is the
+whole point, and it is cheap because nothing carried on this channel is bulk
+data.
+
+[`src/HivewireHttpUplink.h`](src/HivewireHttpUplink.h) is a second transport
+for [`examples/MeshtasticGateway`](examples/MeshtasticGateway) alongside LoRa:
+an internet command channel that needs no server software at all — it
+periodically GETs one URL and treats new text there as one command. Any static
+file host works. Leave its credentials unset and it simply never becomes
+ready, so a gateway built without them is exactly the LoRa-only gateway that
+existed before it.
+
+That second uplink is what makes a new command possible:
+
+```
+fetch <url> <len> <crc32>
+```
+
+sent over *either* uplink, tells the hive to connect to `url` and hand the
+response body straight to the same ESP-NOW distributor documented above —
+[`src/HivewireHttpFetch.h`](src/HivewireHttpFetch.h) is a `Provider` reading
+from an HTTP stream instead of a UART, matching the interface exactly. This is
+the concrete shape of "reach the hive from anywhere with a radio, and let it do
+the heavy lifting once it's home": a LoRa command sent from far away, a couple
+dozen bytes, triggers a megabyte download and swarm-wide push that never
+touches the LoRa link at all.
+
+**What's verified, and what isn't.** The multi-uplink wrapper introduces no
+regression to the LoRa path — confirmed on hardware, status/mode/ACK all
+round-tripping through it exactly as before any of this existed. The internet
+uplink and the fetch command's download path both compile clean with
+credentials set or unset, and route through the exact same EOF-by-cumulative
+-progress and bounded-retry logic already proven against a USB source above —
+but neither has been exercised against a real network and a real URL, because
+neither exists in the environment this was built in. That is a real gap, not a
+formality: test both before trusting `fetch` on a deployment you cannot walk
+to.
+
 ## Roles
 
 `HW_ROLE_SENSOR / ACTUATOR / BOT / RELAY` allow group addressing without
