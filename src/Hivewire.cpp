@@ -484,7 +484,14 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
     handleLogReq(data, len);
   } else if (h->type == HW_MSG_STATUS) {
     maybeRelay(data, len);
+  } else if (_rawCb) {
+    _rawCb(data, len);          // a type the core does not define; see onRaw()
   }
+}
+
+bool HivewireNode::sendRaw(const uint8_t *data, uint16_t len) {
+  if (!data || !len || len > HIVEWIRE_MAX_PAYLOAD) return false;
+  return esp_now_send(HW_BCAST, data, len) == ESP_OK;
 }
 
 void HivewireNode::loop() {
@@ -753,7 +760,14 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
       off += elen;
       if (_logCb) _logCb(h->srcId, line);
     }
+  } else if (_rawCb) {
+    _rawCb(data, len);          // a type the core does not define; see onRaw()
   }
+}
+
+bool HivewireCoordinator::sendRaw(const uint8_t *data, uint16_t len) {
+  if (!data || !len || len > HIVEWIRE_MAX_PAYLOAD) return false;
+  return esp_now_send(HW_BCAST, data, len) == ESP_OK;
 }
 
 bool HivewireCoordinator::fresh(uint8_t id, uint32_t staleMs) const {

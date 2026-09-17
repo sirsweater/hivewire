@@ -368,6 +368,23 @@ class HivewireNode {
   // live coordinator and a stale one.
   void forgetEpoch();
 
+
+// ---------------------------------------------------------------------------
+// Escape hatch for protocols built ON TOP of this one
+//
+// Firmware distribution needs acknowledgement, windowing and retransmission --
+// exactly the machinery this library refuses to carry, because for STATE it is
+// unnecessary and it is where the bugs live. Bulk transfer genuinely needs it,
+// so it lives outside the core and borrows the radio through these two hooks.
+//
+// onRaw() sees packets this library does not recognise, so an add-on can define
+// its own message types without the core knowing they exist. Everything the
+// core DOES understand is handled first and never reaches the callback.
+// ---------------------------------------------------------------------------
+  typedef void (*RawCallback)(const uint8_t *data, int len);
+  void onRaw(RawCallback cb) { _rawCb = cb; }
+  bool sendRaw(const uint8_t *data, uint16_t len);
+
   // Append to this unit's diagnostic ring. The library records its own
   // transport events here too; applications can add their own.
   void log(const char *fmt, ...);
@@ -407,6 +424,7 @@ class HivewireNode {
   HwConfig _cfg;
   StateCallback _stateCb = nullptr;
   SafeCallback  _safeCb = nullptr;
+  RawCallback   _rawCb = nullptr;
 
   uint32_t _epoch = 0, _adoptedAt = 0, _lastTx = 0;
   volatile uint32_t _lastBeacon = 0;   // written from the ESP-NOW callback
@@ -477,6 +495,12 @@ class HivewireCoordinator {
   // Ask a node to replay its diagnostic ring. Entries arrive asynchronously
   // through the callback, one per line, oldest first.
   typedef void (*NodeLogCallback)(uint8_t nodeId, const char *line);
+  uint8_t  id() const { return _id; }
+
+  typedef void (*RawCallback)(const uint8_t *data, int len);
+  void onRaw(RawCallback cb) { _rawCb = cb; }
+  bool sendRaw(const uint8_t *data, uint16_t len);
+
   void requestLog(uint8_t nodeId);
   // A log request is the only exchange that needs retrying: unlike a beacon,
   // nothing follows it carrying the same information, so one dropped packet is
@@ -510,6 +534,7 @@ class HivewireCoordinator {
   HwConfig _cfg;
 
   uint32_t _epoch = 1;
+  RawCallback _rawCb = nullptr;
   void     serviceLogReq(uint32_t now);
   uint8_t  _logReqTarget = 0;
   uint8_t  _logReqTries = 0;

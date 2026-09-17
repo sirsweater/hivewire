@@ -30,6 +30,7 @@
 
 #include <Hivewire.h>
 #include <HivewireOta.h>
+#include <HivewireFirmware.h>
 #include <Preferences.h>
 
 // One firmware, one id per board, chosen at flash time:
@@ -44,10 +45,19 @@
 #ifndef HW_NODE_ID
 #define HW_NODE_ID 2
 #endif
-static const uint8_t NODE_ID = HW_NODE_ID;   // must be unique across the swarm
+// ...but the id itself lives in NVS, not in the image.
+//
+// A hive pushing firmware over ESP-NOW broadcasts ONE image to every node at
+// once. If identity were compiled in, that would hand the whole swarm the same
+// id and every unit would answer to the same commands. So the compile-time
+// value is only a SEED: it is stored on first boot and read from NVS forever
+// after, which means one binary can be pushed to every node and each keeps who
+// it is. Flash a unit once with its id; after that, updates are identity-blind.
+static uint8_t NODE_ID = HW_NODE_ID;
 
 HivewireNode node;
 HivewireOta  ota(node);
+HivewireFwReceiver fw(node);
 Preferences  prefs;
 
 // --- observed --------------------------------------------------------------
@@ -187,6 +197,9 @@ void setup() {
   prefs.begin("rangenode", false);
   bootCount = prefs.getUInt("boots", 0) + 1;
   prefs.putUInt("boots", bootCount);
+  // Seed identity on first boot, then never let an image override it again.
+  if (!prefs.isKey("id")) prefs.putUChar("id", HW_NODE_ID);
+  NODE_ID = prefs.getUChar("id", HW_NODE_ID);
   prefs.end();
 
   node.onState(onState);
@@ -196,6 +209,12 @@ void setup() {
   // duration, so it must reach the same safe state a lost coordinator would
   // before the radio goes down.
   ota.onBeforeUpdate([] { onSafe(); });
+
+  // Firmware pushed from the hive arrives on the raw hook -- message types the
+  // core does not define. Same safety rule as a WiFi update: release whatever
+  // this unit drives before committing to an outage.
+  fw.onBeforeUpdate([] { onSafe(); });
+  node.onRaw([](const uint8_t *d, int n) { fw.ingest(d, n); });
 
   if (!node.begin(NODE_ID, HW_ROLE_SENSOR, SLOTS, N_SLOTS)) {
     Serial.println("hivewire: begin failed");
@@ -211,6 +230,7 @@ void setup() {
 void loop() {
   node.loop();
   ota.loop();
+  fw.loop();
   uint32_t now = millis();
   uint8_t n = node.neighbors();
 
