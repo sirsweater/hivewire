@@ -83,8 +83,18 @@ class HivewireOta {
     Preferences p;
     p.begin(NVS_NS, false);
     bool pending = p.getUChar(NVS_KEY, 0) != 0;
+    uint8_t tries = 0;
+    if (pending) {
+      tries = p.getUChar(NVS_TRIES, 0) + 1;
+      p.putUChar(NVS_TRIES, tries);
+    }
     p.end();
     if (!pending) return;
+    if (tries > MAX_PROVISIONAL_BOOTS) {
+      _node.log("ota: %u provisional boots, reverting", tries - 1);
+      revert();                         // does not return on success
+      return;
+    }
     _confirming = true;
     _confirmBy = millis() + CONFIRM_MS;
     _node.log("ota: new image, verifying");
@@ -94,8 +104,23 @@ class HivewireOta {
     uint32_t now = millis();
 
     if (_confirming) {
-      // Proof the new image works is simple: it can hear the swarm again.
-      if (_node.neighbors() > 0 && !_node.orphaned()) {
+      // Proof the new image works: it can hear the swarm again AND has stayed
+      // up for a while. Hearing a neighbour takes only seconds, so without
+      // the uptime floor an image that crashes a little later got confirmed
+      // first -- clearing the flag -- and then crash-looped forever with the
+      // provisional-boot limit already stood down.
+      //
+      // And it must have adopted the HIVE's state (epoch > 0), not merely be
+      // hearing somebody. Measured: a bad image (wrong channel) pushed to two
+      // nodes put both on the wrong channel TOGETHER. They could hear each
+      // other -- nb=1, beacons climbing from each other's re-advertising,
+      // orph=0 -- so the old check confirmed the broken image after 60s and
+      // neither ever reverted. What gave the island away was ep=0: only the
+      // hive creates an epoch, and freshly booted nodes cut off from it have
+      // none to share. Adopting one proves a path to the hive, directly or
+      // through relays, which a group of equally-broken nodes cannot fake.
+      if (_node.neighbors() > 0 && !_node.orphaned() && _node.epoch() > 0 &&
+          now >= CONFIRM_STABLE_MS) {
         clearPending();
         _confirming = false;
         _node.log("ota: image confirmed");
@@ -137,18 +162,39 @@ class HivewireOta {
 
   bool updating() const { return _pending || _confirming; }
 
+  // Make the NEXT boot provisional, whatever installed the image. The WiFi
+  // path above calls this itself; an image that arrived some other way --
+  // pushed over ESP-NOW by the hive or by a peer (HivewireFwReceiver) -- must
+  // call it too, right before rebooting, or it skips the confirm-or-revert
+  // check entirely. Without it, a pushed image that boots but cannot hear the
+  // swarm leaves that node unreachable for good; with node-to-node seeding, it
+  // would carry every node it reached along with it.
+  void markPending() { setPending(); }
+
  private:
   static const uint32_t ARM_WINDOW_MS = 120000;   // 2 min to follow through
   static const uint32_t CONFIRM_MS    = 180000;   // 3 min to rejoin, or revert
+  static const uint32_t CONFIRM_STABLE_MS = 60000; // and stay up this long first
   static const uint32_t WIFI_WAIT_MS  = 20000;
+  // Provisional boots allowed before giving up on the new image. The confirm
+  // window only catches an image that boots and stays up deaf; one that
+  // crashes shortly after boot restarts before the window ends, lands back on
+  // the same image, and would loop forever. Counting provisional boots is
+  // what catches that.
+  static const uint8_t  MAX_PROVISIONAL_BOOTS = 3;
   static constexpr const char *NVS_NS  = "hwota";
   static constexpr const char *NVS_KEY = "pend";
+  static constexpr const char *NVS_TRIES = "tries";
 
   void setPending() {
-    Preferences p; p.begin(NVS_NS, false); p.putUChar(NVS_KEY, 1); p.end();
+    Preferences p; p.begin(NVS_NS, false);
+    p.putUChar(NVS_KEY, 1); p.putUChar(NVS_TRIES, 0);
+    p.end();
   }
   void clearPending() {
-    Preferences p; p.begin(NVS_NS, false); p.putUChar(NVS_KEY, 0); p.end();
+    Preferences p; p.begin(NVS_NS, false);
+    p.putUChar(NVS_KEY, 0); p.putUChar(NVS_TRIES, 0);
+    p.end();
   }
 
   // Boot the partition we came from. After a successful update the running

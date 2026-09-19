@@ -110,6 +110,12 @@ static void aOtaArm(const void *in) {
 // runs inside the ESP-NOW receive callback, so it only RECORDS the request:
 // measuring the image means reading ~1MB of flash twice, which must never
 // happen on the WiFi task. loop() serves it.
+// CRC of the image this node is running, measured once at boot. Published so
+// the hive's `status` shows which firmware every node is on -- and so an
+// update, or a revert, can be confirmed from outside rather than assumed.
+static uint32_t runningCrc = 0;
+static void sFwCrc(void *o) { memcpy(o, &runningCrc, 4); }
+
 static uint8_t seedTarget = 0;
 static volatile int16_t seedWanted = -1;
 static void sSeed(void *o) { memcpy(o, &seedTarget, 1); }
@@ -189,6 +195,7 @@ static const HwSlotDef SLOTS[] = {
   { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,     5, sAction,      aAction     },
   { 23, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sOtaArm,      aOtaArm     },
   { 24, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sSeed,        aSeed       },
+  { 25, HW_U32, HW_DIR_OUT,    600000, 900000,     1,   0,     0, sFwCrc,       nullptr     },
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
@@ -246,6 +253,16 @@ void setup() {
   }
   node.log("boot #%lu", (unsigned long)bootCount);
   ota.begin();                      // picks up an unconfirmed update, if any
+
+  // Know what we are running: lets the receiver decline an identical image,
+  // and publishes it (slot 25). Reads the image once; done here, not later.
+  if (flashSrc.begin()) {
+    runningCrc = flashSrc.crc();
+    fw.setRunningImage(flashSrc.length(), runningCrc);
+  }
+  // An image pushed over ESP-NOW must prove itself like a WiFi one: the next
+  // boot is provisional, and it reverts unless it rejoins the swarm.
+  fw.onApplied([] { ota.markPending(); });
   Serial.printf("RangeNode %u up, boot #%lu, %u slots\n",
                 NODE_ID, (unsigned long)bootCount, N_SLOTS);
 }
@@ -264,6 +281,10 @@ void loop() {
       node.log("fw: seed refused, busy");
     } else if (v == NODE_ID) {
       node.log("fw: seed refused, self");
+    } else if (ota.updating()) {
+      // Our own image has not yet proven it can rejoin the swarm. Spreading
+      // it now could carry a bad image to peers before it reverts here.
+      node.log("fw: seed refused, image unconfirmed");
     } else if (!flashSrc.begin()) {
       node.log("fw: seed refused, image unverified");   // never spread what fails verify
     } else if (fwTx.begin(target, flashSrc.length(), flashSrc.crc(), HivewireFlashProvider::feed)) {
@@ -279,6 +300,13 @@ void loop() {
 
   uint32_t now = millis();
   uint8_t n = node.neighbors();
+
+#ifdef HW_TEST_CRASH_AFTER_MS
+  // TEST ONLY, never in a real build: an image that boots and then crashes,
+  // to burn-test HivewireOta's provisional-boot limit (a crash-looping image
+  // must revert, not loop forever).
+  if (now > HW_TEST_CRASH_AFTER_MS) abort();
+#endif
 
   // Deep recovery, and only after the node has already failed safe: it holds
   // nothing at that point, so accepting a lower epoch loses nothing.

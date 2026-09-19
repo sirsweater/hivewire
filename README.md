@@ -190,17 +190,20 @@ Two gates, both there to prevent the failure that cannot be undone remotely:
   A broadcast arm only matches the node it names, so `set all 22 5` cannot brick
   a whole swarm at once. The arm expires on its own.
 - **Self-revert.** The node records "updated, unconfirmed" before rebooting. If
-  the new image cannot hear the swarm within three minutes it switches the boot
-  partition back and restarts. Done in application code, because the Arduino
-  core does not enable the bootloader's own rollback.
+  the new image has not rejoined the hive within three minutes it switches the
+  boot partition back and restarts. Done in application code, because the
+  Arduino core does not enable the bootloader's own rollback. See
+  [the safety net](#the-safety-net-under-every-update) for exactly what counts
+  as rejoining; it applies to every install path, not just WiFi.
 
 The unit also reaches its safe state *before* the radio goes down — an update is
 a deliberate outage and should release anything being driven, exactly as a lost
 coordinator would.
 
 **Limits worth knowing before you rely on it.** Self-revert covers an image that
-runs but cannot reach the swarm; it does **not** cover one that crashes before
-`ota.begin()`, because nothing is left executing to perform the revert. Test a
+runs but cannot reach the hive, and one that crash-loops after `ota.begin()`; it
+does **not** cover one that crashes *before* `ota.begin()`, because nothing is
+left executing to perform the revert. Test a
 build on a reachable node first. The updater is plain HTTP — HTTPS needs a
 `WiFiClientSecure` and a cert. And a node that includes it grows by roughly
 150 KB, which on a 1.25 MB partition is real: the RangeNode example goes from
@@ -246,7 +249,7 @@ transfers that never finished. That was wrong, and how it was wrong is worth
 keeping.** Every observation fit an RF story — transfers dying at random
 points, one node at a time, while ordinary swarm traffic carried on normally —
 and a controlled channel change even "confirmed" it by improving nothing.
-Instrumenting further found three software bugs, none of them radio:
+Instrumenting further found software bugs, none of them radio:
 
 1. **The host overran the gateway's USB receive FIFO.** Answering each `MORE`
    with one 1024-byte write overflows the ESP32-C6's 64-byte USB Serial/JTAG
@@ -271,6 +274,13 @@ Instrumenting further found three software bugs, none of them radio:
    image at the end. The sender now tracks its audience — every node that has
    ever answered must answer each window — and receivers jitter their replies
    so they rarely collide at all (lost replies fell from 31 to 1 per transfer).
+4. **A slow member was dropped after about a second.** Found later, by the
+   rollback test below: the audience rule gave up on a silent member after four
+   polls 300 ms apart, and a dropped member loses the whole update, because it
+   cannot rejoin a window it missed. One node went quiet for ~1.1 s at a time,
+   eight times in a single push, and ended short while its neighbour updated.
+   The sender now keeps asking a known member for 5 s of silence before
+   dropping it.
 
 The USB link between host and gateway is now self-healing rather than merely
 careful: each subchunk is requested as `MORE <offset> <len>` and answered with
@@ -308,10 +318,46 @@ start a second seed while one is running, will not accept an update while it is
 sending one (applying it would reboot it mid-transfer), and a seed aimed at a
 node that does not exist gives up cleanly with nothing rebooted.
 
-**Not yet done:** seeding is triggered by command, not automatic, and a node
-will re-flash an image identical to the one it already runs. Hop-by-hop spread
-beyond the hive's range works mechanically but has not been tested with nodes
-physically out of the hive's reach.
+A node declines an image identical to the one it runs (`fw: already running
+<crc>` in its ring) instead of rebooting into the same bytes, and a node running
+an image it has not yet confirmed refuses to seed it onward: a bad build can
+only travel once it has proved itself.
+
+**Not yet done:** seeding is triggered by command, not automatic. Hop-by-hop
+spread beyond the hive's range works mechanically but has not been tested with
+nodes physically out of the hive's reach.
+
+## The safety net under every update
+
+Whatever installed the image — WiFi, a push from the hive, a seed from a peer —
+the receiver calls `ota.markPending()` before rebooting, so the next boot is
+provisional. [`HivewireOta`](src/HivewireOta.h) then gives the new image two
+ways to fail:
+
+- **It never rejoins the hive** within three minutes: switch back to the
+  previous partition and restart.
+- **It keeps crashing.** A provisional boot is counted in NVS; on the fourth, it
+  reverts without waiting. The three-minute window alone would never fire for an
+  image that dies after 20 s — it restarts into the same image forever.
+
+To confirm, the image must stay up 60 s **and** have adopted the hive's epoch,
+not merely hear a neighbour. That second condition came from a failed test: a
+wrong-channel image pushed to two nodes put them on the wrong channel
+*together*. They heard each other (`nb=1`, not orphaned) and the old check
+confirmed the broken build on both. Only the hive creates an epoch, so nodes
+cut off from it — however many — cannot supply one.
+
+Burn-tested on two nodes, each step checked against the node's own boot counter
+and the CRC it reports of its running partition:
+
+| Case | Result |
+|---|---|
+| Good image | applies, confirms, +1 boot |
+| Identical image | declined, no reboot |
+| Wrong-channel ("deaf") image | applies, then reverts on its own: +2 boots, back on the old CRC |
+| Image that aborts 20 s after boot | loops 3 times, reverts: +5 boots, back on the old CRC |
+| Seed of the image a peer already runs | declined, no reboot on either side |
+| Push cut off at 160 KB | rejected as short, old image untouched |
 
 ## More than one uplink, and telling the hive to fetch something itself
 

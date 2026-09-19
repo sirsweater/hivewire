@@ -124,6 +124,17 @@ class HivewireFwReceiver {
   // losing the coordinator.
   void onBeforeUpdate(BeforeCallback cb) { _before = cb; }
 
+  // Fires after the new image has verified and been committed, immediately
+  // before the reboot into it. Hook HivewireOta::markPending() here so the new
+  // image has to prove itself (rejoin the swarm) or be reverted -- see there.
+  void onApplied(BeforeCallback cb) { _applied = cb; }
+
+  // What this node is running now (HivewireFlashProvider measures it). An
+  // offer of the same image is declined: re-flashing it gains nothing, costs a
+  // reboot, and once nodes pass images on by themselves, accepting identical
+  // copies would reboot the swarm around in circles.
+  void setRunningImage(uint32_t len, uint32_t crc) { _runLen = len; _runCrc = crc; }
+
   bool active() const { return _active; }
 
   // Call from the sketch's onRaw handler.
@@ -215,6 +226,12 @@ class HivewireFwReceiver {
     const HwFwBegin *b = (const HwFwBegin *)data;
     if (b->targetId != HIVEWIRE_TARGET_ALL && b->targetId != _node.id()) return;
     if (_active) return;                       // already receiving this one
+    if (_runLen && b->imageLen == _runLen && b->imageCrc == _runCrc) {
+      // Log once per offer, not once per repeat of the BEGIN burst.
+      if (millis() - _declinedAt > 5000) _node.log("fw: already running %08lx", (unsigned long)_runCrc);
+      _declinedAt = millis();
+      return;
+    }
 
     if (_before) _before();
     if (!Update.begin(b->imageLen)) {
@@ -375,6 +392,7 @@ class HivewireFwReceiver {
     }
     _node.log("fw: ok, rebooting");
     _active = false;
+    if (_applied) _applied();          // e.g. make the next boot provisional
     delay(150);
     ESP.restart();
   }
@@ -402,6 +420,8 @@ class HivewireFwReceiver {
 
   HivewireNode &_node;
   BeforeCallback _before = nullptr;
+  BeforeCallback _applied = nullptr;
+  uint32_t _runLen = 0, _runCrc = 0, _declinedAt = 0;
   bool     _active = false;
   uint32_t _imageLen = 0, _imageCrc = 0, _crc = 0, _written = 0;
   // Written by the receive callback, read by loop(): volatile so the read in
@@ -627,13 +647,23 @@ class HivewireFwSenderT {
         // from 28 of 93 windows (node 3 never once), and whenever one of
         // those windows had holes node 2 was left with them for good and
         // refused the image at the end as "fw: short" -- 1 applied run in 4.
-        if (heardAny && missing && _pollTries < MAX_POLL_TRIES) {
+        //
+        // How long to keep asking is measured in TIME, not tries. It was four
+        // tries at 300ms: a member silent for just over a second got dropped,
+        // and a dropped member loses the whole update -- it cannot rejoin a
+        // window it missed. Measured: node 2 went quiet for ~1.1s at a time,
+        // eight times in one 1.1 MB push (its late answer to w=17 landed 0ms
+        // after the wait closed), ended "fw: short" and stayed on the old
+        // image while node 3 updated -- 2 of 6 rollback steps. A node that is
+        // really gone costs MEMBER_PATIENCE_MS once; one that is merely slow
+        // is worth far more than that.
+        if (heardAny && missing && millis() - _roundAt < MEMBER_PATIENCE_MS) {
           _memberRetry = true;
           pollRetry();                      // keeps _nack and _heard: banked answers survive
           return;
         }
         if (heardAny && missing) {
-          // Still silent after every retry: this member is unreachable, not
+          // Still silent for MEMBER_PATIENCE_MS: this member is unreachable, not
           // slow. Stop waiting on it so the rest of the swarm is not held
           // hostage -- it will end short and refuse the image, which is the
           // safe outcome -- but say so, rather than lose it silently.
@@ -731,6 +761,7 @@ class HivewireFwSenderT {
   static const uint32_t DEAD_RETRY_WAIT_MS = 1000;  // longer wait once nobody has answered at all
   static const uint8_t  MAX_ROUNDS     = 6;
   static const uint8_t  MAX_POLL_TRIES = 4;     // retries when NOBODY answers
+  static const uint32_t MEMBER_PATIENCE_MS = 5000;  // a known member's silence, before dropping it
   // Consecutive fully-silent windows tolerated before concluding the receiver
   // is truly gone, rather than just quiet for a while.
   //
@@ -782,6 +813,7 @@ class HivewireFwSenderT {
     memset(_heard, 0, sizeof(_heard));   // a new round: everyone must answer again
     _memberRetry = false;
     _pollTries = 0;
+    _roundAt = millis();
     sendPoll();
   }
 
@@ -845,6 +877,7 @@ class HivewireFwSenderT {
   uint8_t  _aud[32];        // node ids that have answered during this transfer
   uint8_t  _heard[32];      // node ids that answered in the current round
   bool     _memberRetry = false;
+  uint32_t _roundAt = 0;    // when this verification round's first poll went out
   uint8_t  _buf[HW_FW_WINDOW_BYTES];
 };
 
