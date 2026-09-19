@@ -295,8 +295,14 @@ void HivewireNode::forgetEpoch() {
 uint8_t HivewireNode::neighbors() const {
   uint8_t n = 0;
   uint32_t now = millis();
-  for (int i = 0; i < 256; i++)
-    if (_seen[i] && now - _seen[i] < 60000) n++;
+  for (int i = 0; i < 256; i++) {
+    // Same trap as beaconAgeMs() below: _seen[] is stamped by the receive
+    // callback, so an entry can be newer than `now`. Unsigned, that wraps to
+    // ~49 days and drops a neighbour heard this very instant. Signed, a
+    // negative age reads correctly as "just now".
+    uint32_t s = _seen[i];
+    if (s && (int32_t)(now - s) < 60000) n++;
+  }
   return n;
 }
 
@@ -772,7 +778,11 @@ bool HivewireCoordinator::sendRaw(const uint8_t *data, uint16_t len) {
 
 bool HivewireCoordinator::fresh(uint8_t id, uint32_t staleMs) const {
   const NodeRec &r = _nodes[id];
-  return r.seen && (millis() - r.lastHeard) <= staleMs;
+  // lastHeard is stamped by the receive callback and can land after millis()
+  // is read; unsigned, that wrap would report a node heard this instant as
+  // stale, and a spurious stale node is a spurious fault in the LoRa digest.
+  uint32_t heard = r.lastHeard;
+  return r.seen && (int32_t)(millis() - heard) <= (int32_t)staleMs;
 }
 
 void HivewireCoordinator::census(uint16_t *total, uint16_t *converged,

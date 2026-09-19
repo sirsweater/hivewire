@@ -38,6 +38,9 @@
 #pragma once
 #include <Hivewire.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <esp_image_format.h>
 
 // Temporary: -DHW_FW_DEBUG=1 prints transfer mechanics to Serial. The ring
 // records outcomes; this records how it got there.
@@ -127,6 +130,9 @@ class HivewireFwReceiver {
   void ingest(const uint8_t *data, int len) {
     if (len < (int)sizeof(HwHeader)) return;
     const HwHeader *h = (const HwHeader *)data;
+#if HW_FW_DEBUG
+    _dIn++;
+#endif
 
     switch (h->type) {
       case HW_MSG_FW_BEGIN: onBegin(data, len); break;
@@ -139,6 +145,23 @@ class HivewireFwReceiver {
   }
 
   void loop() {
+#if HW_FW_DEBUG
+    uint32_t dLastRx = _lastRx;   // same read-order rule as the stall check below
+    if (millis() - _dLastPrint >= 1000 && (_active || (int32_t)(millis() - dLastRx) < 120000) && _dIn) {
+      _dLastPrint = millis();
+      Serial.printf("[fwrx] act=%d w=%u flushTo=%u in=%lu inact=%lu acc=%lu fut=%lu "
+                    "stale=%lu dup=%lu poll=%lu next=%lu\n",
+                    _active, _window, _flushTo, (unsigned long)_dIn,
+                    (unsigned long)_dInactive, (unsigned long)_dAcc,
+                    (unsigned long)_dFut, (unsigned long)_dStale,
+                    (unsigned long)_dDup, (unsigned long)_dPoll,
+                    (unsigned long)_dNext);
+    }
+#endif
+    if (_replyPending && (int32_t)(millis() - _replyAt) >= 0) {
+      _replyPending = false;
+      sendReply();
+    }
     // ALL flash writing happens HERE, never in the receive callback.
     // Update.write() blocks for milliseconds and the radio drops whatever
     // arrives meanwhile, so writing from the callback loses the packets behind
@@ -154,7 +177,20 @@ class HivewireFwReceiver {
 
     // A transfer that stops mid-flight must not leave the node wedged with a
     // half-written partition and no way back. Give up, tidy, carry on.
-    if (_active && millis() - _lastRx > STALL_MS) {
+    // Snapshot the timestamp BEFORE reading the clock. _lastRx is written by
+    // the ESP-NOW receive callback, which can preempt loop() between the two
+    // reads. Written the obvious way -- millis() - _lastRx -- a packet landing
+    // just after the millis() read, on the next tick, stamps _lastRx one past
+    // the clock value already in hand, and the unsigned subtraction wraps to
+    // ~4.29e9 ms: "stalled for 49 days", abandoned on the spot. Measured: both
+    // nodes logged "fw: stalled, abandoned" ~20s into a transfer (STALL_MS is
+    // 90s) while receiving packets every few milliseconds, and a per-packet
+    // counter showed every later packet still arriving and being dropped as
+    // inactive. It struck each node at a random moment, which is exactly why
+    // transfers died at random windows, one node at a time, with a perfect
+    // radio link. Same trap as the beacon-age underflow fixed in the core.
+    uint32_t lastRx = _lastRx;
+    if (_active && (int32_t)(millis() - lastRx) > (int32_t)STALL_MS) {
       _node.log("fw: stalled, abandoned");
       Update.abort();
       _active = false;
@@ -200,6 +236,9 @@ class HivewireFwReceiver {
   }
 
   void onChunk(const uint8_t *data, int len) {
+#if HW_FW_DEBUG
+    if (!_active) _dInactive++;
+#endif
     if (!_active || len < (int)sizeof(HwFwChunk)) return;
     const HwFwChunk *c = (const HwFwChunk *)data;
 
@@ -209,8 +248,9 @@ class HivewireFwReceiver {
     _lastRx = millis();
 
     if (c->window < _window) {
-      FWDBG("[fw] STALE chunk w=%u but we are on %u (flushTo=%u)\n",
-            c->window, _window, _flushTo);
+#if HW_FW_DEBUG
+      _dStale++;
+#endif
       return;                                             // stale, already past it
     }
     // Do NOT write flash here. This runs in the ESP-NOW receive callback, and
@@ -218,7 +258,12 @@ class HivewireFwReceiver {
     // drop the packets arriving behind it, which is a loss that then needs
     // repairing, during which more flash writes happen. Defer to loop() and
     // let this chunk be repaired; the NACK machinery already exists for it.
-    if (c->window > _window) { _flushTo = c->window; return; }
+    if (c->window > _window) {
+#if HW_FW_DEBUG
+      _dFut++;
+#endif
+      _flushTo = c->window; return;
+    }
     // The hive moved on and we did not: FOLLOW IT. FW_NEXT is sent once and
     // unacknowledged, so losing that single packet used to strand a node on a
     // window nothing would ever match again -- every later chunk rejected,
@@ -230,7 +275,15 @@ class HivewireFwReceiver {
     if (len < (int)sizeof(HwFwChunk) + c->len) return;  // truncated
 
     _lastRx = millis();
-    if (_have[c->index >> 3] & (1 << (c->index & 7))) return;   // already had it
+    if (_have[c->index >> 3] & (1 << (c->index & 7))) {         // already had it
+#if HW_FW_DEBUG
+      _dDup++;
+#endif
+      return;
+    }
+#if HW_FW_DEBUG
+    _dAcc++;
+#endif
     memcpy(_buf + (uint32_t)c->index * HW_FW_CHUNK_DATA,
            data + sizeof(HwFwChunk), c->len);
     _len[c->index] = c->len;
@@ -238,6 +291,9 @@ class HivewireFwReceiver {
   }
 
   void onPoll(const uint8_t *data, int len) {
+#if HW_FW_DEBUG
+    if (!_active) _dInactive++; else _dPoll++;
+#endif
     if (!_active || len < (int)sizeof(HwFwPoll)) return;
     const HwFwPoll *p = (const HwFwPoll *)data;
     _lastRx = millis();
@@ -248,26 +304,45 @@ class HivewireFwReceiver {
     }
     if (p->window > _window) { _flushTo = p->window; return; }   // catch up first
 
+    // Answer from loop(), after a random delay -- NOT here, instantly. Every
+    // node hears the same poll at the same moment, so instant replies all
+    // leave together and collide; the strongest survives and the rest are
+    // simply gone. Measured: one node's replies were lost in 28 of 93 windows
+    // this way. Spreading replies over REPLY_JITTER_MS (well inside the
+    // sender's POLL_WAIT_MS) makes collisions rare; the sender's audience
+    // check (see HivewireFwSender WAIT) makes the ones that remain harmless.
+    // Set the pending flag LAST: loop() reads it first, then the fields.
+    _replyWindow   = p->window;
+    _replyExpected = p->expected;
+    _replyAt       = millis() + (esp_random() % REPLY_JITTER_MS);
+    _replyPending  = true;
+  }
+
+  void sendReply() {
+    uint16_t w = _replyWindow;
+    uint8_t expected = _replyExpected;
+    if (!_active || w != _window) return;   // moved on meanwhile; answer the next poll
     HwFwNack n{};
     n.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_FW_NACK, _node.id()};
     n.window = _window;
     uint8_t miss = 0;
-    bool missing = false;
-    for (uint8_t i = 0; i < p->expected; i++) {
+    for (uint8_t i = 0; i < expected; i++) {
       if (!(_have[i >> 3] & (1 << (i & 7)))) {
         n.bitmap[i >> 3] |= (1 << (i & 7));
-        missing = true; miss++;
+        miss++;
       }
     }
     // Answer either way. Silence is ambiguous -- the hive cannot tell a node
     // that has everything from one that has gone away, and it must not advance
     // the window while somebody is still behind.
-    (void)missing;
-    FWDBG("[fw] poll w=%u expect=%u missing=%u\n", p->window, p->expected, miss);
+    FWDBG("[fw] poll w=%u expect=%u missing=%u\n", w, expected, miss);
     _node.sendRaw((const uint8_t *)&n, sizeof(n));
   }
 
   void onNext(const uint8_t *data, int len) {
+#if HW_FW_DEBUG
+    _dNext++;
+#endif
     if (!_active || len < (int)sizeof(HwFwSimple)) return;
     const HwFwSimple *s = (const HwFwSimple *)data;
     _lastRx = millis();
@@ -328,12 +403,33 @@ class HivewireFwReceiver {
   HivewireNode &_node;
   BeforeCallback _before = nullptr;
   bool     _active = false;
-  uint32_t _imageLen = 0, _imageCrc = 0, _crc = 0, _written = 0, _lastRx = 0;
+  uint32_t _imageLen = 0, _imageCrc = 0, _crc = 0, _written = 0;
+  // Written by the receive callback, read by loop(): volatile so the read in
+  // the stall check is a real load at the point the code says, not one the
+  // compiler has moved or cached.
+  volatile uint32_t _lastRx = 0;
   uint16_t _windows = 0, _window = 0, _flushTo = 0;
+  // Deferred, jittered poll reply (see onPoll). Written in the receive
+  // callback, consumed by loop().
+  static const uint32_t REPLY_JITTER_MS = 150;
+  volatile bool     _replyPending = false;
+  volatile uint16_t _replyWindow = 0;
+  volatile uint8_t  _replyExpected = 0;
+  volatile uint32_t _replyAt = 0;
   bool     _endWanted = false;
   uint8_t  _have[HW_FW_WINDOW / 8];
   uint8_t  _len[HW_FW_WINDOW];
   uint8_t  _buf[HW_FW_WINDOW_BYTES];
+#if HW_FW_DEBUG
+  // Per-packet accounting, bumped in the receive callback and printed only
+  // from loop(). Printing from the callback would block the WiFi task on a
+  // slow USB host and perturb the very thing being measured. Exists because
+  // accepted, "future" and while-inactive chunks were all silent in the trace,
+  // so "nothing arrived" and "arrived and was quietly dropped" looked the same.
+  volatile uint32_t _dIn = 0, _dInactive = 0, _dAcc = 0, _dFut = 0, _dStale = 0,
+                    _dDup = 0, _dPoll = 0, _dNext = 0;
+  uint32_t _dLastPrint = 0;
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -349,12 +445,21 @@ class HivewireFwReceiver {
 // The provider only ever needs SEQUENTIAL reads. Repairs are served from the
 // window already buffered in RAM, so a source that cannot seek -- a stream down
 // a USB cable, say -- works exactly as well as a file.
-class HivewireFwSender {
+//
+// Templated on the link it transmits through, because the protocol needs only
+// two things from it -- id() and sendRaw() -- and HivewireNode provides both
+// with the same signatures as HivewireCoordinator. That is what lets a NODE
+// act as the sender and pass its own running image to its peers (see
+// HivewireFlashProvider below), using exactly the transfer the hive uses.
+// HivewireFwSender keeps its old meaning so existing hive sketches compile
+// unchanged.
+template <class Link>
+class HivewireFwSenderT {
  public:
   // Fill up to `want` bytes, return how many. Short read = end of image.
   typedef size_t (*Provider)(uint8_t *buf, size_t want);
 
-  explicit HivewireFwSender(HivewireCoordinator &coord) : _coord(coord) {}
+  explicit HivewireFwSenderT(Link &link) : _coord(link) {}
 
   bool begin(uint8_t targetId, uint32_t imageLen, uint32_t imageCrc, Provider p) {
     if (_state != IDLE || !p || !imageLen) return false;
@@ -363,6 +468,9 @@ class HivewireFwSender {
     _window = 0; _sent = 0; _round = 0; _pollTries = 0; _lastTxUs = 0;
     _provided = 0; _deadWindows = 0; _stuckSinceMs = 0; _zeroFills = 0;
     memset(_nack, 0, sizeof(_nack));
+    memset(_aud, 0, sizeof(_aud));
+    memset(_heard, 0, sizeof(_heard));
+    _memberRetry = false;
 
     HwFwBegin b{};
     b.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_FW_BEGIN, _coord.id()};
@@ -380,6 +488,10 @@ class HivewireFwSender {
   }
 
   void ingest(const uint8_t *data, int len) {
+    // An idle sender must not bank replies. Once more than one device can
+    // send, NACKs from someone ELSE's transfer arrive here too, and a stale
+    // _window that happens to match would count them as answers to us.
+    if (_state == IDLE) return;
     if (len < (int)sizeof(HwFwNack)) return;
     const HwHeader *h = (const HwHeader *)data;
     if (h->type != HW_MSG_FW_NACK) return;
@@ -389,6 +501,10 @@ class HivewireFwSender {
     // which is what makes a broadcast push cheap for a whole swarm at once.
     for (size_t i = 0; i < sizeof(_nack); i++) _nack[i] |= n->bitmap[i];
     _replies++;
+    // Answering once makes a node a member of this transfer's audience;
+    // from then on every window waits for it (see WAIT).
+    _heard[h->srcId >> 3] |= (1 << (h->srcId & 7));
+    _aud[h->srcId >> 3]   |= (1 << (h->srcId & 7));
     FWDBG("[fwtx] nack from=%u w=%u replies=%u nack0=%02x\n",
           h->srcId, n->window, _replies, _nack[0]);
   }
@@ -437,6 +553,15 @@ class HivewireFwSender {
         // showed only 46 had actually arrived by the time the window closed.
         // CHUNK_GAP_US paces transmission to something the air can carry.
         if (_next < _chunks) {
+          // Give receivers time to commit the previous window before its
+          // successor arrives. They flush in loop(), and while Update.write()
+          // runs the flash cache is off and incoming packets back up in the
+          // driver and drop; a chunk for a window they have not reached yet is
+          // discarded as well. Measured: a flush completes ~140ms after NEXT.
+          // The hive always hid this behind its ~230ms USB fill, so it never
+          // showed; a node reading its own flash fills a window in
+          // milliseconds and would land the whole next window mid-flush.
+          if (_next == 0 && _round == 0 && millis() - _nextAt < NEXT_SETTLE_MS) return;
           if (micros() - _lastTxUs < CHUNK_GAP_US) return;
           if (sendChunk(_next)) {
             _next++; _lastTxUs = micros(); _stuckSinceMs = 0;
@@ -479,11 +604,48 @@ class HivewireFwSender {
         // again -- that is specifically the condition an extended RF blackout
         // produces, and it is retries in THAT state that need real duration to
         // outlast one, not the ordinary per-window round trip.
-        uint32_t budget = (_pollTries <= 1) ? POLL_WAIT_MS : DEAD_RETRY_WAIT_MS;
+        uint32_t budget = (_pollTries <= 1 || _memberRetry) ? POLL_WAIT_MS : DEAD_RETRY_WAIT_MS;
         if (millis() - _polledAt < budget) return;
-        FWDBG("[fwtx] wait-done w=%u replies=%u tries=%u round=%u nack0=%02x heap=%lu\n",
-              _window, _replies, _pollTries, _round, _nack[0],
+
+        // Who has answered in this verification round, and is any known
+        // member of the audience still silent?
+        bool heardAny = false, missing = false;
+        for (size_t i = 0; i < sizeof(_aud); i++) {
+          if (_heard[i]) heardAny = true;
+          if (_aud[i] & ~_heard[i]) missing = true;
+        }
+        FWDBG("[fwtx] wait-done w=%u replies=%u tries=%u round=%u nack0=%02x missing=%d heap=%lu\n",
+              _window, _replies, _pollTries, _round, _nack[0], (int)missing,
               (unsigned long)ESP.getFreeHeap());
+
+        // Everyone who has EVER answered during this transfer must answer for
+        // THIS window before it can close. It used to close as soon as any
+        // one node replied without a NACK -- and a node whose reply was lost
+        // looked exactly like a node with nothing missing. Measured: both
+        // nodes answer the same poll at the same instant, the broadcasts
+        // collide, the stronger one survives; node 2 was silently dropped
+        // from 28 of 93 windows (node 3 never once), and whenever one of
+        // those windows had holes node 2 was left with them for good and
+        // refused the image at the end as "fw: short" -- 1 applied run in 4.
+        if (heardAny && missing && _pollTries < MAX_POLL_TRIES) {
+          _memberRetry = true;
+          pollRetry();                      // keeps _nack and _heard: banked answers survive
+          return;
+        }
+        if (heardAny && missing) {
+          // Still silent after every retry: this member is unreachable, not
+          // slow. Stop waiting on it so the rest of the swarm is not held
+          // hostage -- it will end short and refuse the image, which is the
+          // safe outcome -- but say so, rather than lose it silently.
+          for (size_t i = 0; i < sizeof(_aud); i++) {
+            uint8_t gone = _aud[i] & ~_heard[i];
+            for (int b = 0; b < 8; b++)
+              if (gone & (1 << b)) FWDBG("[fwtx] node %u silent at w=%u, dropped\n",
+                                         (unsigned)(i * 8 + b), _window);
+            _aud[i] &= _heard[i];
+          }
+        }
+        _memberRetry = false;
 
         // Silence is not evidence. If literally nobody answered -- the poll
         // itself was lost, or every reply was -- an empty NACK bitmap looks
@@ -493,7 +655,7 @@ class HivewireFwSender {
         // so. A window that genuinely finished should have gotten at least one
         // reply; if it did not, ask again -- WITHOUT clearing what a straggler
         // may already have told us -- before believing it.
-        if (_replies == 0 && _pollTries < MAX_POLL_TRIES) { pollRetry(); return; }
+        if (!heardAny && _pollTries < MAX_POLL_TRIES) { pollRetry(); return; }
 
         // Nobody answered even after every retry. That is different from "one
         // straggler is missing a few chunks" -- it means NO node is hearing us
@@ -504,7 +666,7 @@ class HivewireFwSender {
         // while the sender had no way to know. A few consecutive dead windows
         // stops the transfer instead of burning the rest of it talking to no
         // one and reporting a false DONE.
-        if (_replies == 0) {
+        if (!heardAny) {
           if (++_deadWindows >= MAX_DEAD_WINDOWS) {
             FWDBG("[fwtx] no replies for %u windows straight, giving up\n",
                   _deadWindows);
@@ -592,6 +754,7 @@ class HivewireFwSender {
   static const uint32_t SEND_STUCK_MS = 2000;   // longest a single chunk may be refused
   static const uint8_t  MAX_ZERO_FILLS = 5;     // retries before a zero read means "gone"
   static const uint32_t CHUNK_GAP_US   = 2000;  // pace to what broadcast air can carry
+  static const uint32_t NEXT_SETTLE_MS = 250;   // receivers' flush, see SEND
 
   bool sendChunk(uint8_t i) {
     uint8_t pkt[sizeof(HwFwChunk) + HW_FW_CHUNK_DATA];
@@ -616,6 +779,8 @@ class HivewireFwSender {
   // a straggler's answer to try #1 gets erased by try #2's reset.
   void pollFresh() {
     memset(_nack, 0, sizeof(_nack));
+    memset(_heard, 0, sizeof(_heard));   // a new round: everyone must answer again
+    _memberRetry = false;
     _pollTries = 0;
     sendPoll();
   }
@@ -641,6 +806,7 @@ class HivewireFwSender {
     s.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_FW_NEXT, _coord.id()};
     s.window = _window;
     _coord.sendRaw((const uint8_t *)&s, sizeof(s));
+    _nextAt = millis();
     _window++;
     // Judge end-of-image by CUMULATIVE bytes actually provided against the
     // announced image length -- never by whether one window's fill happened
@@ -664,16 +830,96 @@ class HivewireFwSender {
     _state = IDLE;
   }
 
-  HivewireCoordinator &_coord;
+  Link    &_coord;          // the hive's coordinator, or a node seeding its peers
   Provider _provider = nullptr;
   State    _state = IDLE;
   uint8_t  _target = 0;
   uint32_t _imageLen = 0, _imageCrc = 0, _fill = 0, _sent = 0, _polledAt = 0;
+  uint32_t _nextAt = 0;     // when NEXT went out; see NEXT_SETTLE_MS
   uint32_t _provided = 0;   // cumulative bytes handed over; the sole EOF signal
   uint32_t _lastTxUs = 0, _stuckSinceMs = 0;
   uint16_t _windows = 0, _window = 0, _replies = 0;
   uint8_t  _pollTries = 0, _deadWindows = 0, _zeroFills = 0;
   uint8_t  _chunks = 0, _next = 0, _round = 0;
   uint8_t  _nack[HW_FW_WINDOW / 8];
+  uint8_t  _aud[32];        // node ids that have answered during this transfer
+  uint8_t  _heard[32];      // node ids that answered in the current round
+  bool     _memberRetry = false;
   uint8_t  _buf[HW_FW_WINDOW_BYTES];
+};
+
+// The hive pushing to the swarm -- the original meaning, unchanged.
+using HivewireFwSender = HivewireFwSenderT<HivewireCoordinator>;
+// A node passing an image on to its peers.
+using HivewireFwNodeSender = HivewireFwSenderT<HivewireNode>;
+
+// ---------------------------------------------------------------------------
+// Provider: the firmware this node is RUNNING, read straight from flash
+// ---------------------------------------------------------------------------
+//
+// Every node already holds a complete, verified copy of its own firmware --
+// the partition it booted from. Streaming that out is what lets a node flash
+// its peers with no hive and no host involved: a unit that received an update
+// can hand it on to one that was out of the hive's range, which is how an
+// update reaches the far edge of a swarm hop by hop.
+//
+// Length comes from the image's own header (esp_image_verify), never from the
+// partition size: the partition is larger than the image and padded, and
+// sending the padding would give every receiver a length and CRC that match
+// nothing the bootloader will accept. The CRC is computed with hwFwCrc, the
+// exact function receivers check against, so a node cannot announce a
+// checksum its peers would then refuse.
+//
+// One instance per sketch: HivewireFwSender's Provider is a plain function
+// pointer with no user-data slot, so the active provider is reached through a
+// static, same as HivewireSerialProvider.
+class HivewireFlashProvider {
+ public:
+  HivewireFlashProvider() { _instance = this; }
+
+  // Measure the running image. Reads it twice (verify, then CRC) -- on the
+  // order of a second for a ~1.1MB image, so call it from loop(), never from
+  // a receive callback. Returns false if the image cannot be verified, which
+  // is also a reason not to spread it.
+  bool begin() {
+    _part = esp_ota_get_running_partition();
+    if (!_part) return false;
+    esp_partition_pos_t pos = {_part->address, _part->size};
+    esp_image_metadata_t meta = {};
+    if (esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) != ESP_OK) return false;
+    _len = meta.image_len;
+    if (!_len || _len > _part->size) return false;
+
+    uint32_t crc = 0;
+    uint8_t tmp[1024];
+    for (uint32_t off = 0; off < _len; off += sizeof(tmp)) {
+      uint32_t n = _len - off;
+      if (n > sizeof(tmp)) n = sizeof(tmp);
+      if (esp_partition_read(_part, off, tmp, n) != ESP_OK) return false;
+      crc = hwFwCrc(crc, tmp, n);
+    }
+    _crc = crc;
+    _pos = 0;
+    return true;
+  }
+
+  uint32_t length() const { return _len; }
+  uint32_t crc() const { return _crc; }
+
+  static size_t feed(uint8_t *buf, size_t want) {
+    return _instance ? _instance->read(buf, want) : 0;
+  }
+
+ private:
+  size_t read(uint8_t *buf, size_t want) {
+    if (!_part || _pos >= _len) return 0;
+    if (want > _len - _pos) want = _len - _pos;
+    if (esp_partition_read(_part, _pos, buf, want) != ESP_OK) return 0;
+    _pos += want;
+    return want;
+  }
+
+  inline static HivewireFlashProvider *_instance = nullptr;
+  const esp_partition_t *_part = nullptr;
+  uint32_t _len = 0, _crc = 0, _pos = 0;
 };

@@ -105,16 +105,36 @@ class HivewireSerialProvider {
 
   // Call once the announced length is known, before handing Provider::feed to
   // HivewireFwSender::begin().
-  void start(uint32_t totalBytes) { _remaining = totalBytes; }
+  void start(uint32_t totalBytes) { _remaining = totalBytes; _offset = 0; _retries = 0; }
   bool active() const { return _remaining > 0; }
+  uint32_t retries() const { return _retries; }   // subchunks that had to be re-asked
 
   static size_t feed(uint8_t *buf, size_t want) {
     return _instance ? _instance->doFeed(buf, want) : 0;
   }
 
  private:
-  static const size_t SUBCHUNK = 1024;
+  static const size_t   SUBCHUNK  = 1024;
+  static const uint8_t  MAX_TRIES = 6;
+  // A healthy host answers within milliseconds and paces its reply in small
+  // blocks, so this much silence mid-subchunk means bytes were lost, not that
+  // the host is slow. Kept short because every loss costs one of these.
+  static const uint32_t IDLE_MS   = 800;
 
+  // PROTOCOL: "MORE <offset> <len>" -- the host must answer with exactly
+  // <len> bytes of the image starting at absolute byte <offset>, then 4 bytes
+  // of little-endian CRC32 over (offset as 4 LE bytes || those <len> bytes).
+  //
+  // It used to be a bare "MORE", meaning "the next bytes". That cannot survive
+  // loss: when the C6's 64-byte USB Serial/JTAG RX FIFO overruns, bytes vanish
+  // from the MIDDLE of a subchunk with no error, the host has no idea, and it
+  // carries on from where IT thinks the stream is. Measured with host-side
+  // pacing already in place: one subchunk in ~1100 still lost bytes, the
+  // image arrived 799 bytes short with everything after the gap shifted, and
+  // both nodes (correctly) refused it as "fw: short". Pacing makes loss rare;
+  // addressing by offset makes it harmless. A short subchunk is thrown away
+  // whole -- its surviving bytes are misaligned and cannot be trusted -- and
+  // the SAME offset is asked for again.
   size_t doFeed(uint8_t *buf, size_t want) {
     if (!_remaining) return 0;
     if (want > _remaining) want = (size_t)_remaining;
@@ -124,24 +144,31 @@ class HivewireSerialProvider {
       size_t ask = want - total;
       if (ask > SUBCHUNK) ask = SUBCHUNK;
 
-      Serial.println("MORE");
-      size_t got = 0;
-      uint32_t idle = millis();
-      while (got < ask) {
-        int n = Serial.available();
-        if (n > 0) {
-          size_t take = (size_t)n;
-          if (take > ask - got) take = ask - got;
-          got += Serial.readBytes(buf + total + got, take);
-          idle = millis();
-        } else if (millis() - idle > 4000) {
-          break;                          // host went away mid-subchunk
-        } else {
-          delay(1);
-        }
+      bool ok = false;
+      for (uint8_t attempt = 0; attempt < MAX_TRIES && !ok; attempt++) {
+        // Late stragglers from a failed attempt must not be read as the start
+        // of the retry; on a retry, wait for the line to go quiet first.
+        drainInput(attempt ? 60 : 0);
+        Serial.printf("MORE %lu %u\n", (unsigned long)_offset, (unsigned)ask);
+        // Each reply is <len> data bytes followed by a little-endian CRC32
+        // computed over (offset as 4 LE bytes || data). A length check alone
+        // proves bytes arrived, not that they are the RIGHT bytes: measured,
+        // a prompt garbled by another task's output on this same port made
+        // the host fall back to sending the next sequential bytes while the
+        // gateway was re-asking an OLDER offset, so a full-length reply of
+        // the wrong data was accepted and the image was refused four minutes
+        // later with "crc bad". Folding the offset into the checksum means a
+        // reply for any other offset fails here, immediately, and is re-asked.
+        uint8_t crcb[4];
+        ok = readExactly(buf + total, ask) == ask && readExactly(crcb, 4) == 4 &&
+             subCrc(_offset, buf + total, ask) ==
+                 ((uint32_t)crcb[0] | (uint32_t)crcb[1] << 8 |
+                  (uint32_t)crcb[2] << 16 | (uint32_t)crcb[3] << 24);
+        if (!ok) _retries++;
       }
-      total += got;
-      if (got < ask) break;               // stalled; stop honestly, see below
+      if (!ok) break;              // host really is gone; stop honestly, see below
+      total   += ask;
+      _offset += ask;
     }
     _remaining -= total;
     // A short return here does NOT mean "end of image" on its own --
@@ -152,6 +179,53 @@ class HivewireSerialProvider {
     return total;
   }
 
+  // Standard CRC-32 (IEEE, reflected, as zlib.crc32) over offset||data, so a
+  // host can compute it with zlib.crc32(struct.pack('<I', off) + data).
+  static uint32_t crcStep(uint32_t crc, const uint8_t *p, size_t n) {
+    while (n--) {
+      crc ^= *p++;
+      for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (-(int32_t)(crc & 1)));
+    }
+    return crc;
+  }
+  static uint32_t subCrc(uint32_t offset, const uint8_t *data, size_t n) {
+    uint8_t o[4] = {(uint8_t)offset, (uint8_t)(offset >> 8),
+                    (uint8_t)(offset >> 16), (uint8_t)(offset >> 24)};
+    uint32_t crc = crcStep(0xFFFFFFFFu, o, 4);
+    return ~crcStep(crc, data, n);
+  }
+
+  size_t readExactly(uint8_t *dst, size_t len) {
+    size_t got = 0;
+    uint32_t idle = millis();
+    while (got < len) {
+      int n = Serial.available();
+      if (n > 0) {
+        size_t take = (size_t)n;
+        if (take > len - got) take = len - got;
+        got += Serial.readBytes(dst + got, take);
+        idle = millis();
+      } else if (millis() - idle > IDLE_MS) {
+        break;
+      } else {
+        delay(1);
+      }
+    }
+    return got;
+  }
+
+  // Discard whatever is waiting. With quietMs > 0, keep discarding until the
+  // line has been silent that long, so bytes still in flight are caught too.
+  void drainInput(uint32_t quietMs) {
+    uint32_t t = millis();
+    do {
+      while (Serial.available()) { Serial.read(); t = millis(); }
+      if (quietMs) delay(1);
+    } while (quietMs && millis() - t < quietMs);
+  }
+
   inline static HivewireSerialProvider *_instance = nullptr;
   uint32_t _remaining = 0;
+  uint32_t _offset = 0;
+  uint32_t _retries = 0;
 };

@@ -235,30 +235,83 @@ could not tell a truly dead receiver from a temporarily quiet one and reported
 false success, and a failed radio send that could busy-loop instead of backing
 off).
 
-**What is not yet solid: a full ~1.1 MB image completing in one pass under real
-RF conditions.** Every fix measurably improved how far a transfer got before the
-node stopped hearing it, but transfers in the test environment used to build
-this did not yet finish end to end. Live tracing ruled out the library's own
-logic as the remaining cause — heap stable on both ends throughout, no state
-desync, the receiver's ordinary swarm traffic (beacons, status) continuing
-completely normally through the exact stretch where firmware packets stopped
-arriving. That pattern points at physical RF interference, not software: the
-node nearest the interruptions sat on this PC's USB, a documented broadband
-noise source in the 2.4 GHz band, for the entire test.
+**Full ~1.1 MB images now complete and apply, end to end.** Measured on
+hardware: 1,134,192 bytes from the hive to every node at once in about 200 s
+(~5.6 KB/s), each node verifying the CRC and rebooting into the new image with
+its identity intact. Burn-tested with 55 deliberately injected USB losses per
+run, recovered every time.
 
-That diagnosis was tested, not just inferred: a scan found the swarm's default
-ESP-NOW channel sharing direct co-channel WiFi neighbours, while several
-adjacent channels were completely silent, so a controlled comparison ran the
-same burn suite unchanged except for `HW_SWARM_CHANNEL`. A clear channel
-transferred **no better** than the busy default (roughly the same fraction of
-the image before the receiver went quiet, run to run). WiFi congestion and
-broadband noise are different failure shapes and moving off a busy channel
-only ever fixes the first one, so a result unmoved by that change points more,
-not less, at USB-adjacent noise as the cause. The retry patience is now wide
-enough (on the order of a minute of tolerance, matched to the receiver's own
-give-up timeout) to outlast an ordinary blackout, but has not yet been proven
-against nodes on independent power and clear of USB-adjacent interference —
-that is the next thing to test, not the next thing to code.
+**An earlier version of this README blamed physical RF interference for
+transfers that never finished. That was wrong, and how it was wrong is worth
+keeping.** Every observation fit an RF story — transfers dying at random
+points, one node at a time, while ordinary swarm traffic carried on normally —
+and a controlled channel change even "confirmed" it by improving nothing.
+Instrumenting further found three software bugs, none of them radio:
+
+1. **The host overran the gateway's USB receive FIFO.** Answering each `MORE`
+   with one 1024-byte write overflows the ESP32-C6's 64-byte USB Serial/JTAG
+   FIFO; bytes vanished mid-subchunk, the gateway waited out a 4 s timeout on
+   *every* subchunk, and throughput sat at a metronome-steady ~230 B/s. The
+   tell was the regularity: timing every prompt showed a gap of exactly 4.4 s
+   after each one. Pacing the host's writes (128 B blocks, 2 ms apart) took it
+   to ~5 KB/s.
+2. **Receivers abandoned transfers because of an unsigned-time race.** The stall
+   check computed `millis() - _lastRx` while the radio callback, on another
+   task, could stamp `_lastRx` one tick *after* the clock was read — wrapping
+   to ~49 days and abandoning on the spot. A per-packet counter showed the
+   receiver switching itself off ~20 s in (the timeout is 90 s) while every
+   later packet still arrived perfectly. It struck each node at a random
+   moment, which is exactly what made it look like RF. Same trap as the
+   beacon-age underflow already fixed in the core; two more siblings were found
+   and fixed alongside it.
+3. **The sender closed a window as soon as ANY node replied.** Nodes answer a
+   poll at the same instant, the broadcasts collide, the stronger survives:
+   one node's replies were lost in 28 of 93 windows, and whenever one of those
+   windows had holes that node was silently left with them and refused the
+   image at the end. The sender now tracks its audience — every node that has
+   ever answered must answer each window — and receivers jitter their replies
+   so they rarely collide at all (lost replies fell from 31 to 1 per transfer).
+
+The USB link between host and gateway is now self-healing rather than merely
+careful: each subchunk is requested as `MORE <offset> <len>` and answered with
+the data plus a CRC32 over *offset and data*, so a short, corrupted, or
+wrong-offset reply is discarded and re-asked instead of silently shifting the
+rest of the image. The lesson generalises: when every symptom fits a physical
+explanation, that is the moment to instrument harder, not to stop.
+
+## Nodes flashing each other
+
+A node already holds a complete, verified copy of its firmware: the partition it
+booted from. [`HivewireFlashProvider`](src/HivewireFirmware.h) streams that out,
+and the sender is templated on its link (`HivewireFwNodeSender` for a node,
+`HivewireFwSender` for the hive, unchanged), so any node can pass its running
+image to its peers over exactly the transfer the hive uses — no hive, no host,
+no internet in the data path. That is what lets an update reach nodes beyond
+the hive's own range: whoever got it hands it on.
+
+In the RangeNode example it is one writable slot:
+
+```
+set 2 24 3      node 2: send your firmware to node 3
+set 2 24 255    node 2: send your firmware to every node
+```
+
+Measured: 1,134,192 bytes node-to-node in ~65 s (**~17.5 KB/s, about 3× the
+hive's rate** — a node reads its own flash in milliseconds, where the hive waits
+on USB). The image's length comes from its own header, never the padded
+partition size, and its CRC from the same function receivers check against.
+Across five successive re-seeds, back and forth between two nodes, the CRC
+never changed: an image handed on from node to node arrives byte-identical.
+
+Burn-tested 8/8, including the refusals: a node will not seed itself, will not
+start a second seed while one is running, will not accept an update while it is
+sending one (applying it would reboot it mid-transfer), and a seed aimed at a
+node that does not exist gives up cleanly with nothing rebooted.
+
+**Not yet done:** seeding is triggered by command, not automatic, and a node
+will re-flash an image identical to the one it already runs. Hop-by-hop spread
+beyond the hive's range works mechanically but has not been tested with nodes
+physically out of the hive's reach.
 
 ## More than one uplink, and telling the hive to fetch something itself
 
@@ -286,9 +339,10 @@ documented in their own headers.)
 problem by construction: it is a second uplink fed over the gateway's own USB
 port, from anything with its **own, separate** WiFi hardware — a Raspberry Pi
 is the obvious choice. No shared radio, no conflict. The same header carries
-`HivewireSerialProvider`, the same sub-chunked, byte-exact transfer logic
-`examples/FirmwarePush` already proves, lifted out so the gateway does not
-need its own copy.
+`HivewireSerialProvider`, which feeds a transfer over that USB link using the
+offset-addressed, CRC-checked `MORE <offset> <len>` protocol described above.
+(`examples/FirmwarePush` still uses the older bare-`MORE` feed and has not been
+moved to it.)
 
 That second uplink is what makes a new command possible:
 

@@ -73,6 +73,7 @@ static const HwWritableSlot WRITABLE[] = {
   { 21, HW_U16 },    // deafen duration, seconds     (RangeNode)
   { 22, HW_U8 },     // 1=counters 2=rssi 3=forget epoch 4=reboot 5=OTA
   { 23, HW_U8 },     // arm OTA for THIS node id (see HivewireOta.h)
+  { 24, HW_U8 },     // seed this node's firmware to node N, 255 = all (RangeNode)
 };
 static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 
@@ -366,7 +367,14 @@ void loop() {
   // is what stops this from calling resume() every single iteration; harmless
   // either way, but the edge is the actual event worth noticing.
   static bool wasActive = false;
-  if (wasActive && !fwSender.active()) netUplink.resume();
+  if (wasActive && !fwSender.active()) {
+    netUplink.resume();
+    // Tell the USB host the transfer is over, rather than leaving it to infer
+    // that from a long silence. The retry count is the gateway's own tally of
+    // subchunks it had to re-ask for; the host keeps one too, and the two
+    // should agree.
+    Serial.printf("PUSH END usb_retries=%lu\n", (unsigned long)fwBytes.retries());
+  }
   wasActive = fwSender.active();
 
   if (links.ready()) {

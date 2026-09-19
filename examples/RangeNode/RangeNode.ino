@@ -58,6 +58,11 @@ static uint8_t NODE_ID = HW_NODE_ID;
 HivewireNode node;
 HivewireOta  ota(node);
 HivewireFwReceiver fw(node);
+// Node-to-node: this unit can pass the firmware it is RUNNING on to its peers,
+// over the same windowed transfer the hive uses. What makes a swarm updatable
+// past the hive's own range -- whoever got the update hands it on.
+HivewireFwNodeSender  fwTx(node);
+HivewireFlashProvider flashSrc;
 Preferences  prefs;
 
 // --- observed --------------------------------------------------------------
@@ -99,6 +104,18 @@ static void sOtaArm(void *o)     { memcpy(o, &otaArm, 1); }
 static void aOtaArm(const void *in) {
   otaArm = *(const uint8_t *)in;
   ota.arm(otaArm);
+}
+
+// Seed this node's running firmware to node N (255 = every node). The applier
+// runs inside the ESP-NOW receive callback, so it only RECORDS the request:
+// measuring the image means reading ~1MB of flash twice, which must never
+// happen on the WiFi task. loop() serves it.
+static uint8_t seedTarget = 0;
+static volatile int16_t seedWanted = -1;
+static void sSeed(void *o) { memcpy(o, &seedTarget, 1); }
+static void aSeed(const void *in) {
+  seedTarget = *(const uint8_t *)in;
+  if (seedTarget) seedWanted = seedTarget;
 }
 
 // Seconds since a beacon last arrived -- the most direct range signal there is.
@@ -171,6 +188,7 @@ static const HwSlotDef SLOTS[] = {
   { 21, HW_U16, HW_DIR_INOUT,       0, 600000,     0,   0,  1800, sDeafSecsCfg, aDeafSecs   },
   { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,     5, sAction,      aAction     },
   { 23, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sOtaArm,      aOtaArm     },
+  { 24, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sSeed,        aSeed       },
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
@@ -214,7 +232,12 @@ void setup() {
   // core does not define. Same safety rule as a WiFi update: release whatever
   // this unit drives before committing to an outage.
   fw.onBeforeUpdate([] { onSafe(); });
-  node.onRaw([](const uint8_t *d, int n) { fw.ingest(d, n); });
+  node.onRaw([](const uint8_t *d, int n) {
+    // Never start accepting an update while sending one: applying it would
+    // reboot this node halfway through the transfer it is serving.
+    if (!fwTx.active()) fw.ingest(d, n);
+    fwTx.ingest(d, n);
+  });
 
   if (!node.begin(NODE_ID, HW_ROLE_SENSOR, SLOTS, N_SLOTS)) {
     Serial.println("hivewire: begin failed");
@@ -231,6 +254,29 @@ void loop() {
   node.loop();
   ota.loop();
   fw.loop();
+  fwTx.loop();
+
+  if (seedWanted >= 0) {
+    uint8_t v = (uint8_t)seedWanted;
+    seedWanted = -1;
+    uint8_t target = (v == 255) ? HIVEWIRE_TARGET_ALL : v;
+    if (fw.active() || fwTx.active()) {
+      node.log("fw: seed refused, busy");
+    } else if (v == NODE_ID) {
+      node.log("fw: seed refused, self");
+    } else if (!flashSrc.begin()) {
+      node.log("fw: seed refused, image unverified");   // never spread what fails verify
+    } else if (fwTx.begin(target, flashSrc.length(), flashSrc.crc(), HivewireFlashProvider::feed)) {
+      node.log("fw: seed %lu b crc %08lx to %u", (unsigned long)flashSrc.length(),
+               (unsigned long)flashSrc.crc(), v);
+    } else {
+      node.log("fw: seed refused, sender");
+    }
+  }
+  static bool wasSeeding = false;
+  if (wasSeeding && !fwTx.active()) node.log("fw: seed finished");
+  wasSeeding = fwTx.active();
+
   uint32_t now = millis();
   uint8_t n = node.neighbors();
 
