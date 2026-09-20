@@ -11,7 +11,8 @@
  *
  *   AHT20      VCC -> 3V3, GND -> GND, SDA -> GPIO20, SCL -> GPIO19
  *              (22/23 is also tried -- see I2C_SDA_ALT below)
- *   Soil probe VCC -> 3V3, GND -> GND, AOUT -> GPIO0
+ *   Soil probe VCC -> GPIO18 (switched; see SOIL_PWR_PIN), GND -> GND,
+ *              AOUT -> GPIO0
  *   Battery    LiPo+ -[1M]-+-[1M]- GND, midpoint -> GPIO1   (optional)
  *
  * Always on, unlike a Zigbee end device. A swarm node has to hear the hive's
@@ -49,6 +50,21 @@ static uint8_t NODE_ID = HW_NODE_ID;
 #define I2C_SCL_ALT 23
 #define SOIL_ADC_PIN 0
 #define BATT_ADC_PIN 1
+// Probe power, switched rather than wired to 3V3. A capacitive probe left
+// energised corrodes -- its exposed traces electrolyse whatever they sit in --
+// and drifts as it does, which looks exactly like the soil slowly drying. It
+// is also the node's biggest continuous draw. So the probe is powered only for
+// the moment it is read: VCC to this pin instead of the 3V3 pad.
+//
+// Harmless if the probe is still wired to 3V3: the pin drives nothing and
+// readings are unaffected, so a board can be rewired whenever it is convenient.
+// Set to -1 to leave the pin alone entirely.
+#ifndef SOIL_PWR_PIN
+#define SOIL_PWR_PIN 18
+#endif
+// A capacitive probe's oscillator needs a moment after power-up before its
+// output means anything; measured settling is tens of ms, so this is generous.
+#define SOIL_SETTLE_MS 120
 
 // ---- soil calibration -------------------------------------------------------
 // Placeholders until measured on this probe: note the raw value (slot 3) in
@@ -79,6 +95,7 @@ static uint16_t humCenti  = 0;       // 0.01 %RH
 static uint16_t soilRaw   = 0;       // ADC counts, 0-4095
 static uint8_t  soilPct   = 0;
 static uint16_t battMv    = 0;       // 0 = no divider fitted / not measured
+static uint8_t  battPct   = 0;       // from the LiPo curve, not a linear scale
 static uint8_t  sensorOk  = 0;       // bit0 AHT20, bit1 soil
 static uint16_t ahtFails  = 0;
 static uint32_t bootCount = 0;
@@ -125,6 +142,57 @@ static bool ahtBegin() {
   return false;
 }
 
+// --- sampling helpers --------------------------------------------------------
+static int cmpU16(const void *a, const void *b) {
+  uint16_t x = *(const uint16_t *)a, y = *(const uint16_t *)b;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+// Middle of N reads. `powered` energises the probe for the measurement only.
+static uint16_t medianAdc(uint8_t pin, bool powered) {
+#if SOIL_PWR_PIN >= 0
+  if (powered) { digitalWrite(SOIL_PWR_PIN, HIGH); delay(SOIL_SETTLE_MS); }
+#else
+  (void)powered;
+#endif
+  uint16_t s[9];
+  for (int i = 0; i < 9; i++) { s[i] = analogRead(pin); delay(3); }
+#if SOIL_PWR_PIN >= 0
+  if (powered) digitalWrite(SOIL_PWR_PIN, LOW);
+#endif
+  qsort(s, 9, sizeof(s[0]), cmpU16);
+  return s[4];
+}
+
+static uint16_t medianMilliVolts(uint8_t pin) {
+  uint16_t s[5];
+  for (int i = 0; i < 5; i++) { s[i] = analogReadMilliVolts(pin); delay(3); }
+  qsort(s, 5, sizeof(s[0]), cmpU16);
+  return s[2];
+}
+
+// A LiPo's voltage is nothing like linear in its charge: it sits near 3.8 V
+// for most of the discharge and then falls off a cliff. Reporting
+// (V - 3.3) / (4.2 - 3.3) would read ~55% for most of the battery's life and
+// then drop to nothing in an afternoon. This is the usual discharge curve,
+// interpolated between measured points, so "20%" really is about a fifth left.
+static uint8_t lipoPercent(uint16_t mv) {
+  static const uint16_t V[] = {3300, 3450, 3680, 3740, 3770, 3790, 3820,
+                               3870, 3950, 4000, 4100, 4200};
+  static const uint8_t  P[] = {   0,    5,   10,   20,   30,   40,   50,
+                                 60,   70,   80,   90,  100};
+  const int n = sizeof(P) / sizeof(P[0]);
+  if (mv <= V[0]) return 0;
+  if (mv >= V[n - 1]) return 100;
+  for (int i = 1; i < n; i++) {
+    if (mv < V[i]) {
+      uint16_t span = V[i] - V[i - 1];
+      return P[i - 1] + (uint8_t)((uint32_t)(mv - V[i - 1]) * (P[i] - P[i - 1]) / span);
+    }
+  }
+  return 100;
+}
+
 static void readSensors() {
   float tC, rh;
   // Retry the bus setup now and then: a sensor plugged in, or reseated, after
@@ -144,19 +212,20 @@ static void readSensors() {
     if (ahtFound && ++ahtFails % 10 == 1) node.log("aht20 read failed (%u)", ahtFails);
   }
 
-  // Average a few samples: a capacitive probe's output is noisy enough that a
-  // single read would trip the report threshold on its own.
-  uint32_t acc = 0;
-  for (int i = 0; i < 8; i++) { acc += analogRead(SOIL_ADC_PIN); delay(2); }
-  soilRaw = acc / 8;
+  // MEDIAN of several samples, not the mean. A capacitive probe's output is
+  // noisy, and one electrical glitch -- the radio transmitting mid-read is
+  // enough -- drags a mean far enough to trip the report threshold and land a
+  // fictional reading in the history. A median ignores an outlier completely.
+  soilRaw = medianAdc(SOIL_ADC_PIN, true);
   // A floating pin reads near 0 or near full scale; a real probe sits between.
   bool soilPlausible = soilRaw > 200 && soilRaw < 4000;
   sensorOk = soilPlausible ? (sensorOk | 2) : (sensorOk & ~2);
   float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilRaw) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
   soilPct = pct < 0 ? 0 : pct > 100 ? 100 : (uint8_t)lroundf(pct);
 
-  uint32_t mv = analogReadMilliVolts(BATT_ADC_PIN) * 2;   // 1M/1M divider halves it
+  uint32_t mv = medianMilliVolts(BATT_ADC_PIN) * 2;       // 1M/1M divider halves it
   battMv = mv > 65535 ? 65535 : mv;
+  battPct = lipoPercent(battMv);
 }
 
 // ---- samplers ---------------------------------------------------------------
@@ -165,6 +234,7 @@ static void sHum(void *o)      { memcpy(o, &humCenti, 2); }
 static void sSoilRaw(void *o)  { memcpy(o, &soilRaw, 2); }
 static void sSoilPct(void *o)  { memcpy(o, &soilPct, 1); }
 static void sBatt(void *o)     { memcpy(o, &battMv, 2); }
+static void sBattPct(void *o)  { memcpy(o, &battPct, 1); }
 static void sOk(void *o)       { memcpy(o, &sensorOk, 1); }
 static void sBoots(void *o)    { uint8_t v = bootCount > 255 ? 255 : bootCount; memcpy(o, &v, 1); }
 static void sUptimeMin(void *o){ uint16_t v = millis() / 60000UL; memcpy(o, &v, 2); }
@@ -190,6 +260,7 @@ static const HwSlotDef SLOTS[] = {
   {  3, HW_U16, HW_DIR_OUT,     30000, 900000,    60,   0,   0, sSoilRaw,   nullptr },
   {  4, HW_U8,  HW_DIR_OUT,     30000, 900000,     3,   0,   0, sSoilPct,   nullptr },
   {  5, HW_U16, HW_DIR_OUT,     60000, 900000,    50,   0,   0, sBatt,      nullptr },
+  { 10, HW_U8,  HW_DIR_OUT,     60000, 900000,     2,   0,   0, sBattPct,   nullptr },
   {  6, HW_U8,  HW_DIR_OUT,     30000, 900000,     1,   0,   0, sOk,        nullptr },
   {  7, HW_U8,  HW_DIR_OUT,    300000, 900000,     1,   0,   0, sBoots,     nullptr },
   {  8, HW_U16, HW_DIR_OUT,     60000, 900000,    15,   0,   0, sUptimeMin, nullptr },
@@ -204,6 +275,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   analogReadResolution(12);
+#if SOIL_PWR_PIN >= 0
+  // Idle low: the probe is dark except while being read.
+  pinMode(SOIL_PWR_PIN, OUTPUT);
+  digitalWrite(SOIL_PWR_PIN, LOW);
+#endif
 
   Preferences prefs;
   prefs.begin("soilnode", false);
@@ -256,8 +332,8 @@ void loop() {
   if (!fw.active() && millis() - lastRead >= READ_EVERY_MS) {
     lastRead = millis();
     readSensors();
-    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) batt=%umV ok=%u nb=%u ep=%lu\n",
-                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct, battMv,
+    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) batt=%umV (%u%%) ok=%u nb=%u ep=%lu\n",
+                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct, battMv, battPct,
                   sensorOk, node.neighbors(), (unsigned long)node.epoch());
   }
 }

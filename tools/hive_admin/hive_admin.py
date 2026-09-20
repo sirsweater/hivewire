@@ -37,7 +37,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +75,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS pushes(
               id INTEGER PRIMARY KEY, ts INTEGER, file TEXT, size INTEGER,
               crc TEXT, family TEXT, result TEXT, log TEXT);
+            -- How far each node's readings have been uploaded. Kept here, not
+            -- in memory, so a restart mid-outage resumes instead of re-sending.
+            CREATE TABLE IF NOT EXISTS upload_marks(
+              node INTEGER PRIMARY KEY, last_ts INTEGER NOT NULL);
             """)
 
     def db(self):
@@ -98,6 +104,29 @@ class Store:
             return [(r[0], r[1]) for r in c.execute(
                 "SELECT ts, value FROM readings WHERE node=? AND slot=? AND ts BETWEEN ? AND ? "
                 "ORDER BY ts", (node, slot, t0, t1))]
+
+    def state_at(self, node, ts):
+        """{slot: value} in force at a moment: the last row at or before it."""
+        with self.db() as c:
+            return {r[0]: r[1] for r in c.execute(
+                "SELECT slot, value, MAX(ts) FROM readings WHERE node=? AND ts<=? GROUP BY slot",
+                (node, ts))}
+
+    def rows_since(self, node, since, until):
+        with self.db() as c:
+            return [(r[0], r[1], r[2]) for r in c.execute(
+                "SELECT ts, slot, value FROM readings WHERE node=? AND ts>? AND ts<=? "
+                "ORDER BY ts", (node, since, until))]
+
+    def upload_mark(self, node):
+        with self.db() as c:
+            r = c.execute("SELECT last_ts FROM upload_marks WHERE node=?", (node,)).fetchone()
+        return r[0] if r else 0
+
+    def set_upload_mark(self, node, ts):
+        with self.db() as c:
+            c.execute("INSERT INTO upload_marks VALUES(?,?) ON CONFLICT(node) "
+                      "DO UPDATE SET last_ts=excluded.last_ts", (node, ts))
 
     def latest(self, node):
         """{slot: value} as last stored for a node. (SQLite returns the row
@@ -132,7 +161,13 @@ class Store:
 # ---------------------------------------------------------------------------
 class Config:
     DEFAULTS = {"password": None, "secret": None, "nodes": {},
-                "poll_seconds": 60, "full_every_seconds": 900, "stale_seconds": 300}
+                "poll_seconds": 60, "full_every_seconds": 900, "stale_seconds": 300,
+                # Uploading to an outside service starts switched OFF and cannot
+                # be switched on until a send has actually worked -- see Uploader.
+                "g4rden": {"enabled": False, "base_url": "https://g4rden.com",
+                           "token": "", "gateway_id": None, "seq": 0, "retry_seq": None,
+                           "interval_seconds": 900, "min_gap_seconds": 300,
+                           "max_per_device": 96, "devices": {}}}
 
     def __init__(self, path):
         self.path = path
@@ -492,6 +527,223 @@ class Pusher:
 
 
 # ---------------------------------------------------------------------------
+# Uploading readings to the g4rden site
+# ---------------------------------------------------------------------------
+# Speaks the same API as g4rden's Zigbee head (tools/zigbee-head): claim a
+# gateway once with a code from the site, then POST batches of readings.
+#
+#   POST /api/device/claim   {code, kind, fw}            -> {token, gatewayId}
+#   POST /api/device/ingest  {seq, fw, nodes[]}          Bearer <token>
+#     nodes: [{ieee, name?, model?, readings: [{age, soil, soilRaw, airTemp,
+#                                               airHum, battery, volts, rssi}]}]
+#
+# Two of that design's decisions are carried over deliberately:
+#
+#   AGE, NOT TIMESTAMPS. A Pi that boots without a network has no correct clock
+#   for a few seconds, and a wrong wall clock writes garbage into a time series.
+#   The server stamps the time; we only say how long ago each sample was taken.
+#
+#   ONE seq PER BATCH, HELD ACROSS RETRIES. The common failure is an upload that
+#   succeeded while its response was lost. Re-sending the same seq lets the
+#   server recognise the retry instead of writing every reading twice.
+#
+# What is NOT carried over is the in-memory buffer: this admin already stores
+# every reading in SQLite, so a batch is read back out of the database from
+# where the last one finished. A Pi that was offline for six hours uploads those
+# six hours when it returns, and restarting the admin loses nothing.
+class Uploader(threading.Thread):
+    """Posts stored readings to g4rden.
+
+    Deliberately awkward to switch on: this is the one part of the program that
+    sends anything off the property, so automatic uploads cannot be enabled
+    until a send tried from the page has actually succeeded. Preview builds the
+    exact body and touches no network.
+    """
+    daemon = True
+    FW = "hivewire-admin/1.0.0"
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.wake = threading.Event()
+        self.last = None                # result of the most recent attempt
+        self.last_success = None
+
+    def cfg(self):
+        return self.app.cfg.data["g4rden"]
+
+    # --- pairing -----------------------------------------------------------
+    def claim(self, code):
+        """Trade a claim code from the site for a long-lived write token. The
+        code is single-use and expires; the token can only post readings."""
+        g = self.cfg()
+        r = self.post("/api/device/claim",
+                      {"code": code.strip(), "kind": "hivewire", "fw": self.FW}, token=None)
+        if r.get("ok") and isinstance(r.get("json"), dict) and r["json"].get("token"):
+            g["token"] = r["json"]["token"]
+            g["gateway_id"] = r["json"].get("gatewayId")
+            self.app.cfg.save()
+            self.app.store.event("upload", "claimed gateway %s" % g["gateway_id"])
+            r["gateway_id"] = g["gateway_id"]
+        else:
+            self.app.store.event("upload", "claim failed: %s" % (r.get("error") or r.get("status")))
+        return r
+
+    # --- what gets sent ----------------------------------------------------
+    # Slot -> the field names /api/device/ingest accepts, with the scaling each
+    # needs. Only measurements the site stores; anything a node has not reported
+    # is left out rather than sent as zero.
+    FIELDS = [("airTemp", 1, 0.01, 2), ("airHum", 2, 0.01, 1), ("soilRaw", 3, 1, 0),
+              ("volts", 5, 0.001, 3), ("battery", 10, 1, 0), ("rssi", 9, 1, 0)]
+    MEASURED = ("soil", "soilRaw", "airTemp", "airHum", "battery", "volts")
+
+    def samples_for(self, nid, since, now_ts, min_gap, max_n):
+        """Replay stored readings into whole samples.
+
+        Readings are stored one row per changed value, so a row at time T means
+        "this value held from T until the next row". Walking them forward and
+        taking a snapshot every min_gap seconds turns that back into the samples
+        a sensor would have produced -- including the values that did not change
+        and therefore have no row of their own."""
+        state = self.app.store.state_at(nid, since)
+        rows = self.app.store.rows_since(nid, since, now_ts)
+        out, last_emit = [], None
+        for ts, slot, value in rows:
+            if last_emit is not None and ts - last_emit >= min_gap and state:
+                out.append((last_ts, dict(state)))
+                last_emit = last_ts
+            state[slot] = value
+            last_ts = ts
+            if last_emit is None:
+                last_emit = ts
+        # Finish with the newest state, unless that moment was just emitted.
+        if rows and state and (not out or out[-1][0] != rows[-1][0]):
+            out.append((rows[-1][0], dict(state)))
+        # Oldest first, capped: a long outage should not post a year in one go.
+        return out[-max_n:]
+
+    def reading_from(self, nid, ts, slots, now_ts):
+        r = {"age": max(0, now_ts - ts)}
+        for name, slot, scale, dec in self.FIELDS:
+            if slot in slots:
+                v = slots[slot] * scale
+                r[name] = round(v, dec) if dec else int(v)
+        if 3 in slots:
+            dry, wet = self.app.calibration(nid)
+            pct = soil_pct(slots[3], dry, wet)
+            if pct is not None:
+                r["soil"] = pct
+        return r if any(k in r for k in self.MEASURED) else None
+
+    def build_nodes(self, now_ts=None):
+        """The ingest body's `nodes`, plus the newest timestamp per node so a
+        successful send knows exactly what to mark as sent."""
+        g = self.cfg()
+        now_ts = now_ts or now()
+        min_gap = max(60, int(g.get("min_gap_seconds", 300)))
+        max_n = max(1, int(g.get("max_per_device", 96)))
+        nodes, marks = [], {}
+        for key, ieee in sorted(g.get("devices", {}).items()):
+            nid = int(key)
+            since = self.app.store.upload_mark(nid)
+            samples = self.samples_for(nid, since, now_ts, min_gap, max_n)
+            readings = []
+            for ts, slots in samples:
+                r = self.reading_from(nid, ts, slots, now_ts)
+                if r:
+                    readings.append(r)
+            if not readings:
+                continue
+            meta = self.app.cfg.node(nid)
+            node = {"ieee": ieee, "readings": readings}
+            if meta.get("name"):
+                node["name"] = meta["name"][:60]
+            node["model"] = (meta.get("auto_kind") or meta.get("kind") or "Hivewire")[:40]
+            nodes.append(node)
+            marks[nid] = samples[-1][0]
+        return nodes, marks
+
+    # --- sending -----------------------------------------------------------
+    def post(self, path, body, token):
+        g = self.cfg()
+        url = (g.get("base_url") or "https://g4rden.com").rstrip("/") + path
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", self.FW)
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+        res = {"ts": now(), "url": url}
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                text = r.read(4000).decode("utf-8", "replace")
+                res.update(ok=200 <= r.status < 300, status=r.status, response=text)
+        except urllib.error.HTTPError as e:
+            text = e.read(4000).decode("utf-8", "replace")
+            res.update(ok=False, status=e.code, response=text)
+        except Exception as e:
+            res.update(ok=False, error="%s: %s" % (type(e).__name__, e))
+            return res
+        try:
+            res["json"] = json.loads(res.get("response") or "")
+        except ValueError:
+            pass
+        return res
+
+    def send_once(self):
+        """One upload. Never raises: the caller is a web request or a loop."""
+        g = self.cfg()
+        if not g.get("token"):
+            return {"ok": False, "error": "not paired yet -- enter a claim code from the site",
+                    "ts": now()}
+        nodes, marks = self.build_nodes()
+        if not nodes:
+            return {"ok": False, "ts": now(),
+                    "error": "nothing to send: map a node to a g4rden device, "
+                             "or wait for a new reading since the last upload"}
+        # A retry reuses the previous seq so the server can spot the duplicate.
+        if not g.get("retry_seq"):
+            g["seq"] = int(g.get("seq", 0)) + 1
+            g["retry_seq"] = g["seq"]
+            self.app.cfg.save()
+        body = {"seq": g["retry_seq"], "fw": self.FW, "nodes": nodes}
+        res = self.post("/api/device/ingest", body, g["token"])
+        res["sent"] = sum(len(n["readings"]) for n in nodes)
+        res["nodes"] = len(nodes)
+        if res.get("ok"):
+            for nid, ts in marks.items():
+                self.app.store.set_upload_mark(nid, ts)
+            g["retry_seq"] = None
+            self.app.cfg.save()
+            # The site can retune the interval without anyone reflashing anything.
+            j = res.get("json") or {}
+            iv = (j.get("config") or {}).get("intervalSec")
+            if iv and 60 <= int(iv) <= 86400 and int(iv) != int(g.get("interval_seconds", 900)):
+                g["interval_seconds"] = int(iv)
+                self.app.cfg.save()
+                res["interval_changed"] = int(iv)
+            self.last_success = res
+        elif res.get("status") == 401:
+            res["error"] = ("g4rden rejected the token (401). The gateway was probably "
+                            "removed on the site; pair again with a fresh claim code.")
+        self.last = res
+        self.app.store.event("upload", "%s %d reading(s) across %d node(s)%s" % (
+            "sent" if res.get("ok") else "FAILED sending", res["sent"], res["nodes"],
+            "" if res.get("ok") else " -- %s" % (res.get("error") or res.get("status"))))
+        return res
+
+    def run(self):
+        while True:
+            g = self.cfg()
+            try:
+                if g.get("enabled") and g.get("token"):
+                    self.send_once()
+            except Exception as e:
+                print("upload loop: %s: %s" % (type(e).__name__, e), flush=True)
+            self.wake.wait(max(60, int(g.get("interval_seconds", 900))))
+            self.wake.clear()
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 class App:
@@ -508,6 +760,7 @@ class App:
             self.store.event("system", "imported %d readings from readings.csv" % n)
         self.gw = FakeGateway() if args.fake else Gateway(args.port, args.yield_to)
         self.poller = Poller(self.gw, self.store, self.cfg)
+        self.uploader = Uploader(self)
         push_script = args.push_script or os.path.join(HERE, "..", "hivewire_push.py")
         self.pusher = Pusher(self.gw, self.store, os.path.join(args.data, "firmware"),
                              push_script, args.fake)
@@ -589,12 +842,18 @@ class App:
                 warnings = []
                 if age > stale:
                     warnings.append("not heard for %s" % fmt_age(age))
-                okslot = self.kinds.get(kind, {}).get("ok_slot")
-                if okslot and str(okslot["slot"]) in map(str, rec["slots"]):
+                spec = self.kinds.get(kind, {})
+                okslot = spec.get("ok_slot")
+                if okslot and okslot["slot"] in rec["slots"]:
                     v = rec["slots"][okslot["slot"]]
                     for bit, label in okslot["bits"].items():
                         if not v & int(bit):
                             warnings.append(label)
+                low = spec.get("warn_below")
+                if low and low["slot"] in rec["slots"]:
+                    v = rec["slots"][low["slot"]]
+                    if v <= low["value"]:
+                        warnings.append("%s (%s%%)" % (low["label"], v))
                 nodes.append({"id": nid, "kind": kind, "name": meta.get("name") or "",
                               "location": meta.get("location") or "", "age": age,
                               "hops": rec["hops"], "slots": rec["slots"],
@@ -796,6 +1055,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                               int(q["from"]), int(q["to"])))
         if path == "/api/export.csv":
             return self.export(q)
+        if path == "/api/g4rden":
+            g = dict(app.cfg.data["g4rden"])
+            g.pop("token", None)                  # never hand the token back out
+            g["paired"] = bool(app.cfg.data["g4rden"].get("token"))
+            nodes, _marks = app.uploader.build_nodes()
+            return self.send_json({"config": g, "last": app.uploader.last,
+                                   "last_success": app.uploader.last_success,
+                                   "queued": sum(len(n["readings"]) for n in nodes),
+                                   "marks": {k: app.store.upload_mark(int(k))
+                                             for k in g.get("devices", {})}})
         if path == "/api/events":
             return self.send_json(app.store.events(int(q.get("limit", 200))))
         if path == "/api/firmware":
@@ -896,6 +1165,71 @@ class Handler(http.server.BaseHTTPRequestHandler):
             app.sessions.clear()
             app.store.event("system", "password changed")
             return self.new_session()
+        if path == "/api/g4rden/config":
+            b = self.jbody()
+            g = dict(app.cfg.data["g4rden"])
+            if "base_url" in b:
+                u = (b["base_url"] or "").strip().rstrip("/")
+                if u and not re.match(r"^https?://[A-Za-z0-9.:_-]+(/.*)?$", u):
+                    raise ValueError("address must start with http:// or https://")
+                if u != g.get("base_url"):
+                    # A different destination has not been proven; make them test
+                    # again rather than silently posting the garden somewhere new.
+                    g["enabled"] = False
+                    g["token"] = ""
+                    g["gateway_id"] = None
+                g["base_url"] = u or "https://g4rden.com"
+            for k, lo, hi in (("interval_seconds", 60, 86400), ("min_gap_seconds", 60, 86400),
+                              ("max_per_device", 1, 500)):
+                if k in b:
+                    g[k] = max(lo, min(hi, int(b[k])))
+            if "devices" in b:
+                # node id -> the id this node has on the site. Its charset is
+                # what the server accepts for `ieee`.
+                out = {}
+                for k, v in b["devices"].items():
+                    v = str(v).strip()
+                    if not v:
+                        continue
+                    if not re.fullmatch(r"[A-Za-z0-9:_.-]{1,64}", v):
+                        raise ValueError("device id %r: letters, digits, : _ . - only" % v)
+                    out[str(int(k))] = v
+                g["devices"] = out
+            app.cfg.data["g4rden"] = g
+            app.cfg.save()
+            app.store.event("config", "g4rden: %s, devices=%s" % (g["base_url"], g["devices"] or "(none)"))
+            return self.send_json({"ok": True})
+        if path == "/api/g4rden/claim":
+            code = str(self.jbody().get("code", "")).strip()
+            if not re.fullmatch(r"[A-Za-z0-9-]{4,40}", code):
+                raise ValueError("a claim code looks like K7M2P-QR9WX")
+            return self.send_json(app.uploader.claim(code))
+        if path == "/api/g4rden/unpair":
+            app.cfg.data["g4rden"].update(token="", gateway_id=None, enabled=False)
+            app.cfg.save()
+            app.store.event("config", "g4rden unpaired")
+            return self.send_json({"ok": True})
+        if path == "/api/g4rden/preview":
+            # Exactly what a send would post, built the same way. No network.
+            g = app.cfg.data["g4rden"]
+            nodes, _marks = app.uploader.build_nodes()
+            return self.send_json({
+                "url": (g.get("base_url") or "").rstrip("/") + "/api/device/ingest",
+                "paired": bool(g.get("token")),
+                "body": {"seq": int(g.get("retry_seq") or g.get("seq", 0)) + (0 if g.get("retry_seq") else 1),
+                         "fw": Uploader.FW, "nodes": nodes}})
+        if path == "/api/g4rden/send":
+            return self.send_json(app.uploader.send_once())
+        if path == "/api/g4rden/enable":
+            want = bool(self.jbody().get("enabled"))
+            if want and not app.uploader.last_success:
+                raise ValueError("send one now first -- automatic uploads stay off "
+                                 "until a send to this URL has worked")
+            app.cfg.data["g4rden"]["enabled"] = want
+            app.cfg.save()
+            app.uploader.wake.set()
+            app.store.event("config", "g4rden uploads %s" % ("ON" if want else "off"))
+            return self.send_json({"ok": True})
         if path == "/api/poll":
             app.poller.wake.set()
             return self.send_json({"ok": True})
@@ -999,6 +1333,7 @@ def main():
     app = App(args)
     Handler.app = app
     app.poller.start()
+    app.uploader.start()
     srv = Server((args.listen, args.http_port), Handler)
     print("hive admin on http://%s:%d/ (%s)" % (args.listen, args.http_port,
           "simulated" if args.fake else args.port), flush=True)

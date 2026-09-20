@@ -438,6 +438,124 @@ views.firmware = async (el) => {
   load();
 };
 
+views.g4rden = async (el) => {
+  const r = await api("/api/g4rden");
+  const g = r.config, nodes = STATE.nodes;
+  const soilNodes = nodes.filter((n) => n.kind === "SoilNode" || g.devices[n.id]);
+  const lastLine = (x) => x ? `${fmtTime(x.ts)} — ${x.ok ? `sent ${x.sent} reading(s) across ${x.nodes} node(s)` : `failed: ${esc(x.error || "HTTP " + x.status)}`}` : "never";
+  el.innerHTML = `
+    <div class="head spread"><div><h1>g4rden</h1>
+      <div class="muted small">Upload plant readings to the g4rden site. Nothing leaves the Pi until you switch it on.</div></div>
+      <span class="pill ${g.enabled ? "good" : ""}">${g.enabled ? "uploading automatically" : "uploads off"}</span></div>
+
+    <div class="grid cols-2">
+      <div class="card stack"><h2>1 · Pair with your g4rden account</h2>
+        ${g.paired
+          ? `<div class="row"><span class="pill good">paired</span><span class="mono small">${esc(g.gateway_id || "")}</span></div>
+             <p class="muted small">The Pi holds a write token. It can post readings and nothing else — it cannot read your history or touch the account.</p>
+             <div><button class="danger" id="unpair">Forget this pairing</button></div>`
+          : `<p class="muted small">In g4rden, add a plant monitor. You get a claim code like <span class="mono">K7M2P-QR9WX</span> that lasts 15 minutes and works once.</p>
+             <form id="claimform" class="row" style="align-items:flex-end">
+               <label class="f">Claim code<input id="claim-code" placeholder="K7M2P-QR9WX" style="width:170px" required></label>
+               <button class="primary">Pair</button></form>`}
+        <details><summary class="muted small">Advanced: server address</summary>
+          <form id="urlform" class="row" style="align-items:flex-end;margin-top:10px">
+            <label class="f">Base URL<input id="base-url" value="${esc(g.base_url)}" style="width:230px"></label>
+            <button>Save</button></form>
+          <p class="muted small">Changing this clears the pairing: a different destination has not been tested.</p></details>
+        <div id="claim-msg" class="mono small"></div></div>
+
+      <div class="card stack"><h2>2 · Which node is which plant</h2>
+        <p class="muted small">Give each sensor the device id it should appear under on the site. A node with no id is never uploaded.</p>
+        <div class="tablewrap"><table id="map-table"></table></div>
+        <div class="row"><button class="primary" id="save-map">Save mapping</button>
+          <span class="muted small">${r.queued} reading(s) waiting to be sent</span></div></div>
+    </div>
+
+    <div class="card stack" style="margin-top:16px"><h2>3 · Test before switching it on</h2>
+      <div class="row"><button id="preview">Preview what would be sent</button>
+        <button class="primary" id="sendnow" ${g.paired ? "" : "disabled"}>Send one now</button></div>
+      <p class="muted small">Preview builds the exact request and touches no network. "Send one now" really uploads, and shows the site's reply.</p>
+      <div id="g-out" class="log mono" hidden></div>
+      <div class="kv" style="max-width:520px">
+        <div class="k">Last attempt</div><div class="v small">${lastLine(r.last)}</div>
+        <div class="k">Last success</div><div class="v small">${lastLine(r.last_success)}</div>
+      </div></div>
+
+    <div class="card stack" style="margin-top:16px"><h2>4 · Automatic uploads</h2>
+      <div class="row">
+        <button class="${g.enabled ? "danger" : "primary"}" id="toggle">${g.enabled ? "Turn uploads off" : "Turn uploads on"}</button>
+        <span class="muted small">${r.last_success ? "" : "A send has to succeed first."}</span></div>
+      <form id="cadence" class="row" style="align-items:flex-end">
+        <label class="f">Upload every (s)<input id="g-interval" type="number" min="60" max="86400" value="${g.interval_seconds}" style="width:120px"></label>
+        <label class="f">Minimum gap between samples (s)<input id="g-gap" type="number" min="60" max="86400" value="${g.min_gap_seconds}" style="width:150px"></label>
+        <label class="f">Max samples per node<input id="g-max" type="number" min="1" max="500" value="${g.max_per_device}" style="width:120px"></label>
+        <button>Save</button></form>
+      <p class="muted small">Readings are sent from where the last upload finished, so an outage catches up instead of leaving a gap. Sample age is sent rather than a clock reading — the site stamps the time.</p></div>`;
+
+  const out = (obj, label) => {
+    const box = $("#g-out"); box.hidden = false;
+    box.textContent = (label ? label + "\n\n" : "") + (typeof obj === "string" ? obj : JSON.stringify(obj, null, 1));
+  };
+  const tbl = $("#map-table");
+  tbl.innerHTML = `<tr><th>Node</th><th>g4rden device id</th><th>Uploaded up to</th></tr>` +
+    (soilNodes.map((n) => `<tr data-id="${n.id}"><td>${esc(nodeTitle(n))} <span class="muted small">#${n.id}</span></td>
+      <td><input data-dev value="${esc(g.devices[n.id] || "")}" placeholder="hive-${n.id}" style="width:190px"></td>
+      <td class="small muted">${r.marks[n.id] ? fmtTime(r.marks[n.id]) : "nothing sent yet"}</td></tr>`).join("") ||
+      '<tr><td colspan="3" class="muted">No plant sensors seen yet.</td></tr>');
+
+  if ($("#claimform")) $("#claimform").onsubmit = async (e) => {
+    e.preventDefault();
+    $("#claim-msg").textContent = "pairing…";
+    try {
+      const res = await api("/api/g4rden/claim", { code: $("#claim-code").value });
+      if (res.ok) { toast("Paired with g4rden"); render(); }
+      else out(res, "Pairing failed — codes are single-use and expire after 15 minutes.");
+    } catch (err) { $("#claim-msg").textContent = err.message; }
+  };
+  if ($("#unpair")) $("#unpair").onclick = async () => {
+    if (!confirm("Forget the g4rden pairing? Uploads stop until you pair again.")) return;
+    await api("/api/g4rden/unpair", {}); toast("Pairing forgotten"); render();
+  };
+  $("#urlform").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/api/g4rden/config", { base_url: $("#base-url").value }); toast("Saved — pair again for this address"); render(); }
+    catch (err) { toast(err.message); }
+  };
+  $("#save-map").onclick = async () => {
+    const devices = {};
+    tbl.querySelectorAll("tr[data-id]").forEach((tr) => { devices[tr.dataset.id] = $("[data-dev]", tr).value; });
+    try { await api("/api/g4rden/config", { devices }); toast("Mapping saved"); render(); }
+    catch (err) { toast(err.message); }
+  };
+  $("#preview").onclick = async () => {
+    const p = await api("/api/g4rden/preview", {});
+    const n = (p.body.nodes || []).reduce((a, x) => a + x.readings.length, 0);
+    out(p, `POST ${p.url}\n${p.paired ? "Authorization: Bearer <token held on the Pi>" : "NOT PAIRED — this would be refused"}\n${n} reading(s):`);
+  };
+  $("#sendnow").onclick = async (e) => {
+    e.target.disabled = true; out("sending…");
+    try {
+      const res = await api("/api/g4rden/send", {});
+      out(res, res.ok ? "Upload accepted by g4rden." : "Upload failed.");
+      if (res.ok) toast(`Sent ${res.sent} reading(s)`);
+    } catch (err) { out(err.message, "Upload failed."); }
+    finally { e.target.disabled = false; }
+  };
+  $("#toggle").onclick = async () => {
+    try { await api("/api/g4rden/enable", { enabled: !g.enabled }); render(); }
+    catch (err) { toast(err.message, 6000); }
+  };
+  $("#cadence").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/g4rden/config", { interval_seconds: +$("#g-interval").value,
+        min_gap_seconds: +$("#g-gap").value, max_per_device: +$("#g-max").value });
+      toast("Saved");
+    } catch (err) { toast(err.message); }
+  };
+};
+
 views.events = async (el) => {
   const ev = await api("/api/events?limit=300");
   el.innerHTML = `<div class="head"><h1>Activity</h1><div class="muted small">Commands, configuration changes, firmware and system events.</div></div>

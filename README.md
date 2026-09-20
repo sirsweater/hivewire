@@ -457,6 +457,15 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
   page (record the probe dry, then wet); moisture is computed from the raw
   reading, so recalibrating applies to the whole history and never needs a
   reflash.
+- **g4rden** — optional upload of plant readings to the
+  [g4rden](https://g4rden.com) site, speaking the same API as its Zigbee head:
+  pair once with a claim code, map each node to a device, then preview the
+  exact request, send one by hand, and only then switch on automatic uploads.
+  It is the one part that sends anything off the property, so it starts off and
+  refuses to be enabled until a send has actually worked. Batches resume from
+  where the last one finished, so an outage catches up instead of leaving a
+  hole, and each carries a sequence number so a lost response cannot write the
+  same readings twice.
 
 It uses the standard library and pyserial only, and loads nothing from the
 internet, so it works at a site with no connection. It polls the gateway's
