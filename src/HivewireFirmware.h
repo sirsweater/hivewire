@@ -42,6 +42,16 @@
 #include <esp_partition.h>
 #include <esp_image_format.h>
 
+// Declare this sketch's firmware family, for HivewireFwReceiver::setFamily():
+//
+//   HW_FW_FAMILY("SoilNode");          // at file scope
+//   fw.setFamily(hwFwFamily);           // in setup()
+//
+// The marker is stored in the image as one contiguous string, which is what a
+// receiver searches a new image for. The delimiters make it exact:
+// "<hwfam:Soil>" is not found inside "<hwfam:SoilNode>".
+#define HW_FW_FAMILY(name)   static const char hwFwFamily[] __attribute__((used)) = "<hwfam:" name ">"
+
 // Temporary: -DHW_FW_DEBUG=1 prints transfer mechanics to Serial. The ring
 // records outcomes; this records how it got there.
 #ifndef HW_FW_DEBUG
@@ -134,6 +144,15 @@ class HivewireFwReceiver {
   // reboot, and once nodes pass images on by themselves, accepting identical
   // copies would reboot the swarm around in circles.
   void setRunningImage(uint32_t len, uint32_t crc) { _runLen = len; _runCrc = crc; }
+
+  // Which kind of firmware this node runs. The hive broadcasts an image to
+  // every node at once, so in a mixed swarm a RangeNode build also reaches the
+  // soil sensors -- and one that installed it would come up as a RangeNode,
+  // under that image's default id. With a family set, an image must carry the
+  // SAME marker (HW_FW_FAMILY in its sketch) or it is refused at the end with
+  // "fw: wrong family", leaving the node untouched. No family set: accept any
+  // image, as before.
+  void setFamily(const char *marker) { _family = marker; }
 
   bool active() const { return _active; }
 
@@ -386,6 +405,10 @@ class HivewireFwReceiver {
       _node.log("fw: crc bad, refused");
       Update.abort(); _active = false; return;
     }
+    if (_family && !imageHas(_family)) {
+      _node.log("fw: wrong family, refused");
+      Update.abort(); _active = false; return;
+    }
     if (!Update.end(true)) {
       _node.log("fw: end failed");
       Update.abort(); _active = false; return;
@@ -395,6 +418,29 @@ class HivewireFwReceiver {
     if (_applied) _applied();          // e.g. make the next boot provisional
     delay(150);
     ESP.restart();
+  }
+
+  // Does the image just written contain `marker`? Read back from the update
+  // partition (not the RAM that was written from), in blocks overlapping by
+  // the marker's length so a match straddling two blocks is still found.
+  bool imageHas(const char *marker) {
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    size_t m = strlen(marker);
+    if (!part || !m || m > 64) return false;
+    static uint8_t blk[1024 + 64];
+    size_t carry = 0;
+    for (uint32_t off = 0; off < _written;) {
+      uint32_t n = _written - off;
+      if (n > 1024) n = 1024;
+      if (esp_partition_read(part, off, blk + carry, n) != ESP_OK) return false;
+      size_t have = carry + n;
+      for (size_t i = 0; i + m <= have; i++)
+        if (blk[i] == (uint8_t)marker[0] && !memcmp(blk + i, marker, m)) return true;
+      carry = m - 1 < have ? m - 1 : have;
+      memmove(blk, blk + have - carry, carry);
+      off += n;
+    }
+    return false;
   }
 
   // Append a completed window. Only whole windows reach flash, which is what
@@ -422,6 +468,7 @@ class HivewireFwReceiver {
   BeforeCallback _before = nullptr;
   BeforeCallback _applied = nullptr;
   uint32_t _runLen = 0, _runCrc = 0, _declinedAt = 0;
+  const char *_family = nullptr;
   bool     _active = false;
   uint32_t _imageLen = 0, _imageCrc = 0, _crc = 0, _written = 0;
   // Written by the receive callback, read by loop(): volatile so the read in

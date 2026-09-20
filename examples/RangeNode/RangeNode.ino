@@ -63,6 +63,8 @@ HivewireFwReceiver fw(node);
 // past the hive's own range -- whoever got the update hands it on.
 HivewireFwNodeSender  fwTx(node);
 HivewireFlashProvider flashSrc;
+// Only images of this same sketch are accepted -- see setFamily().
+HW_FW_FAMILY("RangeNode");
 Preferences  prefs;
 
 // --- observed --------------------------------------------------------------
@@ -260,6 +262,7 @@ void setup() {
     runningCrc = flashSrc.crc();
     fw.setRunningImage(flashSrc.length(), runningCrc);
   }
+  fw.setFamily(hwFwFamily);
   // An image pushed over ESP-NOW must prove itself like a WiFi one: the next
   // boot is provisional, and it reverts unless it rejoins the swarm.
   fw.onApplied([] { ota.markPending(); });

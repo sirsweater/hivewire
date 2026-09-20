@@ -204,6 +204,42 @@ static void sendDigest() {
   if (n > 2) uplink(buf);
 }
 
+// Every node's latest slot values, printed to the USB host and nowhere else.
+// `status` goes out over every uplink, LoRa included, so a Pi logging sensors
+// with it would spend airtime on each poll; this costs none. One line per
+// node, with how long ago it was last heard, so a reader can tell a live
+// reading from the last one a node sent before it went quiet:
+//
+//   DUMP <node> age=<s> hops=<n> <slot>=<value> ...
+//   DUMP END <nodes> ep=<epoch> m=<mode> up=<n> ok=<n> flt=<n>
+static void dumpSlots() {
+  uint16_t count = 0;
+  uint32_t now = millis();
+  for (int i = 0; i < 256; i++) {
+    const HivewireCoordinator::NodeRec &r = coord.node((uint8_t)i);
+    if (!r.seen) continue;
+    // Snapshot, and clamp: the radio task can stamp lastHeard after `now` was
+    // read, and unsigned subtraction would turn that into ~49 days.
+    uint32_t heard = r.lastHeard;
+    int32_t ageMs = (int32_t)(now - heard);
+    Serial.printf("DUMP %d age=%ld hops=%u", i, (long)(ageMs > 0 ? ageMs / 1000 : 0),
+                  r.hopsAway);
+    for (uint8_t s = 0; s < HIVEWIRE_MAX_SLOTS; s++) {
+      if (!r.slots[s].valid) continue;
+      Serial.printf(" %u=%ld", r.slots[s].id,
+                    (long)hwSlotAsInt(r.slots[s].type, r.slots[s].raw));
+    }
+    Serial.print("\n");
+    count++;
+  }
+  // The health that `status` would uplink, so a USB host never needs `status`.
+  uint16_t total = 0, converged = 0, faults = 0;
+  coord.census(&total, &converged, &faults, NODE_STALE_MS);
+  Serial.printf("DUMP END %u ep=%lu m=%u up=%u ok=%u flt=%u\n", count,
+                (unsigned long)coord.epoch(),
+                coord.stateLen() > 0 ? coord.state()[0] : 0, total, converged, faults);
+}
+
 // Uplink early when the picture materially changed, rate-limited so it can
 // never degrade into a stream.
 static void checkTriggers() {
@@ -218,6 +254,7 @@ static void checkTriggers() {
 //   mode <n> [param] [ttl]                 posture; reaches every unit
 //   set <all|rN|id> <slot> <value>         write a slot
 //   status                                 force a digest now
+//   dump                                   every node's slots, to USB ONLY
 //   log                                    replay the diagnostic ring
 //   push <len> <crc32>                     arm a firmware transfer; the bytes
 //                                          come over USB -- see below
@@ -227,6 +264,10 @@ static void handleCommand(const char *line) {
   // LoRa could have arrived any longer anyway.
   char buf[200];
   snprintf(buf, sizeof(buf), "%s", line);
+
+  // Answered before logging: a USB host polling this once a minute would
+  // otherwise push every real event out of the gateway's own ring.
+  if (!strncmp(buf, "dump", 4)) { dumpSlots(); return; }
   logf("cmd %.40s", buf);
 
   if (!strncmp(buf, "mode", 4)) {

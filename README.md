@@ -359,6 +359,29 @@ and the CRC it reports of its running partition:
 | Seed of the image a peer already runs | declined, no reboot on either side |
 | Push cut off at 160 KB | rejected as short, old image untouched |
 
+## Mixed swarms: firmware families
+
+The hive sends every image to every node at once. In a swarm of one kind of
+node that is what you want; in a mixed one it is a hazard — a RangeNode build
+pushed for the range probes also reaches the soil sensors, and one that
+installed it would come up as a RangeNode under that image's default id.
+
+So a sketch can declare a family, and a receiver refuses any image that does
+not carry the same one:
+
+```cpp
+HW_FW_FAMILY("SoilNode");        // file scope: embeds "<hwfam:SoilNode>" in the image
+fw.setFamily(hwFwFamily);         // setup(): only accept images that contain it
+```
+
+The check runs after the transfer and CRC, reading the new image back from
+flash before it is made bootable. A refused image leaves `fw: wrong family,
+refused` in the node's ring and the node exactly as it was. A node that sets no
+family accepts any image, as before, so existing builds keep working.
+[`examples/SoilNode`](examples/SoilNode) (air temperature and humidity, soil
+moisture, battery) and [`examples/RangeNode`](examples/RangeNode) both declare
+one.
+
 ## More than one uplink, and telling the hive to fetch something itself
 
 A gateway does not have to depend on exactly one path home.
@@ -413,6 +436,40 @@ firmware image and stayed running, the command channel resumed correctly the
 moment the transfer ended, and the reply to a status command sent afterward
 came back over **both** transports, `[uplink ch1]` and `[uplink-usb]`, with
 identical content — the multi-uplink replication working exactly as intended.
+
+## An admin page on the hive's host
+
+[`tools/hive_admin`](tools/hive_admin) is a web page served by whatever sits on
+the gateway's USB port — a Raspberry Pi, typically:
+
+```bash
+HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admin.sh
+```
+
+- **Dashboard** — every node, when it was last heard, its key readings, and a
+  warning when one goes quiet or reports a failed sensor.
+- **Node pages** — every slot with a label and unit, history charts, the node's
+  own log fetched over the air, writable slots and maintenance actions.
+- **Reports** — any reading over any range, daily low/average/high, CSV export.
+- **Firmware** — upload an app image (its size, CRC and family are read from
+  the file), see which nodes would install it, push it with live progress.
+- **Settings** — node names and locations, and soil calibration done in the
+  page (record the probe dry, then wet); moisture is computed from the raw
+  reading, so recalibrating applies to the whole history and never needs a
+  reflash.
+
+It uses the standard library and pyserial only, and loads nothing from the
+internet, so it works at a site with no connection. It polls the gateway's
+`dump` command, which answers on USB alone — the page costs no LoRa airtime
+until a person issues a command. It is the only program on the gateway's port:
+two readers on one tty split its output between them, and each sees half of
+its own replies.
+
+First visit asks for a setup code the Pi writes to `hive_data/setup_code.txt`,
+then a password, so nobody else on the network can claim the page first.
+Node types are described in [`kinds.json`](tools/hive_admin/kinds.json); add
+an entry for a new sketch and its slots get labels, units and charts. Try it
+without hardware: `python3 tools/hive_admin/hive_admin.py --fake`.
 
 ## Roles
 

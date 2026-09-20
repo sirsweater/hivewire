@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hive Admin</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2l12 7v14l-12 7-12-7V9z' fill='%23d9a21b'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="login-form" class="card login-card">
+    <div class="brand big"><span class="hex"></span>Hive Admin</div>
+    <p id="login-msg" class="muted">Sign in to manage the swarm.</p>
+    <input id="login-code" inputmode="numeric" autocomplete="one-time-code" placeholder="Setup code" hidden>
+    <input id="login-pw" type="password" autocomplete="current-password" placeholder="Password" required>
+    <input id="login-pw2" type="password" autocomplete="new-password" placeholder="Repeat password" hidden>
+    <button class="primary" type="submit" id="login-btn">Sign in</button>
+    <p id="login-err" class="err"></p>
+  </form>
+</div>
+
+<div id="shell" hidden>
+  <header class="top">
+    <div class="brand"><span class="hex"></span>Hive Admin</div>
+    <nav id="nav">
+      <a href="#/">Dashboard</a>
+      <a href="#/reports">Reports</a>
+      <a href="#/swarm">Swarm</a>
+      <a href="#/firmware">Firmware</a>
+      <a href="#/events">Activity</a>
+      <a href="#/settings">Settings</a>
+    </nav>
+    <div class="top-right">
+      <span id="conn" class="pill">…</span>
+    </div>
+  </header>
+  <main id="view"></main>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
