@@ -886,18 +886,22 @@ class App:
                     for bit, label in okslot["bits"].items():
                         if not v & int(bit):
                             warnings.append(label)
-                low = spec.get("warn_below")
+                # One rule or several: {slot, value, label, ignore, unit}.
+                rules = spec.get("warn_below") or []
+                if isinstance(rules, dict):
+                    rules = [rules]
                 dvals = self.derived(nid, kind, rec["slots"])
-                src = (dvals if str(low["slot"]).startswith("d:") else rec["slots"]) if low else {}
-                key = str(low["slot"])[2:] if low and str(low["slot"]).startswith("d:") else (
-                    low["slot"] if low else None)
-                if low and key in src:
+                for low in rules:
+                    ref = str(low["slot"])
+                    src, key = (dvals, ref[2:]) if ref.startswith("d:") else (rec["slots"], low["slot"])
+                    if key not in src:
+                        continue
                     v = src[key]
                     # `ignore` is the value that means "not measured" rather
                     # than a real low reading -- a board with no battery
                     # divider reports 0, and must not look like a flat one.
                     if v <= low["value"] and v != low.get("ignore"):
-                        warnings.append("%s (%s%%)" % (low["label"], v))
+                        warnings.append("%s (%s%s)" % (low["label"], v, low.get("unit", "")))
                 nodes.append({"id": nid, "kind": kind, "name": meta.get("name") or "",
                               "location": meta.get("location") or "", "age": age,
                               "hops": rec["hops"], "slots": rec["slots"],

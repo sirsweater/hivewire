@@ -24,7 +24,10 @@
       "volts": {"type": "volts", "from": 5, "label": "Battery voltage", "unit": "V", "decimals": 2, "chart": true}
     },
     "ok_slot": {"slot": 6, "bits": {"1": "air sensor not reading", "2": "soil probe not reading"}},
-    "warn_below": {"slot": "d:battery", "value": 20, "label": "battery low", "ignore": 0},
+    "warn_below": [
+      {"slot": "d:battery", "value": 20, "label": "battery low", "ignore": 0, "unit": "%"},
+      {"slot": 9, "value": -85, "label": "weak signal", "unit": " dBm"}
+    ],
     "actions": [
       {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}
     ]
@@ -54,6 +57,7 @@
       "24": {"label": "Seed firmware to node", "writable": true, "min": 0, "max": 255},
       "25": {"label": "Firmware CRC", "hex": true}
     },
+    "warn_below": [{"slot": 3, "value": -85, "label": "weak signal", "unit": " dBm"}],
     "actions": [
       {"label": "Reset counters", "slot": 22, "value": 1},
       {"label": "Reset signal floor", "slot": 22, "value": 2},

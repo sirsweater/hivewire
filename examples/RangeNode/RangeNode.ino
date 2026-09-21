@@ -213,9 +213,32 @@ static void onSafe() {
   Serial.println("[safe] lost the swarm");
 }
 
+// A node living in a hallway or a bedroom should not blink at anybody. The
+// SuperMini's addressable LED sits on GPIO8 and holds whatever colour it was
+// last given -- including one left by the bootloader -- until something writes
+// it again, so switching it off means writing black once, not leaving the pin
+// alone. The plain LED on GPIO15 differs in polarity between board revisions,
+// so its off level is a build setting rather than a guess baked in.
+//
+//   -DHW_KEEP_LEDS=1      leave the LEDs alone
+//   -DHW_LED_OFF_LEVEL=0  if yours is still lit (active-high board)
+#ifndef HW_LED_OFF_LEVEL
+#define HW_LED_OFF_LEVEL 1
+#endif
+static void quietLeds() {
+#ifndef HW_KEEP_LEDS
+#ifdef RGB_BUILTIN
+  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);
+#endif
+  pinMode(15, OUTPUT);
+  digitalWrite(15, HW_LED_OFF_LEVEL);
+#endif
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
+  quietLeds();                    // before anything else can light them
 
   // Reboot count is the one thing worth keeping across a power cycle: it is how
   // an unattended unit reports that its supply is sagging. Deliberately the
