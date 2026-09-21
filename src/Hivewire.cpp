@@ -76,9 +76,42 @@ static void hwOnSent(const wifi_tx_info_t *info, esp_now_send_status_t st) {
 #define HWLOG(...) do {} while (0)
 #endif
 
+// Long range, in two steps that never strand a node.
+//
+// Espressif's LR mode trades bit rate for sensitivity: ~250 kbps instead of
+// 1 Mbps, worth roughly 8-10 dB of link budget -- the difference between a
+// sensor at the far end of a house being marginal and being comfortable. The
+// catch is that an LR frame can only be decoded by a radio that has the LR
+// protocol bit enabled, so switching a swarm over naively cuts off every node
+// that has not been switched yet, including the ones you now cannot reach to
+// update.
+//
+// So the two halves are separated. RECEIVING LR is enabled here always: it
+// costs nothing, changes no transmission, and simply means this node can hear
+// an LR neighbour if one ever appears. TRANSMITTING at the LR rate is opt-in
+// per build (-DHW_LONG_RANGE=1, or =500 for the 500 kbps variant). Once every
+// node is running firmware with the receive half, senders can be switched over
+// one at a time, in any order, with nothing going deaf in between.
+//
+// The cost is airtime: a ~1.1 MB firmware push that takes ~3.5 minutes at
+// 1 Mbps takes closer to a quarter of an hour at 250 kbps.
+static void hwRadioReach() {
+  // Receive b/g/n AND long range. WIFI_PROTOCOL_LR alone would make this node
+  // unable to hear ordinary frames, which is the trap this avoids.
+  esp_err_t pr = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
+                                                    WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR);
+  // Ask for the most the radio will give. The default is not always the
+  // maximum, and a couple of dB is free range.
+  esp_wifi_set_max_tx_power(84);           // quarter-dBm units: 21 dBm, clamped
+  int8_t got = 0;
+  esp_wifi_get_max_tx_power(&got);
+  HWLOG("[hw] protocols -> %d, tx power %.2f dBm\n", (int)pr, got / 4.0);
+}
+
 static bool hwRadioBegin(uint8_t channel) {
   WiFi.mode(WIFI_STA);
   delay(500);                              // let USB CDC enumerate before we log
+  hwRadioReach();
   esp_err_t ce = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
   HWLOG("[hw] set_channel(%u) -> %d\n", channel, (int)ce);
 
@@ -98,6 +131,16 @@ static bool hwRadioBegin(uint8_t channel) {
   esp_err_t pe = esp_now_add_peer(&peer);
   HWLOG("[hw] add_peer -> %d  (mac %02x:%02x:%02x:%02x:%02x:%02x)\n", (int)pe,
         HW_BCAST[0], HW_BCAST[1], HW_BCAST[2], HW_BCAST[3], HW_BCAST[4], HW_BCAST[5]);
+
+#if defined(HW_LONG_RANGE) && HW_LONG_RANGE
+  // Transmit at the long-range rate. Only the broadcast peer needs it: every
+  // Hivewire message goes out that way.
+  esp_now_rate_config_t rc{};
+  rc.phymode = WIFI_PHY_MODE_LR;
+  rc.rate = (HW_LONG_RANGE == 500) ? WIFI_PHY_RATE_LORA_500K : WIFI_PHY_RATE_LORA_250K;
+  esp_err_t re = esp_now_set_peer_rate_config(HW_BCAST, &rc);
+  HWLOG("[hw] long range tx %s -> %d\n", (HW_LONG_RANGE == 500) ? "500K" : "250K", (int)re);
+#endif
 
   uint8_t pch = 0; wifi_second_chan_t sec;
   esp_wifi_get_channel(&pch, &sec);

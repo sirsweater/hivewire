@@ -228,8 +228,16 @@ static void onSafe() {
 static void quietLeds() {
 #ifndef HW_KEEP_LEDS
 #ifdef RGB_BUILTIN
-  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);
+  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);       // black, once
 #endif
+  // ...and then HOLD the data line low. Writing black is not enough: an
+  // addressable LED's input is high-impedance, so an undriven GPIO8 picks up
+  // noise -- every ESP-NOW transmission is enough -- and the LED reads it as a
+  // new colour. That is the flicker, and it comes back the moment the pin is
+  // left floating. A pin held low carries no frames, so the LED keeps the
+  // black it was given.
+  pinMode(PIN_RGB_LED, OUTPUT);
+  digitalWrite(PIN_RGB_LED, LOW);
   pinMode(15, OUTPUT);
   digitalWrite(15, HW_LED_OFF_LEVEL);
 #endif

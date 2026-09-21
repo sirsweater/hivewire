@@ -153,6 +153,8 @@ tr:last-child td { border-bottom: 0; }
 .chart .area { fill: var(--chart); opacity: .09; }
 .chart .dot { fill: var(--chart); }
 .chart .cursor { stroke: var(--muted); stroke-dasharray: 3 3; }
+.chart .mark { stroke: var(--chart-2); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .8; }
+.chart .mark-dot { fill: var(--chart-2); }
 .chart-tip { font-size: 13px; min-height: 1.3em; color: var(--muted); font-variant-numeric: tabular-nums; }
 .empty { color: var(--muted); padding: 40px 0; text-align: center; }
 

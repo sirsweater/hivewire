@@ -78,7 +78,7 @@ function chartable(kind, slots) {
 // ---------------------------------------------------------------------------
 // Chart: step line, because a stored value holds until the next one arrives.
 // ---------------------------------------------------------------------------
-function drawChart(host, points, spec, t0, t1) {
+function drawChart(host, points, spec, t0, t1, notes = []) {
   const pts = points.filter((p) => p[1] !== null && p[1] !== undefined);
   if (!pts.length) { host.innerHTML = '<div class="empty">No readings in this period yet.</div>'; return; }
   const W = 800, H = 240, L = 52, R = 12, T = 12, B = 26;
@@ -118,9 +118,14 @@ function drawChart(host, points, spec, t0, t1) {
       : new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     grid += `<text x="${X(t)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${lab}</text>`;
   }
+  // Markers: what a person did, drawn where they did it. A dip in a reading
+  // and "moved it to the hallway" are only related if you can see them together.
+  const marks = notes.filter((m) => m.ts >= t0 && m.ts <= tEnd).map((m) =>
+    `<line class="mark" x1="${X(m.ts)}" x2="${X(m.ts)}" y1="${T}" y2="${H - B}"/>` +
+    `<circle class="mark-dot" cx="${X(m.ts)}" cy="${T}" r="3"/>`).join("");
   host.innerHTML =
     `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(spec.label)} over time">` +
-    grid + `<path class="area" d="${area}"/><path class="line" d="${d}" vector-effect="non-scaling-stroke"/>` +
+    grid + `<path class="area" d="${area}"/>` + marks + `<path class="line" d="${d}" vector-effect="non-scaling-stroke"/>` +
     `<circle class="dot" cx="${X(Math.max(last[0], t0))}" cy="${Y(last[1] * scale)}" r="3.5"/>` +
     `<line class="cursor" y1="${T}" y2="${H - B}" x1="-10" x2="-10"/></svg>` +
     `<div class="chart-tip">Latest: ${esc(fmtVal(spec, last[1]))} · ${fmtTime(last[0])}</div>`;
@@ -132,7 +137,9 @@ function drawChart(host, points, spec, t0, t1) {
     let p = pts[0];
     for (const q of pts) { if (q[0] <= t) p = q; else break; }
     cur.setAttribute("x1", x); cur.setAttribute("x2", x);
-    tip.textContent = `${fmtVal(spec, p[1])} · ${fmtTime(Math.max(t0, Math.round(t)))}`;
+    const near = notes.filter((m) => Math.abs(X(m.ts) - x) < 6);
+    tip.textContent = `${fmtVal(spec, p[1])} · ${fmtTime(Math.max(t0, Math.round(t)))}`
+      + (near.length ? `  —  ${near.map((m) => m.text).join(" | ")}` : "");
   });
   svg.addEventListener("mouseleave", () => {
     cur.setAttribute("x1", -10); cur.setAttribute("x2", -10);
@@ -197,7 +204,7 @@ views.node = async (el, id) => {
     <div class="head spread"><div>
       <h1>${esc(nodeTitle(n))}</h1>
       <div class="muted small">#${n.id} · ${esc(n.kind || "unknown type")}${n.location ? " · " + esc(n.location) : ""} · heard ${fmtAge(n.age)}</div>
-    </div><a class="btn" href="#/settings">Edit name &amp; calibration</a></div>
+    </div><div class="row"><button id="addmark">Add marker</button><a class="btn" href="#/settings">Edit name &amp; calibration</a></div></div>
     ${n.warnings.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px">${n.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
     <div class="card stack">
       <div class="spread"><div class="tabs" id="metric-tabs"></div><div class="tabs" id="range-tabs"></div></div>
@@ -220,6 +227,11 @@ views.node = async (el, id) => {
           <div id="nodelog" class="log mono" hidden></div></div>
       </div>
     </div>`;
+  $("#addmark").onclick = async () => {
+    const text = prompt("What happened? (shows as a line on every chart)", "");
+    if (!text) return;
+    try { await api("/api/note", { text }); toast("Marker added"); load(); } catch (e) { toast(e.message); }
+  };
   const mt = $("#metric-tabs"), rt = $("#range-tabs");
   const drawTabs = () => {
     mt.innerHTML = metrics.map((m) => `<button data-m="${m}" class="${m === metric ? "on" : ""}">${esc(slotSpec(n.kind, m).label)}</button>`).join("");
@@ -228,8 +240,11 @@ views.node = async (el, id) => {
   const load = async () => {
     drawTabs();
     const t1 = Math.floor(Date.now() / 1000), t0 = t1 - range;
-    const r = await api(`/api/series?node=${nid}&slot=${encodeURIComponent(metric)}&from=${t0}&to=${t1}`);
-    drawChart($("#chart"), r.points, slotSpec(n.kind, metric), t0, t1);
+    const [r, notes] = await Promise.all([
+      api(`/api/series?node=${nid}&slot=${encodeURIComponent(metric)}&from=${t0}&to=${t1}`),
+      api(`/api/notes?from=${t0}&to=${t1}`),
+    ]);
+    drawChart($("#chart"), r.points, slotSpec(n.kind, metric), t0, t1, notes);
   };
   mt.onclick = (e) => { if (e.target.dataset.m) { metric = e.target.dataset.m; (views.node.metric ||= {})[nid] = metric; load(); } };
   rt.onclick = (e) => { if (e.target.dataset.r) { range = +e.target.dataset.r; views.node.range = range; load(); } };
@@ -329,8 +344,11 @@ views.reports = async (el) => {
     const spec = slotSpec(n.kind, metSel.value);
     $("#r-title").textContent = `${spec.label} · ${nodeTitle(n)}`;
     $("#r-csv").href = `/api/export.csv?node=${n.id}&slot=${encodeURIComponent(metSel.value)}&from=${t0}&to=${t1}`;
-    const r = await api(`/api/report?node=${n.id}&slot=${encodeURIComponent(metSel.value)}&from=${t0}&to=${t1}`);
-    drawChart($("#r-chart"), r.points, spec, t0, t1);
+    const [r, notes] = await Promise.all([
+      api(`/api/report?node=${n.id}&slot=${encodeURIComponent(metSel.value)}&from=${t0}&to=${t1}`),
+      api(`/api/notes?from=${t0}&to=${t1}`),
+    ]);
+    drawChart($("#r-chart"), r.points, spec, t0, t1, notes);
     const S = r.summary;
     $("#r-summary").innerHTML = S ? [["Lowest", S.min], ["Average", S.avg], ["Highest", S.max]].map(([l, v]) =>
       `<div class="stat"><div class="v">${esc(fmtVal(spec, v))}</div><div class="k">${l}</div></div>`).join("") +

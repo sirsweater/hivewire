@@ -98,6 +98,14 @@ class Store:
         with self.db() as c:
             c.execute("INSERT INTO events VALUES(?,?,?)", (now(), kind, text))
 
+    def notes(self, t0, t1):
+        """Markers a person left, for drawing on charts: "moved the cactus",
+        "unplugged it". A reading alone cannot say why it changed."""
+        with self.db() as c:
+            return [{"ts": r[0], "text": r[2]} for r in c.execute(
+                "SELECT * FROM events WHERE kind='note' AND ts BETWEEN ? AND ? ORDER BY ts",
+                (t0, t1))]
+
     def events(self, limit=200):
         with self.db() as c:
             return [dict(r) for r in c.execute(
@@ -1160,6 +1168,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json({"direct_seconds": direct, "relay_seconds": relay,
                                    "relay_fraction": round(relay / total, 4) if total else None,
                                    "from": t0, "to": t1, "samples": len(pts)})
+        if path == "/api/notes":
+            t1 = int(q.get("to") or now())
+            t0 = int(q.get("from") or t1 - 86400)
+            return self.send_json(app.store.notes(t0, t1))
         if path == "/api/events":
             return self.send_json(app.store.events(int(q.get("limit", 200))))
         if path == "/api/firmware":
@@ -1334,6 +1346,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             app.uploader.wake.set()
             app.store.event("config", "g4rden uploads %s" % ("ON" if want else "off"))
             return self.send_json({"ok": True})
+        if path == "/api/note":
+            text = str(self.jbody().get("text", "")).strip()[:200]
+            if not text:
+                raise ValueError("a marker needs a note saying what happened")
+            app.store.event("note", text)
+            return self.send_json({"ok": True, "ts": now()})
         if path == "/api/poll":
             app.poller.wake.set()
             return self.send_json({"ok": True})
