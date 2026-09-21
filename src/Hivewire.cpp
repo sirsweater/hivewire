@@ -100,8 +100,13 @@ static void hwRadioReach() {
   // unable to hear ordinary frames, which is the trap this avoids.
   esp_err_t pr = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
                                                     WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR);
-  // Ask for the most the radio will give. The default is not always the
-  // maximum, and a couple of dB is free range.
+  // Ask for the most the radio will give, and log what it actually granted.
+  // MEASURED on an ESP32-C6 SuperMini: the default was ALREADY 20.00 dBm, the
+  // chip's ceiling, and this request is simply clamped to it. So this buys
+  // nothing here and is kept only because it costs nothing and other parts or
+  // core versions do start lower. If a link is weak on this hardware, transmit
+  // power is not the lever -- the antenna, its surroundings, or the long-range
+  // PHY below are.
   esp_wifi_set_max_tx_power(84);           // quarter-dBm units: 21 dBm, clamped
   int8_t got = 0;
   esp_wifi_get_max_tx_power(&got);
