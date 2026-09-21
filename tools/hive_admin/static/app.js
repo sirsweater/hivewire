@@ -576,6 +576,7 @@ views.settings = async (el) => {
     <div class="head"><h1>Settings</h1></div>
     <div class="card"><h2>Nodes</h2>
       <p class="muted small">Soil calibration: put the probe in dry air and press <b>Use as dry</b>, then in water and press <b>Use as wet</b>. Moisture % everywhere, including past readings, is recalculated from the raw value; nothing is reflashed.</p>
+      <p class="muted small">Battery correction: the divider resistors and the chip's converter are each a few percent out, so a full cell can read 4.13 V. Charge it fully and press <b>It is fully charged</b>, or measure the cell and enter the figure. Applies to stored history too.</p>
       <div class="tablewrap"><table id="nodes-table"></table></div></div>
     <div class="grid cols-2" style="margin-top:16px">
       <div class="card stack"><h2>Polling</h2>
@@ -595,7 +596,7 @@ views.settings = async (el) => {
             <select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label></div></div>
     </div>`;
   const tbl = $("#nodes-table");
-  tbl.innerHTML = `<tr><th>#</th><th>Name</th><th>Location</th><th>Type</th><th>Soil dry / wet (raw)</th><th>Hide</th><th></th></tr>` +
+  tbl.innerHTML = `<tr><th>#</th><th>Name</th><th>Location</th><th>Type</th><th>Soil dry / wet (raw)</th><th>Battery correction</th><th>Hide</th><th></th></tr>` +
     nodes.map((n) => {
       const c = cfg.nodes[n.id] || {};
       const soil = n.kind === "SoilNode";
@@ -608,6 +609,10 @@ views.settings = async (el) => {
           <input data-k="soil_wet" type="number" value="${c.soil_wet ?? ""}" placeholder="1200" style="width:80px"></div>
           <div class="row small" style="margin-top:6px"><span class="muted">now ${n.slots[3] ?? "—"}</span>
           <button type="button" data-cal="soil_dry">Use as dry</button><button type="button" data-cal="soil_wet">Use as wet</button></div>` : '<span class="muted">—</span>'}</td>
+        <td>${n.slots[5] ? `<div class="row"><input data-k="batt_scale" type="number" step="0.001" min="0.8" max="1.25" value="${c.batt_scale ?? ""}" placeholder="1.000" style="width:90px"></div>
+          <div class="row small" style="margin-top:6px"><span class="muted">reads ${(n.slots[5] / 1000).toFixed(2)} V</span>
+          <button type="button" data-battfull>It is fully charged</button>
+          <button type="button" data-battmeas>Enter measured V</button></div>` : '<span class="muted">—</span>'}</td>
         <td><input data-k="hidden" type="checkbox" ${c.hidden ? "checked" : ""}></td>
         <td><button class="primary" data-save>Save</button></td></tr>`;
     }).join("");
@@ -615,6 +620,20 @@ views.settings = async (el) => {
     const tr = e.target.closest("tr[data-id]");
     if (!tr) return;
     const nid = +tr.dataset.id;
+    const battSet = (v) => {
+      const raw = (nodes.find((n) => n.id === nid) || {}).slots?.[5];
+      if (!raw) return toast("No battery reading from this node");
+      $('[data-k="batt_scale"]', tr).value = (v * 1000 / raw).toFixed(4);
+      toast(`Correction ${(v * 1000 / raw).toFixed(3)} — press Save to keep it`);
+    };
+    // A LiPo that has finished charging sits at 4.20 V, which makes a decent
+    // reference without a meter. A measured value is better if you have one.
+    if (e.target.dataset.battfull !== undefined) battSet(4.20);
+    if (e.target.dataset.battmeas !== undefined) {
+      const v = parseFloat(prompt("Battery voltage measured at the cell, in volts:", "4.20"));
+      if (v >= 2.5 && v <= 4.5) battSet(v);
+      else if (!isNaN(v)) toast("That is not a LiPo voltage (2.5-4.5 V)");
+    }
     if (e.target.dataset.cal) {
       const raw = (nodes.find((n) => n.id === nid) || {}).slots?.[3];
       if (raw === undefined) return toast("No raw soil reading yet");

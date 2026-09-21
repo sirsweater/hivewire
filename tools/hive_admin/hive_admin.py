@@ -835,6 +835,16 @@ class App:
         n = self.cfg.node(nid)
         return n.get("soil_dry", 2800), n.get("soil_wet", 1200)
 
+    def batt_scale(self, nid):
+        """Correction for this board's divider and ADC. The resistors are 1%
+        or 5% parts and the C6's ADC is good to a few percent, so a node can
+        read a full cell as 4.13 V. Measured once and applied here, the whole
+        stored history is corrected rather than just readings from now on."""
+        try:
+            return max(0.8, min(1.25, float(self.cfg.node(nid).get("batt_scale", 1.0))))
+        except (TypeError, ValueError):
+            return 1.0
+
     def derived(self, nid, kind, slots):
         """Values computed here rather than in firmware -- e.g. soil moisture
         from the raw reading and this node's calibration, so recalibrating
@@ -844,6 +854,10 @@ class App:
         for key, d in spec.get("derived", {}).items():
             if d["type"] == "soil_pct" and d["from"] in slots:
                 out[key] = soil_pct(slots[d["from"]], *self.calibration(nid))
+            elif d["type"] == "lipo_pct" and slots.get(d["from"]):
+                out[key] = lipo_pct(slots[d["from"]] * self.batt_scale(nid))
+            elif d["type"] == "volts" and slots.get(d["from"]):
+                out[key] = round(slots[d["from"]] * self.batt_scale(nid) / 1000.0, 2)
         return out
 
     def state(self):
@@ -873,8 +887,12 @@ class App:
                         if not v & int(bit):
                             warnings.append(label)
                 low = spec.get("warn_below")
-                if low and low["slot"] in rec["slots"]:
-                    v = rec["slots"][low["slot"]]
+                dvals = self.derived(nid, kind, rec["slots"])
+                src = (dvals if str(low["slot"]).startswith("d:") else rec["slots"]) if low else {}
+                key = str(low["slot"])[2:] if low and str(low["slot"]).startswith("d:") else (
+                    low["slot"] if low else None)
+                if low and key in src:
+                    v = src[key]
                     # `ignore` is the value that means "not measured" rather
                     # than a real low reading -- a board with no battery
                     # divider reports 0, and must not look like a flat one.
@@ -889,6 +907,25 @@ class App:
                 "health": snap["health"] if snap else None, "nodes": nodes,
                 "error": self.poller.last_error, "pushing": self.gw.pushing,
                 "fake": bool(self.args.fake)}
+
+
+# The same LiPo discharge curve the node uses, so the calibrated percentage and
+# the node's own agree on everything except the voltage correction.
+LIPO_CURVE = [(3300, 0), (3450, 5), (3680, 10), (3740, 20), (3770, 30), (3790, 40),
+              (3820, 50), (3870, 60), (3950, 70), (4000, 80), (4100, 90), (4200, 100)]
+
+
+def lipo_pct(mv):
+    if mv <= LIPO_CURVE[0][0]:
+        return 0.0
+    if mv >= LIPO_CURVE[-1][0]:
+        return 100.0
+    for i in range(1, len(LIPO_CURVE)):
+        v1, p1 = LIPO_CURVE[i]
+        if mv < v1:
+            v0, p0 = LIPO_CURVE[i - 1]
+            return round(p0 + (mv - v0) * (p1 - p0) / float(v1 - v0), 1)
+    return 100.0
 
 
 def soil_pct(raw, dry, wet):
@@ -1111,8 +1148,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not d:
                 return []
             raw = self.series(node, str(d["from"]), t0, t1)
-            dry, wet = app.calibration(node)
-            return [(t, soil_pct(v, dry, wet)) for t, v in raw]
+            # The same conversions as the live values, so a chart and the card
+            # it came from cannot disagree.
+            if d["type"] == "soil_pct":
+                dry, wet = app.calibration(node)
+                return [(t, soil_pct(v, dry, wet)) for t, v in raw]
+            sc = app.batt_scale(node)
+            if d["type"] == "lipo_pct":
+                return [(t, lipo_pct(v * sc) if v else None) for t, v in raw]
+            if d["type"] == "volts":
+                return [(t, round(v * sc / 1000.0, 2) if v else None) for t, v in raw]
+            return []
         s = int(slot)
         pts = app.store.series(node, s, t0, t1)
         before = app.store.last_before(node, s, t0)
@@ -1262,11 +1308,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/node":
             b = self.jbody()
             nid = int(b.pop("id"))
-            allowed = {"name", "location", "kind", "soil_dry", "soil_wet", "hidden", "notes"}
+            allowed = {"name", "location", "kind", "soil_dry", "soil_wet", "hidden",
+                       "notes", "batt_scale"}
             patch = {k: v for k, v in b.items() if k in allowed}
             for k in ("soil_dry", "soil_wet"):
                 if k in patch and patch[k] not in (None, ""):
                     patch[k] = int(patch[k])
+            if patch.get("batt_scale") not in (None, ""):
+                sc = float(patch["batt_scale"])
+                if not 0.8 <= sc <= 1.25:
+                    raise ValueError("battery correction must be between 0.8 and 1.25; "
+                                     "a bigger gap than that is a wiring problem, not tolerance")
+                patch["batt_scale"] = round(sc, 4)
             app.cfg.set_node(nid, patch)
             app.store.event("config", "node %d: %s" % (nid, ", ".join(
                 "%s=%s" % kv for kv in patch.items())))

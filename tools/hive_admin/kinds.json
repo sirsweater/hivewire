@@ -2,27 +2,29 @@
   "SoilNode": {
     "description": "Plant sensor: air temperature and humidity, soil moisture, battery",
     "match": {"has": [1, 2, 3, 6], "lacks": [20]},
-    "headline": ["d:soil", "1", "2", "10"],
+    "headline": ["d:soil", "1", "2", "d:battery"],
     "slots": {
       "1":  {"label": "Air temperature", "unit": "°C", "scale": 0.01, "decimals": 1, "chart": true},
       "2":  {"label": "Humidity", "unit": "%RH", "scale": 0.01, "decimals": 0, "chart": true},
       "3":  {"label": "Soil (raw ADC)", "chart": true},
       "4":  {"label": "Soil (firmware %)", "unit": "%", "note": "uses the placeholder calibration compiled in; the admin's own soil % uses yours"},
-      "5":  {"label": "Battery voltage", "unit": "V", "scale": 0.001, "decimals": 2, "chart": true, "zero_means": "no divider fitted"},
+      "5":  {"label": "Battery voltage (raw)", "unit": "V", "scale": 0.001, "decimals": 2, "chart": true, "zero_means": "no divider fitted", "note": "as the node measures it; the calibrated value applies this board's correction"},
       "6":  {"label": "Sensors ok", "bits": {"1": "air sensor", "2": "soil probe", "4": "battery divider"}},
       "7":  {"label": "Boots"},
       "8":  {"label": "Uptime", "unit": "min"},
       "9":  {"label": "Signal", "unit": "dBm", "chart": true},
-      "10": {"label": "Battery", "unit": "%", "chart": true, "zero_means": "no divider fitted"},
+      "10": {"label": "Battery (node's own %)", "unit": "%", "chart": true, "zero_means": "no divider fitted"},
       "22": {"label": "Action", "writable": true, "min": 0, "max": 5},
       "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255},
       "25": {"label": "Firmware CRC", "hex": true}
     },
     "derived": {
-      "soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true}
+      "soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true},
+      "battery": {"type": "lipo_pct", "from": 5, "label": "Battery", "unit": "%", "decimals": 0, "chart": true},
+      "volts": {"type": "volts", "from": 5, "label": "Battery voltage", "unit": "V", "decimals": 2, "chart": true}
     },
     "ok_slot": {"slot": 6, "bits": {"1": "air sensor not reading", "2": "soil probe not reading"}},
-    "warn_below": {"slot": 10, "value": 20, "label": "battery low", "ignore": 0},
+    "warn_below": {"slot": "d:battery", "value": 20, "label": "battery low", "ignore": 0},
     "actions": [
       {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}
     ]
