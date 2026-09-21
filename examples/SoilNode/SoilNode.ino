@@ -65,6 +65,12 @@ static uint8_t NODE_ID = HW_NODE_ID;
 // A capacitive probe's oscillator needs a moment after power-up before its
 // output means anything; measured settling is tens of ms, so this is generous.
 #define SOIL_SETTLE_MS 120
+// How far apart nine consecutive samples may be before the probe is considered
+// disconnected. A wired probe on this bench moved ~10 counts; a bare pin moved
+// over a thousand. Anything in between is noise worth knowing about.
+#ifndef SOIL_MAX_SPREAD
+#define SOIL_MAX_SPREAD 250
+#endif
 
 // ---- soil calibration -------------------------------------------------------
 // Placeholders until measured on this probe: note the raw value (slot 3) in
@@ -98,6 +104,7 @@ static uint16_t battMv    = 0;       // 0 = no divider fitted / not measured
 static uint8_t  battPct   = 0;       // from the LiPo curve, not a linear scale
 static uint8_t  sensorOk  = 0;       // bit0 AHT20, bit1 soil
 static uint16_t ahtFails  = 0;
+static uint16_t soilBadReads = 0;
 static uint32_t bootCount = 0;
 static uint32_t runningCrc = 0;
 static uint8_t  lastAction = 0, otaArm = 0;
@@ -150,7 +157,9 @@ static int cmpU16(const void *a, const void *b) {
 }
 
 // Middle of N reads. `powered` energises the probe for the measurement only.
-static uint16_t medianAdc(uint8_t pin, bool powered) {
+// `spread` returns how far apart those reads were: that, not the value itself,
+// is what tells a connected probe from a bare pin -- see readSensors().
+static uint16_t medianAdc(uint8_t pin, bool powered, uint16_t *spread = nullptr) {
 #if SOIL_PWR_PIN >= 0
   if (powered) { digitalWrite(SOIL_PWR_PIN, HIGH); delay(SOIL_SETTLE_MS); }
 #else
@@ -162,6 +171,7 @@ static uint16_t medianAdc(uint8_t pin, bool powered) {
   if (powered) digitalWrite(SOIL_PWR_PIN, LOW);
 #endif
   qsort(s, 9, sizeof(s[0]), cmpU16);
+  if (spread) *spread = s[8] - s[0];
   return s[4];
 }
 
@@ -274,10 +284,20 @@ static void readSensors() {
   // noisy, and one electrical glitch -- the radio transmitting mid-read is
   // enough -- drags a mean far enough to trip the report threshold and land a
   // fictional reading in the history. A median ignores an outlier completely.
-  soilRaw = medianAdc(SOIL_ADC_PIN, true);
-  // A floating pin reads near 0 or near full scale; a real probe sits between.
-  bool soilPlausible = soilRaw > 200 && soilRaw < 4000;
+  uint16_t spread = 0;
+  soilRaw = medianAdc(SOIL_ADC_PIN, true, &spread);
+  // Judge the probe by how far its own samples DISAGREE, not by whether the
+  // number looks sane. A disconnected pin gives readings that are individually
+  // plausible and collectively nonsense: measured on a board with no probe,
+  // 1592, 453 and 1468 within a few seconds, every one of them inside the
+  // "sensible" range and averaging to a confident lie. A connected probe moves
+  // by a handful of counts across the same nine samples.
+  bool soilSteady = spread <= SOIL_MAX_SPREAD;
+  bool soilPlausible = soilRaw > 200 && soilRaw < 4000 && soilSteady;
   sensorOk = soilPlausible ? (sensorOk | 2) : (sensorOk & ~2);
+  if (!soilPlausible && ++soilBadReads % 20 == 1)
+    node.log("soil: median %u spread %u -- %s", soilRaw, spread,
+             soilSteady ? "out of range" : "probe not connected?");
   float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilRaw) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
   soilPct = pct < 0 ? 0 : pct > 100 ? 100 : (uint8_t)lroundf(pct);
 
