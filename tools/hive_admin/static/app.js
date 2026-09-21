@@ -178,7 +178,7 @@ views.dashboard = async (el) => {
     cards.insertAdjacentHTML("beforeend", `
       <a class="card node-card" href="#/node/${n.id}">
         <div class="spread"><div class="title">${esc(nodeTitle(n))}</div><span class="pill ${cls}">${fmtAge(n.age)}</span></div>
-        <div class="sub">#${n.id} · ${esc(n.kind || "unknown type")}${n.location ? " · " + esc(n.location) : ""}${n.hops ? " · " + n.hops + " hop" + (n.hops > 1 ? "s" : "") : ""}</div>
+        <div class="sub">#${n.id} · ${esc(n.kind || "unknown type")}${n.location ? " · " + esc(n.location) : ""}${n.hops ? " · via a relay, " + n.hops + " hop" + (n.hops > 1 ? "s" : "") : ""}</div>
         <div class="kv">${rows}</div>
         ${n.warnings.length ? `<div class="warnings">${n.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
       </a>`);
@@ -212,6 +212,9 @@ views.node = async (el, id) => {
             <button>Write</button></form>
           <p class="muted small">Writes go out over the swarm and the gateway echoes them over LoRa too, so each one costs a little airtime.</p>
           <div id="set-reply" class="mono muted"></div></div>
+        <div class="card"><h2>Path to the hive</h2>
+          <div id="linkpath" class="muted">checking…</div>
+          <p class="muted small">The hive records the hop count of the first copy of each report it receives. Direct means the node was heard without help; via a relay means that report only got through because another node carried it.</p></div>
         <div class="card"><div class="spread"><h2>Node's own log</h2><button id="getlog">Fetch</button></div>
           <p class="muted small">Asks the node over the air for its recent history. Takes ~10 seconds, and the reply is relayed over LoRa.</p>
           <div id="nodelog" class="log mono" hidden></div></div>
@@ -267,6 +270,20 @@ views.node = async (el, id) => {
     try { const r = await api("/api/set", { target: String(nid), slot, value }); $("#set-reply").textContent = r.reply || "no reply from the gateway"; }
     catch (err) { $("#set-reply").textContent = err.message; }
   };
+  (async () => {
+    const box = $("#linkpath");
+    try {
+      const r = await api(`/api/linkpath?node=${nid}&from=${Math.floor(Date.now() / 1000) - 86400}`);
+      if (r.relay_fraction === null) { box.textContent = "No reports stored yet."; return; }
+      const pct = Math.round(r.relay_fraction * 100);
+      const now = n.hops ? `now: via a relay (${n.hops} hop${n.hops > 1 ? "s" : ""})` : "now: heard directly";
+      box.innerHTML = `<div class="row"><span class="pill ${n.hops ? "warn" : "good"}">${now}</span></div>
+        <div class="kv" style="max-width:420px">
+          <div class="k">Last 24 hours</div><div class="v">${100 - pct}% direct · ${pct}% via a relay</div>
+        </div>`;
+    } catch (e) { box.textContent = e.message; }
+  })();
+
   $("#getlog").onclick = async (e) => {
     const b = e.target; b.disabled = true; b.textContent = "Asking…";
     const box = $("#nodelog"); box.hidden = false; box.textContent = "Waiting for the node…";

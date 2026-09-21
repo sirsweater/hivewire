@@ -16,7 +16,8 @@
       "10": {"label": "Battery (node's own %)", "unit": "%", "chart": true, "zero_means": "no divider fitted"},
       "22": {"label": "Action", "writable": true, "min": 0, "max": 5},
       "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255},
-      "25": {"label": "Firmware CRC", "hex": true}
+      "25": {"label": "Firmware CRC", "hex": true},
+      "250": {"label": "Hops to the hive", "chart": true, "note": "0 = heard directly; 1 = its report only reached the hive through a relay"}
     },
     "derived": {
       "soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true},
@@ -55,7 +56,8 @@
       "22": {"label": "Action", "writable": true, "min": 0, "max": 5},
       "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255},
       "24": {"label": "Seed firmware to node", "writable": true, "min": 0, "max": 255},
-      "25": {"label": "Firmware CRC", "hex": true}
+      "25": {"label": "Firmware CRC", "hex": true},
+      "250": {"label": "Hops to the hive", "chart": true, "note": "0 = heard directly; 1 = its report only reached the hive through a relay"}
     },
     "warn_below": [{"slot": 3, "value": -85, "label": "weak signal", "unit": " dBm"}],
     "actions": [

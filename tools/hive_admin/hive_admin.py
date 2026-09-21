@@ -46,6 +46,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
+# Stored like a slot so it charts and reports like everything else, but it is
+# the hive's observation of the node, not something the node published. Node
+# slot ids are an application's own business, so this sits well clear of them.
+HOPS_SLOT = 250
 DUMP_END = re.compile(r"DUMP END (\d+)(.*)")
 PAIRS = re.compile(r"(\w+)=(-?\d+)")
 FAMILY = re.compile(rb"<hwfam:([A-Za-z0-9_.-]{1,40})>")
@@ -435,7 +439,7 @@ class Poller(threading.Thread):
                 if not self.cfg.node(nid):
                     self.store.event("node", "node %d first seen" % nid)
                     self.cfg.set_node(nid, {"first_seen": t})
-            for sid, v in rec["slots"].items():
+            for sid, v in list(rec["slots"].items()) + [(HOPS_SLOT, rec["hops"])]:
                 prev = self.last_logged.get((nid, sid))
                 if prev is None or prev[0] != v or t - prev[1] >= full:
                     rows.append((t, nid, sid, v))
@@ -1132,6 +1136,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "queued": sum(len(n["readings"]) for n in nodes),
                                    "marks": {k: app.store.upload_mark(int(k))
                                              for k in g.get("devices", {})}})
+        if path == "/api/linkpath":
+            # How much of a period a node's reports reached the hive directly
+            # rather than through a relay. Weighted by TIME, not by row count:
+            # values are stored on change, so counting rows would say a node
+            # that flipped to the relay once and stayed there was "mostly
+            # direct". A reading holds until the next one replaces it.
+            node = int(q["node"])
+            t1 = int(q.get("to") or now())
+            t0 = int(q.get("from") or t1 - 86400)
+            pts = app.store.series(node, HOPS_SLOT, t0, t1)
+            before = app.store.last_before(node, HOPS_SLOT, t0)
+            if before:
+                pts.insert(0, (t0, before[1]))
+            direct = relay = 0
+            for i, (ts, v) in enumerate(pts):
+                span = (pts[i + 1][0] if i + 1 < len(pts) else t1) - ts
+                if v:
+                    relay += span
+                else:
+                    direct += span
+            total = direct + relay
+            return self.send_json({"direct_seconds": direct, "relay_seconds": relay,
+                                   "relay_fraction": round(relay / total, 4) if total else None,
+                                   "from": t0, "to": t1, "samples": len(pts)})
         if path == "/api/events":
             return self.send_json(app.store.events(int(q.get("limit", 200))))
         if path == "/api/firmware":
