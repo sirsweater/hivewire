@@ -128,6 +128,11 @@ class Store:
             c.execute("INSERT INTO upload_marks VALUES(?,?) ON CONFLICT(node) "
                       "DO UPDATE SET last_ts=excluded.last_ts", (node, ts))
 
+    def max_ts(self):
+        with self.db() as c:
+            r = c.execute("SELECT MAX(ts) FROM readings").fetchone()
+        return r[0] or 0
+
     def latest(self, node):
         """{slot: value} as last stored for a node. (SQLite returns the row
         holding MAX(ts) for bare columns in an aggregate query.)"""
@@ -406,8 +411,20 @@ class Poller(threading.Thread):
         if d is None:
             self.last_error = "incomplete dump"
             return
-        self.last_error = None
         t = now()
+        # A Pi has no battery-backed clock: it boots at whatever time it last
+        # shut down and jumps when NTP answers, which can be hours. Readings
+        # written in that window are stamped hours early and quietly corrupt
+        # every chart and daily summary. If the clock is behind data we already
+        # hold, it is wrong -- show live values, store nothing.
+        newest = self.store.max_ts()
+        if newest and t < newest - 5:
+            self.snapshot = dict(d, time=t)
+            self.last_error = ("clock is %s behind the newest stored reading -- "
+                               "waiting for time sync before storing"
+                               % fmt_age(newest - t))
+            return
+        self.last_error = None
         d["time"] = t
         self.snapshot = d
         full = self.cfg.data.get("full_every_seconds", 900)
@@ -692,6 +709,12 @@ class Uploader(threading.Thread):
     def send_once(self):
         """One upload. Never raises: the caller is a web request or a loop."""
         g = self.cfg()
+        # Ages are computed against this clock; if it is behind the data, every
+        # age would be wrong (and some negative). Wait rather than send rubbish.
+        newest = self.app.store.max_ts()
+        if newest and now() < newest - 5:
+            return {"ok": False, "ts": now(),
+                    "error": "the Pi's clock is behind its own readings; waiting for time sync"}
         if not g.get("token"):
             return {"ok": False, "error": "not paired yet -- enter a claim code from the site",
                     "ts": now()}
@@ -852,7 +875,10 @@ class App:
                 low = spec.get("warn_below")
                 if low and low["slot"] in rec["slots"]:
                     v = rec["slots"][low["slot"]]
-                    if v <= low["value"]:
+                    # `ignore` is the value that means "not measured" rather
+                    # than a real low reading -- a board with no battery
+                    # divider reports 0, and must not look like a flat one.
+                    if v <= low["value"] and v != low.get("ignore"):
                         warnings.append("%s (%s%%)" % (low["label"], v))
                 nodes.append({"id": nid, "kind": kind, "name": meta.get("name") or "",
                               "location": meta.get("location") or "", "age": age,

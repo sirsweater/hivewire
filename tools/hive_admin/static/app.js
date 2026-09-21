@@ -40,6 +40,9 @@ function slotSpec(kind, sid) {
 }
 function fmtVal(spec, v) {
   if (v === null || v === undefined) return "—";
+  // Some zeroes mean "not measured" rather than a reading of zero — a board
+  // with no battery divider reports 0, and "0.00 V" would read as flat.
+  if (v === 0 && spec.zero_means) return spec.zero_means;
   if (spec.hex) return (v >>> 0).toString(16).padStart(8, "0");
   if (spec.bool) return v ? "yes" : "no";
   if (spec.bits) {

@@ -102,6 +102,7 @@ static uint32_t bootCount = 0;
 static uint32_t runningCrc = 0;
 static uint8_t  lastAction = 0, otaArm = 0;
 static bool     ahtFound = false;
+static bool     battFitted = false;
 
 // ---- AHT20: minimal driver, Wire only ---------------------------------------
 static bool aht20Init() {
@@ -164,11 +165,62 @@ static uint16_t medianAdc(uint8_t pin, bool powered) {
   return s[4];
 }
 
+// Is anything actually connected to the battery pin?
+//
+// A bare ADC pin drifts to roughly mid-scale on its own, which on a 1M/1M
+// divider's scale reads as a plausible 4.0-4.2 V LiPo that does not exist. No
+// amount of averaging finds the truth, because nothing is driving the pin
+// towards a value -- and a battery level that is pure noise is worse than none.
+//
+// The test: drive the pin low, release it, read; then drive it high, release,
+// read. A divider pulls the pin back to the battery's fraction from either
+// direction, so the two agree; a bare pin is still near where it was left.
+//
+// Read back MICROSECONDS after releasing the pin, not milliseconds. A 1M/1M
+// divider recharges the ADC's input capacitance in tens of microseconds
+// (500k x ~20pF), so it returns to the battery's half-voltage almost at once.
+// A bare pin drifts to roughly mid-scale on its own, but slowly -- and the
+// first version of this test waited 5 ms, by which time a bare pin had already
+// drifted to the same place. Measured then: battery pin 2020/2019 mV, a pin
+// with nothing on it 2095/2103 mV. Identical, so the test proved nothing.
+static bool pinDriven(uint8_t pin, uint16_t *after_low, uint16_t *after_high) {
+  uint16_t v[2];
+  for (int i = 0; i < 2; i++) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, i ? HIGH : LOW);
+    delayMicroseconds(2000);
+    pinMode(pin, INPUT);
+    delayMicroseconds(150);
+    v[i] = analogReadMilliVolts(pin);
+  }
+  if (after_low) *after_low = v[0];
+  if (after_high) *after_high = v[1];
+  uint16_t lo = v[0] < v[1] ? v[0] : v[1], hi = v[0] < v[1] ? v[1] : v[0];
+  return (hi - lo) < 200;          // recovered to the same value from both sides
+}
+
+// A pin with nothing on it, tested the same way at boot. It is the control for
+// the check above: without it, "the battery pin looks driven" is a claim with
+// nothing to compare against, and a detector that always says yes would look
+// identical to one that works.
+//
+// It MUST be ADC-capable: on the ESP32-C6 that is GPIO0-GPIO6 only. The first
+// version used GPIO7, which reads 0 mV whatever you do to it -- two identical
+// readings, which the test scored as "driven", which then vetoed every battery
+// reading. A control that cannot measure is worse than none: it silently
+// disabled the thing it was meant to check.
+#ifndef BATT_CONTROL_PIN
+#define BATT_CONTROL_PIN 3
+#endif
+
+// Nine samples, not five. The LiPo curve is steep around 4.0 V -- a reading
+// 80 mV apart is 8 percentage points there -- so ADC noise that looks small in
+// millivolts makes the reported percentage jump.
 static uint16_t medianMilliVolts(uint8_t pin) {
-  uint16_t s[5];
-  for (int i = 0; i < 5; i++) { s[i] = analogReadMilliVolts(pin); delay(3); }
-  qsort(s, 5, sizeof(s[0]), cmpU16);
-  return s[2];
+  uint16_t s[9];
+  for (int i = 0; i < 9; i++) { s[i] = analogReadMilliVolts(pin); delay(3); }
+  qsort(s, 9, sizeof(s[0]), cmpU16);
+  return s[4];
 }
 
 // A LiPo's voltage is nothing like linear in its charge: it sits near 3.8 V
@@ -191,6 +243,12 @@ static uint8_t lipoPercent(uint16_t mv) {
     }
   }
   return 100;
+}
+
+static const char *battStr(uint16_t mv, uint8_t pct) {
+  static char s[24];
+  snprintf(s, sizeof(s), "%umV (%u%%)", mv, pct);
+  return s;
 }
 
 static void readSensors() {
@@ -223,9 +281,16 @@ static void readSensors() {
   float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilRaw) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
   soilPct = pct < 0 ? 0 : pct > 100 ? 100 : (uint8_t)lroundf(pct);
 
-  uint32_t mv = medianMilliVolts(BATT_ADC_PIN) * 2;       // 1M/1M divider halves it
-  battMv = mv > 65535 ? 65535 : mv;
-  battPct = lipoPercent(battMv);
+  // 0 means "no divider on this board", not "flat" -- see batteryFitted().
+  if (battFitted) {
+    uint32_t mv = medianMilliVolts(BATT_ADC_PIN) * 2;     // 1M/1M divider halves it
+    battMv = mv > 65535 ? 65535 : mv;
+    battPct = lipoPercent(battMv);
+    sensorOk |= 4;
+  } else {
+    battMv = battPct = 0;
+    sensorOk &= ~4;
+  }
 }
 
 // ---- samplers ---------------------------------------------------------------
@@ -260,7 +325,7 @@ static const HwSlotDef SLOTS[] = {
   {  3, HW_U16, HW_DIR_OUT,     30000, 900000,    60,   0,   0, sSoilRaw,   nullptr },
   {  4, HW_U8,  HW_DIR_OUT,     30000, 900000,     3,   0,   0, sSoilPct,   nullptr },
   {  5, HW_U16, HW_DIR_OUT,     60000, 900000,    50,   0,   0, sBatt,      nullptr },
-  { 10, HW_U8,  HW_DIR_OUT,     60000, 900000,     2,   0,   0, sBattPct,   nullptr },
+  { 10, HW_U8,  HW_DIR_OUT,     60000, 900000,     5,   0,   0, sBattPct,   nullptr },
   {  6, HW_U8,  HW_DIR_OUT,     30000, 900000,     1,   0,   0, sOk,        nullptr },
   {  7, HW_U8,  HW_DIR_OUT,    300000, 900000,     1,   0,   0, sBoots,     nullptr },
   {  8, HW_U16, HW_DIR_OUT,     60000, 900000,    15,   0,   0, sUptimeMin, nullptr },
@@ -305,6 +370,26 @@ void setup() {
   fw.onApplied([] { ota.markPending(); });
 
   ahtFound = ahtBegin();
+  uint16_t bl = 0, bh = 0, cl = 0, ch = 0;
+  bool battLooksDriven = pinDriven(BATT_ADC_PIN, &bl, &bh);
+  bool ctrl = pinDriven(BATT_CONTROL_PIN, &cl, &ch);
+  // The control pin has nothing on it. If IT looks driven, the test cannot
+  // tell the difference on this board, so believe nothing: report no battery
+  // rather than publish a number that may be a floating pin. Build with
+  // -DSOIL_HAS_BATTERY=1 to say a divider is definitely fitted.
+#ifdef SOIL_HAS_BATTERY
+  battFitted = SOIL_HAS_BATTERY;
+#else
+  battFitted = battLooksDriven && !ctrl;
+#endif
+  // Both numbers, not just the verdict: a divider recovers to the same value
+  // from either direction, a bare pin keeps what it was left at.
+  node.log("batt pin%d %u/%umV %s; pin%d %u/%umV %s", BATT_ADC_PIN, bl, bh,
+           battFitted ? "fitted" : "open", BATT_CONTROL_PIN, cl, ch,
+           ctrl ? "driven" : "open");
+  Serial.printf("battery check: pin%d %u/%u mV -> %s | control pin%d %u/%u mV -> %s\n",
+                BATT_ADC_PIN, bl, bh, battFitted ? "fitted" : "open",
+                BATT_CONTROL_PIN, cl, ch, ctrl ? "driven (unexpected)" : "open");
   readSensors();
   Serial.printf("SoilNode %u up, boot #%lu, aht20=%d\n", NODE_ID,
                 (unsigned long)bootCount, ahtFound);
@@ -332,8 +417,9 @@ void loop() {
   if (!fw.active() && millis() - lastRead >= READ_EVERY_MS) {
     lastRead = millis();
     readSensors();
-    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) batt=%umV (%u%%) ok=%u nb=%u ep=%lu\n",
-                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct, battMv, battPct,
+    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) batt=%s ok=%u nb=%u ep=%lu\n",
+                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct,
+                  battFitted ? battStr(battMv, battPct) : "none fitted",
                   sensorOk, node.neighbors(), (unsigned long)node.epoch());
   }
 }

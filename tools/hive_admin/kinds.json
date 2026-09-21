@@ -8,12 +8,12 @@
       "2":  {"label": "Humidity", "unit": "%RH", "scale": 0.01, "decimals": 0, "chart": true},
       "3":  {"label": "Soil (raw ADC)", "chart": true},
       "4":  {"label": "Soil (firmware %)", "unit": "%", "note": "uses the placeholder calibration compiled in; the admin's own soil % uses yours"},
-      "5":  {"label": "Battery voltage", "unit": "V", "scale": 0.001, "decimals": 2, "chart": true},
-      "6":  {"label": "Sensors ok", "bits": {"1": "air sensor", "2": "soil probe"}},
+      "5":  {"label": "Battery voltage", "unit": "V", "scale": 0.001, "decimals": 2, "chart": true, "zero_means": "no divider fitted"},
+      "6":  {"label": "Sensors ok", "bits": {"1": "air sensor", "2": "soil probe", "4": "battery divider"}},
       "7":  {"label": "Boots"},
       "8":  {"label": "Uptime", "unit": "min"},
       "9":  {"label": "Signal", "unit": "dBm", "chart": true},
-      "10": {"label": "Battery", "unit": "%", "chart": true},
+      "10": {"label": "Battery", "unit": "%", "chart": true, "zero_means": "no divider fitted"},
       "22": {"label": "Action", "writable": true, "min": 0, "max": 5},
       "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255},
       "25": {"label": "Firmware CRC", "hex": true}
@@ -22,7 +22,7 @@
       "soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true}
     },
     "ok_slot": {"slot": 6, "bits": {"1": "air sensor not reading", "2": "soil probe not reading"}},
-    "warn_below": {"slot": 10, "value": 20, "label": "battery low"},
+    "warn_below": {"slot": 10, "value": 20, "label": "battery low", "ignore": 0},
     "actions": [
       {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}
     ]
