@@ -803,7 +803,13 @@ class App:
         self.pusher = Pusher(self.gw, self.store, os.path.join(args.data, "firmware"),
                              push_script, args.fake)
         self.kinds = json.load(open(os.path.join(HERE, "kinds.json"), encoding="utf-8"))
-        self.sessions = {}              # token -> expiry
+        # Signed-in sessions survive a restart. They used to live only in
+        # memory, so every deploy and every power cut silently signed the
+        # owner out -- which reads as "the password stopped working", not as
+        # "the service restarted". Only the HASH of each cookie is stored, so
+        # the file cannot be used to sign in even if it is read.
+        self.sessions = {}              # sha256(token) -> expiry
+        self.load_sessions()
         # Until a password exists, anyone on the network who loads the page
         # first could choose it. Setting it needs this code, which only
         # someone with access to this machine can read.
@@ -828,6 +834,22 @@ class App:
         print("first run: setup code %s (also in %s)" % (code, self.setup_code_path), flush=True)
 
     # --- helpers -------------------------------------------------------------
+    @staticmethod
+    def session_hash(token):
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def load_sessions(self):
+        now_t = time.time()
+        stored = self.cfg.data.get("sessions") or {}
+        self.sessions = {h: exp for h, exp in stored.items()
+                         if isinstance(exp, (int, float)) and exp > now_t}
+        if len(self.sessions) != len(stored):
+            self.save_sessions()        # drop the expired ones as we pass
+
+    def save_sessions(self):
+        self.cfg.data["sessions"] = dict(self.sessions)
+        self.cfg.save()
+
     def kind_of(self, nid, slots):
         """A kind set in Settings wins; else one recognised from the slots;
         else the one recognised last time. A gateway that just rebooted knows
@@ -1029,11 +1051,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def authed(self):
         t = self.token()
-        exp = self.app.sessions.get(t) if t else None
-        if exp and exp > time.time():
-            self.app.sessions[t] = time.time() + 7 * 86400
-            return True
-        return False
+        if not t:
+            return False
+        h = self.app.session_hash(t)
+        exp = self.app.sessions.get(h)
+        if not exp or exp <= time.time():
+            return False
+        # Slide the expiry in memory on every request, but only write it out
+        # when it has moved by a day -- otherwise every page load rewrites the
+        # config file.
+        fresh = time.time() + 7 * 86400
+        if fresh - exp > 86400:
+            self.app.sessions[h] = fresh
+            self.app.save_sessions()
+        else:
+            self.app.sessions[h] = max(exp, fresh - 86400)
+        return True
 
     def csrf_ok(self):
         # Every state-changing call comes from our own page with this header;
@@ -1098,7 +1131,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # --- auth ----------------------------------------------------------------
     def new_session(self):
         t = secrets.token_urlsafe(32)
-        self.app.sessions[t] = time.time() + 7 * 86400
+        self.app.sessions[self.app.session_hash(t)] = time.time() + 7 * 86400
+        self.app.save_sessions()
         self.send_response(200)
         self.send_header("Set-Cookie", "hive_session=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800" % t)
         self.send_header("Content-Type", "application/json")
@@ -1154,7 +1188,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/kinds":
             return self.send_json(app.kinds)
         if path == "/api/config":
-            d = {k: v for k, v in app.cfg.data.items() if k not in ("password", "secret")}
+            d = {k: v for k, v in app.cfg.data.items()
+                 if k not in ("password", "secret", "sessions")}
             return self.send_json(d)
         if path == "/api/series":
             node, slot = int(q["node"]), q["slot"]
@@ -1303,7 +1338,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def route_post(self, path, q):
         app = self.app
         if path == "/api/logout":
-            app.sessions.pop(self.token(), None)
+            tok = self.token()
+            if tok:
+                app.sessions.pop(app.session_hash(tok), None)
+                app.save_sessions()
             return self.send_json({"ok": True})
         if path == "/api/password":
             b = self.jbody()
@@ -1312,7 +1350,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if len(b.get("new", "")) < 8:
                 return self.fail("use at least 8 characters")
             app.cfg.set_password(b["new"])
-            app.sessions.clear()
+            app.sessions.clear()             # every other device signs in again
+            app.save_sessions()
             app.store.event("system", "password changed")
             return self.new_session()
         if path == "/api/g4rden/config":
