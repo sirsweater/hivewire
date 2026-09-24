@@ -658,8 +658,11 @@ class Uploader(threading.Thread):
                 v = slots[slot] * scale
                 r[name] = round(v, dec) if dec else int(v)
         if 3 in slots:
-            dry, wet = self.app.calibration(nid)
-            pct = soil_pct(slots[3], dry, wet)
+            # Only send a percentage when both ends of the scale were measured.
+            # soilRaw always goes, so the site keeps the evidence and a later
+            # calibration can be applied to it rather than to a guess.
+            dry, wet, calibrated = self.app.calibration(nid)
+            pct = soil_pct(slots[3], dry, wet) if calibrated else None
             if pct is not None:
                 r["soil"] = pct
         return r if any(k in r for k in self.MEASURED) else None
@@ -844,8 +847,18 @@ class App:
         return meta.get("auto_kind") if meta.get("auto_kind") in self.kinds else None
 
     def calibration(self, nid):
+        """Both ends of the soil scale, and whether a person actually measured
+        them. A default wet point is a guess, and a percentage computed against
+        a guess is a confident lie -- node 12 read 95% against the shipped
+        default and about 72% against a real wet point. So an unmeasured end
+        means no percentage at all: the raw value still charts, and the page
+        says what is missing."""
         n = self.cfg.node(nid)
-        return n.get("soil_dry", 2800), n.get("soil_wet", 1200)
+        dry, wet = n.get("soil_dry"), n.get("soil_wet")
+        calibrated = dry is not None and wet is not None and dry != wet
+        return (dry if dry is not None else 2800,
+                wet if wet is not None else 1200,
+                calibrated)
 
     def batt_scale(self, nid):
         """Correction for this board's divider and ADC. The resistors are 1%
@@ -865,7 +878,8 @@ class App:
         spec = self.kinds.get(kind, {})
         for key, d in spec.get("derived", {}).items():
             if d["type"] == "soil_pct" and d["from"] in slots:
-                out[key] = soil_pct(slots[d["from"]], *self.calibration(nid))
+                dry, wet, calibrated = self.calibration(nid)
+                out[key] = soil_pct(slots[d["from"]], dry, wet) if calibrated else None
             elif d["type"] == "lipo_pct" and slots.get(d["from"]):
                 out[key] = lipo_pct(slots[d["from"]] * self.batt_scale(nid))
             elif d["type"] == "volts" and slots.get(d["from"]):
@@ -899,6 +913,24 @@ class App:
                         if not v & int(bit):
                             warnings.append(label)
                 # One rule or several: {slot, value, label, ignore, unit}.
+                # Say why a soil percentage is missing, and notice a reading
+                # that has wandered outside the range its owner measured --
+                # either the probe moved, or the calibration was taken
+                # somewhere the probe no longer is.
+                if spec.get("derived", {}).get("soil") and 3 in rec["slots"]:
+                    dry, wet, calibrated = self.calibration(nid)
+                    raw3 = rec["slots"][3]
+                    if not calibrated:
+                        warnings.append("soil not calibrated - raw reading only")
+                    elif raw3 < wet:
+                        # Below the value measured in water. Soil cannot be
+                        # wetter than water, so this is the probe, not the pot:
+                        # these boards wick if inserted past their line and
+                        # then read pinned near the bottom for good.
+                        warnings.append("soil raw %d reads wetter than water (%d) - check the probe"
+                                        % (raw3, wet))
+                    elif raw3 > dry:
+                        warnings.append("soil raw %d is drier than its dry point (%d)" % (raw3, dry))
                 rules = spec.get("warn_below") or []
                 if isinstance(rules, dict):
                     rules = [rules]
@@ -1195,7 +1227,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # The same conversions as the live values, so a chart and the card
             # it came from cannot disagree.
             if d["type"] == "soil_pct":
-                dry, wet = app.calibration(node)
+                dry, wet, calibrated = app.calibration(node)
+                if not calibrated:
+                    return []
                 return [(t, soil_pct(v, dry, wet)) for t, v in raw]
             sc = app.batt_scale(node)
             if d["type"] == "lipo_pct":
