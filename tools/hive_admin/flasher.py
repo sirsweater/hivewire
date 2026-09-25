@@ -38,6 +38,25 @@ def norm_mac(s):
     return m.group(1).lower() if m else None
 
 
+def base_mac(esptool_output):
+    """The chip's 6-byte base MAC from `esptool read_mac` output.
+
+    esptool 5 prints a BASE MAC line. Older versions print only the 8-byte
+    EUI-64 form on the C6 (58:e6:c5:ff:fe:19:1d:80), which is the base MAC
+    with ff:fe inserted in the middle.
+    """
+    m = re.search(r"BASE MAC:\s*([0-9a-f:]{17})\b", esptool_output, re.I)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r"MAC:\s*((?:[0-9a-f]{2}:){7}[0-9a-f]{2})", esptool_output, re.I)
+    if m:
+        b = m.group(1).lower().split(":")
+        if b[3:5] == ["ff", "fe"]:
+            return ":".join(b[:3] + b[5:])
+    m = re.search(r"MAC:\s*((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\b", esptool_output, re.I)
+    return m.group(1).lower() if m else None
+
+
 def find_esptool():
     """A command prefix that runs esptool, or None.
 
@@ -63,9 +82,20 @@ def find_esptool():
 
 
 class Flasher:
-    def __init__(self, image_dir, gateway_port=None, store=None, known_ids=None):
+    def __init__(self, image_dir, gateway_port=None, store=None, known_ids=None,
+                 protect_present=False):
         self.image_dir = image_dir
         self.gateway_mac = norm_mac(os.path.basename(gateway_port or ""))
+        # On the hive's host, every ESP32 already plugged in when the admin
+        # starts is equipment -- the gateway, and the LoRa radio beside it --
+        # not a board waiting to be flashed. Even esptool's first "which chip
+        # is this?" resets the board it talks to, which would drop the LoRa
+        # link, so these are never touched. Boards plugged in later appear
+        # normally.
+        self.protected = set()
+        if protect_present:
+            self.protected = {norm_mac(p.serial_number) for p in serial.tools.list_ports.comports()
+                              if p.vid == ESPRESSIF_VID and norm_mac(p.serial_number)}
         self.store = store                 # optional: events land in the admin's log
         self.known_ids = known_ids or (lambda: [])
         self.job = None
@@ -83,6 +113,7 @@ class Flasher:
             gw = self.gateway_mac is not None and mac == self.gateway_mac
             busy = self.job and self.job["state"] == "running" and self.job["mac"] == mac
             out.append({"device": p.device, "mac": mac, "gateway": gw, "busy": bool(busy),
+                        "protected": gw or mac in self.protected,
                         "description": p.description or ""})
         out.sort(key=lambda x: x["mac"])
         return out
@@ -132,6 +163,9 @@ class Flasher:
                 raise ValueError("that board is no longer plugged in")
             if port["gateway"]:
                 raise ValueError("that is the hive gateway; it is never flashed from here")
+            if port["protected"]:
+                raise ValueError("that board was plugged in when the admin started, so it is "
+                                 "treated as hive equipment and never flashed from here")
             img = next((i for i in self.images() if i["name"] == image), None)
             if not img:
                 raise ValueError("unknown image")
@@ -199,10 +233,10 @@ class Flasher:
             return self._fail("esptool is not installed (pip install esptool)")
 
         self._step("checking the board is the one plugged in")
-        rc, out = self._esptool(["read-mac"], 60)
-        base = re.search(r"BASE MAC:\s*([0-9a-f:]{17})", out, re.I) or \
-            re.search(r"MAC:\s*([0-9a-f:]{17})", out, re.I)
-        chip_mac = base.group(1).lower() if base else None
+        # Underscore command names: esptool 4.x (Debian's, on the Pi) knows
+        # only those, and 5.x still accepts them.
+        rc, out = self._esptool(["read_mac"], 60)
+        chip_mac = base_mac(out)
         if rc != 0 or not chip_mac:
             return self._fail("could not talk to the board (is it an ESP32-C6?)")
         if chip_mac != job["mac"]:
@@ -213,13 +247,13 @@ class Flasher:
             # A board keeps its node number in NVS, which writing an image
             # does not touch. Wiping makes a recycled board start as new.
             self._step("wiping the board")
-            rc, out = self._esptool(["erase-flash"], 120)
+            rc, out = self._esptool(["erase_flash"], 120)
             if rc != 0:
                 return self._fail("wipe failed")
 
         self._step("writing " + job["image"])
         path = os.path.join(self.image_dir, job["image"])
-        rc, out = self._esptool(["--baud", "460800", "write-flash", "0x0", path], 300)
+        rc, out = self._esptool(["--baud", "460800", "write_flash", "0x0", path], 300)
         if rc != 0 or "Hash of data verified" not in out:
             return self._fail("write did not verify")
         self._log("written and verified")

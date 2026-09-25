@@ -526,14 +526,16 @@ views.flash = async (el) => {
   const loadBoards = async () => {
     data = await api("/api/flash");
     const was = pick();
-    const ports = data.ports.filter((p) => !p.gateway);
+    const ports = data.ports.filter((p) => !p.protected);
     const gw = data.ports.filter((p) => p.gateway);
+    const kept = data.ports.filter((p) => p.protected && !p.gateway);
     $("#fl-ports").innerHTML = (ports.length ? ports.map((p, i) => `
       <label class="row small" style="gap:8px;align-items:center">
         <input type="radio" name="fl-port" value="${esc(p.device)}" ${(was ? was === p.device : i === 0) ? "checked" : ""}>
         <span class="mono">${esc(p.mac)}</span><span class="muted">${esc(p.device)}</span>${p.busy ? '<span class="pill warn">flashing</span>' : ""}
       </label>`).join("") : '<span class="muted">No ESP32 board found. Plug one in and press Refresh.</span>') +
-      (gw.length ? `<div class="small muted" style="margin-top:6px">Hive gateway ${esc(gw[0].mac)} is plugged in too; it is left alone.</div>` : "");
+      (gw.length ? `<div class="small muted" style="margin-top:6px">Hive gateway ${esc(gw[0].mac)} is plugged in too; it is left alone.</div>` : "") +
+      (kept.length ? `<div class="small muted">Also left alone, because it was plugged in when the admin started (hive equipment, like the LoRa radio): ${kept.map((p) => esc(p.mac)).join(", ")}.</div>` : "");
     const cur = $("#fl-image").value;
     $("#fl-image").innerHTML = data.images.map((i) => `<option value="${esc(i.name)}">${esc(i.family)} · ${esc(i.name)}${i.built ? " · built " + esc(i.built) : ""}</option>`).join("") ||
       '<option value="">No images yet: run tools/build_images.py</option>';

@@ -486,7 +486,10 @@ class Pusher:
     def images(self):
         out = []
         for f in sorted(os.listdir(self.fw_dir)):
-            if f.endswith(".bin"):
+            # *.merged.bin are the Flash page's USB images (bootloader +
+            # partitions + app). Pushed over the air they would be written
+            # into an app slot and never boot, so they are not offered here.
+            if f.endswith(".bin") and not f.endswith(".merged.bin"):
                 p = os.path.join(self.fw_dir, f)
                 info = self.inspect(p)
                 info.update(name=f, mtime=int(os.path.getmtime(p)))
@@ -499,6 +502,8 @@ class Pusher:
         path = os.path.join(self.fw_dir, os.path.basename(name))
         if not os.path.exists(path):
             raise RuntimeError("no such image")
+        if path.endswith(".merged.bin"):
+            raise RuntimeError("that is a USB flash image, not an app image; it cannot be pushed")
         info = self.inspect(path)
         if not info["esp_image"]:
             raise RuntimeError("not an ESP32 app image")
@@ -812,7 +817,8 @@ class App:
         os.makedirs(os.path.join(args.data, "firmware"), exist_ok=True)
         self.flasher = Flasher(os.path.join(args.data, "firmware"),
                                gateway_port=None if args.fake else args.port, store=self.store,
-                               known_ids=lambda: list(self.cfg.data.get("nodes", {}).keys()))
+                               known_ids=lambda: list(self.cfg.data.get("nodes", {}).keys()),
+                               protect_present=not (self.flash_only or args.fake))
         self.kinds = json.load(open(os.path.join(HERE, "kinds.json"), encoding="utf-8"))
         # Signed-in sessions survive a restart. They used to live only in
         # memory, so every deploy and every power cut silently signed the
