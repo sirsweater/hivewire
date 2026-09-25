@@ -480,6 +480,37 @@ Node types are described in [`kinds.json`](tools/hive_admin/kinds.json); add
 an entry for a new sketch and its slots get labels, units and charts. Try it
 without hardware: `python3 tools/hive_admin/hive_admin.py --fake`.
 
+## Flashing a new board, without a compiler
+
+Every node sketch is built **once**, with node id 0, into one generic image per
+family ([`tools/build_images.py`](tools/build_images.py)). A board running it
+never joins the swarm; it reports itself over USB and waits to be told its
+number, which it stores and keeps across every later update
+([`src/HivewireProvision.h`](src/HivewireProvision.h)):
+
+```
+board -> host   HWID family=SoilNode id=unassigned mac=58:e6:c5:19:1d:80
+                HWRADIO networks=11 best=-46
+host -> board   setid 13          ->  HWID-SET 13, reboots as node 13
+                id?               ->  repeats the HWID line
+```
+
+The **Flash** page does the rest: it lists the ESP32 boards on the machine's
+USB by MAC (never offering the hive gateway), checks the chip's MAC before
+writing anything, writes the image, gives the board its number, and shows what
+the board reports — including whether its radio hears anything at all. It runs
+as a tab in the admin page on the Pi, or on its own on a PC with
+[`tools/flash_board.bat`](tools/flash_board.bat) (`--flash-only`: the Flash
+page alone, reachable only from that machine).
+
+**Wipe first** is the default, for a reason found the hard way: a used C6 that
+heard *no* Wi-Fi networks on any channel — it looked like a dead radio — heard
+eleven after its flash was erased. Writing an image leaves the NVS partition
+alone, and whatever it held (an old node id, stale saved radio data) survives;
+erasing is what makes a recycled board start as new. Every boot prints the
+`HWRADIO` line, so a board with a genuinely dead radio is caught on the bench,
+not after it has been wired into a pot.
+
 ## Roles
 
 `HW_ROLE_SENSOR / ACTUATOR / BOT / RELAY` allow group addressing without

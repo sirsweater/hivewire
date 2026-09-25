@@ -32,6 +32,7 @@
 #include <HivewireOta.h>
 #include <HivewireFirmware.h>
 #include <Preferences.h>
+#include <HivewireProvision.h>
 
 // One firmware, one id per board, chosen at flash time:
 //
@@ -260,6 +261,12 @@ void setup() {
   NODE_ID = prefs.getUChar("id", HW_NODE_ID);
   prefs.end();
 
+  // Generic image (-DHW_NODE_ID=0): report over USB and wait for `setid <n>`
+  // instead of joining the swarm as a node nobody numbered.
+  if (NODE_ID == 0) hwprov::waitForId("rangenode", "RangeNode");   // never returns
+  hwprov::printId("RangeNode", NODE_ID);
+  hwprov::radioSelfTest();          // before the swarm radio: a scan hops channels
+
   node.onState(onState);
   node.onSafe(onSafe);
 
@@ -306,6 +313,7 @@ void loop() {
   ota.loop();
   fw.loop();
   fwTx.loop();
+  hwprov::poll("rangenode", "RangeNode", NODE_ID);
 
   if (seedWanted >= 0) {
     uint8_t v = (uint8_t)seedWanted;

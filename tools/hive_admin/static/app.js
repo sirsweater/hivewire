@@ -7,6 +7,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 let KINDS = {};
 let STATE = null;
 let timer = null;
+let FLASH_ONLY = false;     // PC mode: the Flash page is the whole app
 
 // ---------------------------------------------------------------------------
 // API
@@ -476,6 +477,93 @@ views.firmware = async (el) => {
   load();
 };
 
+views.flash = async (el) => {
+  el.innerHTML = `
+    <div class="head"><h1>Flash a board</h1><div class="muted small">Plug an ESP32-C6 into ${FLASH_ONLY ? "this computer" : "the Pi"} by USB, pick what it should be, and flash it.</div></div>
+    <div class="grid cols-2">
+      <div class="card stack">
+        <div class="spread"><h2>Boards on this USB</h2><button id="fl-refresh">Refresh</button></div>
+        <div id="fl-ports" class="muted">Looking…</div>
+        <label class="stack small">Firmware<select id="fl-image"></select></label>
+        <label class="stack small">Node number<input id="fl-id" type="number" min="1" max="254" placeholder="leave blank to keep its number"></label>
+        <div id="fl-idnote" class="small muted"></div>
+        <label class="row small" style="gap:8px;align-items:center"><input type="checkbox" id="fl-erase" checked> Wipe the board first <span class="muted">(recommended: clears its old node number and saved radio data; a board with stale saved data was found hearing no radio at all until it was wiped)</span></label>
+        <button class="primary" id="fl-go" disabled>Flash</button>
+        <div id="fl-env" class="small"></div>
+      </div>
+      <div class="card stack"><h2>Progress</h2><div id="fl-job" class="muted">Nothing flashed yet.</div></div>
+    </div>
+    <div class="note" style="margin-top:16px">The board is checked by its MAC before anything is written, and the hive gateway is never offered. After writing, the board reports its radio: a C6 that hears no Wi-Fi networks at all has a faulty radio, and it is better to find that now than after it is wired into a pot.</div>`;
+  let data = null;
+  const pick = () => { const r = el.querySelector('input[name="fl-port"]:checked'); return r ? r.value : null; };
+  const syncButton = () => {
+    const running = data && data.job && data.job.state === "running";
+    $("#fl-go").disabled = !pick() || !$("#fl-image").value || running || !(data && data.esptool);
+  };
+  const renderJob = () => {
+    const j = data && data.job;
+    if (!j) return;
+    const badge = j.state === "running" ? '<span class="pill warn">' + esc(j.step) + "</span>"
+      : j.state === "done" ? '<span class="pill good">done</span>' : '<span class="pill bad">failed</span>';
+    const r = j.result || {};
+    const radio = r.radio_networks === undefined ? "" : r.radio_networks === 0
+      ? '<span class="pill bad">radio heard nothing: faulty board</span>'
+      : `<span class="pill good">radio ok: ${r.radio_networks} networks, best ${r.radio_best} dBm</span>`;
+    $("#fl-job").innerHTML = `
+      <div class="spread"><span class="mono small">${esc(j.image)} → ${esc(j.mac)}</span>${badge}</div>
+      ${j.state === "running" && j.progress !== undefined ? `<div class="bar" style="margin:10px 0"><div style="width:${Number(j.progress).toFixed(0)}%"></div></div>` : ""}
+      ${r.family ? `<p class="small">This board is <b>${esc(r.family)}</b>, node <b>${esc(r.id)}</b>. ${radio}</p>` : ""}
+      ${r.sensors ? `<p class="small mono">${esc(r.sensors)}</p>` : ""}
+      ${j.error ? `<p class="err small">${esc(j.error)}</p>` : ""}
+      ${j.warning ? `<p class="err small">${esc(j.warning)}</p>` : ""}
+      <div class="log mono small" style="max-height:260px">${esc(j.lines.slice(-60).join("\n"))}</div>`;
+    if (j.state === "running") setTimeout(async () => {
+      if (route().name !== "flash") return;
+      data = await api("/api/flash"); renderJob(); syncButton();
+      if (data.job && data.job.state !== "running") loadBoards();
+    }, 1500);
+  };
+  const loadBoards = async () => {
+    data = await api("/api/flash");
+    const was = pick();
+    const ports = data.ports.filter((p) => !p.gateway);
+    const gw = data.ports.filter((p) => p.gateway);
+    $("#fl-ports").innerHTML = (ports.length ? ports.map((p, i) => `
+      <label class="row small" style="gap:8px;align-items:center">
+        <input type="radio" name="fl-port" value="${esc(p.device)}" ${(was ? was === p.device : i === 0) ? "checked" : ""}>
+        <span class="mono">${esc(p.mac)}</span><span class="muted">${esc(p.device)}</span>${p.busy ? '<span class="pill warn">flashing</span>' : ""}
+      </label>`).join("") : '<span class="muted">No ESP32 board found. Plug one in and press Refresh.</span>') +
+      (gw.length ? `<div class="small muted" style="margin-top:6px">Hive gateway ${esc(gw[0].mac)} is plugged in too; it is left alone.</div>` : "");
+    const cur = $("#fl-image").value;
+    $("#fl-image").innerHTML = data.images.map((i) => `<option value="${esc(i.name)}">${esc(i.family)} · ${esc(i.name)}${i.built ? " · built " + esc(i.built) : ""}</option>`).join("") ||
+      '<option value="">No images yet: run tools/build_images.py</option>';
+    const soil = data.images.find((i) => i.family === "SoilNode");
+    if (cur) $("#fl-image").value = cur; else if (soil) $("#fl-image").value = soil.name;
+    if (!$("#fl-id").value && data.next_id) $("#fl-id").value = data.next_id;
+    $("#fl-idnote").textContent = data.known_ids.length
+      ? "Already in the swarm: " + data.known_ids.join(", ") + ". Reusing a number makes two boards fight over it."
+      : FLASH_ONLY ? "Each board needs its own number, 1 to 254. This computer can't see the swarm: check the Pi's admin page for numbers already in use."
+      : "Each board in the swarm needs its own number, 1 to 254.";
+    $("#fl-env").innerHTML = data.esptool ? "" : '<span class="pill bad">esptool not installed</span> <span class="muted">Run <span class="mono">pip install esptool</span> on this machine.</span>';
+    el.querySelectorAll('input[name="fl-port"]').forEach((r) => (r.onchange = syncButton));
+    renderJob();
+    syncButton();
+  };
+  $("#fl-refresh").onclick = loadBoards;
+  $("#fl-image").onchange = syncButton;
+  $("#fl-go").onclick = async () => {
+    const dev = pick(), img = $("#fl-image").value, id = $("#fl-id").value.trim();
+    const port = data.ports.find((p) => p.device === dev);
+    if (id && data.known_ids.includes(Number(id)) && !confirm(`Node ${id} already exists in the swarm. Flash this board as node ${id} anyway?`)) return;
+    if (!confirm(`Flash ${img} onto ${port ? port.mac : dev}${id ? " as node " + id : ""}?\n\nEverything on that board is replaced.`)) return;
+    try {
+      await api("/api/flash/start", { device: dev, image: img, node_id: id || null, erase: $("#fl-erase").checked });
+      data = await api("/api/flash"); renderJob(); syncButton();
+    } catch (e) { toast(e.message, 6000); }
+  };
+  loadBoards();
+};
+
 views.g4rden = async (el) => {
   const r = await api("/api/g4rden");
   const g = r.config, nodes = STATE.nodes;
@@ -720,6 +808,7 @@ async function refresh(rerender = false) {
 function route() {
   const h = location.hash.replace(/^#\/?/, "");
   const [name, arg] = h.split("/");
+  if (FLASH_ONLY) return { name: "flash", arg };
   return { name: name || "dashboard", arg };
 }
 
@@ -758,6 +847,13 @@ async function start() {
   const s = await (await fetch("/api/session")).json();
   if (!s.authed) return showLogin(s.needs_setup);
   $("#login").hidden = true; $("#shell").hidden = false;
+  if (s.flash_only) {
+    // No swarm on this machine: just the Flash page, no polling of /api/state.
+    FLASH_ONLY = true;
+    document.querySelectorAll("#nav a").forEach((a) => { a.hidden = a.getAttribute("href") !== "#/flash"; });
+    $("#conn").className = "pill"; $("#conn").textContent = "flash only";
+    return render();
+  }
   KINDS = await api("/api/kinds");
   await refresh();
   render();

@@ -44,6 +44,7 @@ import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
+sys.path.insert(0, HERE)
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
 # Stored like a slot so it charts and reports like everything else, but it is
@@ -796,12 +797,22 @@ class App:
             self.cfg.data["csv_imported"] = True
             self.cfg.save()
             self.store.event("system", "imported %d readings from readings.csv" % n)
-        self.gw = FakeGateway() if args.fake else Gateway(args.port, args.yield_to)
-        self.poller = Poller(self.gw, self.store, self.cfg)
-        self.uploader = Uploader(self)
-        push_script = args.push_script or os.path.join(HERE, "..", "hivewire_push.py")
-        self.pusher = Pusher(self.gw, self.store, os.path.join(args.data, "firmware"),
-                             push_script, args.fake)
+        self.flash_only = bool(getattr(args, "flash_only", False))
+        if self.flash_only:
+            # A PC with a board on its USB: no swarm, just the Flash page.
+            self.gw = self.poller = self.uploader = self.pusher = None
+        else:
+            self.gw = FakeGateway() if args.fake else Gateway(args.port, args.yield_to)
+            self.poller = Poller(self.gw, self.store, self.cfg)
+            self.uploader = Uploader(self)
+            push_script = args.push_script or os.path.join(HERE, "..", "hivewire_push.py")
+            self.pusher = Pusher(self.gw, self.store, os.path.join(args.data, "firmware"),
+                                 push_script, args.fake)
+        from flasher import Flasher
+        os.makedirs(os.path.join(args.data, "firmware"), exist_ok=True)
+        self.flasher = Flasher(os.path.join(args.data, "firmware"),
+                               gateway_port=None if args.fake else args.port, store=self.store,
+                               known_ids=lambda: list(self.cfg.data.get("nodes", {}).keys()))
         self.kinds = json.load(open(os.path.join(HERE, "kinds.json"), encoding="utf-8"))
         # Signed-in sessions survive a restart. They used to live only in
         # memory, so every deploy and every power cut silently signed the
@@ -816,10 +827,11 @@ class App:
         self.setup_code_path = os.path.join(args.data, "setup_code.txt")
         self.setup_fails = 0
         self.setup_code = None
-        if not self.cfg.data["password"]:
+        if not self.cfg.data["password"] and not self.flash_only:
             self.new_setup_code()
         self.login_fails = {}           # ip -> (count, first)
-        self.store.event("system", "admin started (%s)" % ("simulated gateway" if args.fake else args.port))
+        self.store.event("system", "admin started (%s)" % (
+            "flash only" if self.flash_only else "simulated gateway" if args.fake else args.port))
 
     def new_setup_code(self):
         code = "%06d" % secrets.randbelow(10 ** 6)
@@ -1050,6 +1062,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return m.group(1) if m else None
 
     def authed(self):
+        # Flash-only mode listens on this machine alone (main() enforces it),
+        # so whoever can reach the page is already at the keyboard.
+        if self.app.flash_only:
+            return True
         t = self.token()
         if not t:
             return False
@@ -1080,8 +1096,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path in ("/", "/index.html") or u.path.startswith("/static/"):
             return self.static(u.path)
         if u.path == "/api/session":
-            return self.send_json({"authed": self.authed(),
-                                   "needs_setup": not self.app.cfg.data["password"]})
+            return self.send_json({"authed": self.authed(), "flash_only": self.app.flash_only,
+                                   "needs_setup": not self.app.flash_only
+                                   and not self.app.cfg.data["password"]})
         if not self.authed():
             return self.fail("login required", 401)
         try:
@@ -1183,6 +1200,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # --- API -----------------------------------------------------------------
     def route_get(self, path, q):
         app = self.app
+        if path == "/api/flash":
+            from flasher import find_esptool
+            return self.send_json({"ports": app.flasher.ports(), "images": app.flasher.images(),
+                                   "job": app.flasher.job, "next_id": app.flasher.next_id(),
+                                   "esptool": find_esptool() is not None,
+                                   "known_ids": sorted(int(i) for i in app.cfg.data.get("nodes", {})
+                                                       if str(i).isdigit())})
+        if app.flash_only:
+            return self.fail("not available in flash-only mode", 404)
         if path == "/api/state":
             return self.send_json(app.state())
         if path == "/api/kinds":
@@ -1337,6 +1363,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def route_post(self, path, q):
         app = self.app
+        if path == "/api/flash/start":
+            b = self.jbody()
+            job = self.app.flasher.start(b.get("device"), b.get("image"), b.get("node_id"),
+                                         erase=bool(b.get("erase")))
+            self.app.store.event("flash", "started %s on %s (%s), node %s" % (
+                job["image"], job["mac"], job["device"], job["node_id"] or "unassigned"))
+            return self.send_json({"ok": True})
+        if self.app.flash_only:
+            return self.fail("not available in flash-only mode", 404)
         if path == "/api/logout":
             tok = self.token()
             if tok:
@@ -1528,17 +1563,23 @@ def main():
     ap.add_argument("--push-script", help="path to hivewire_push.py")
     ap.add_argument("--yield-to", default="[h]ivewire_push.py",
                     help="pgrep -f pattern; stay off the port while it matches")
+    ap.add_argument("--flash-only", action="store_true",
+                    help="no swarm: just the Flash page, for a board on THIS machine's USB")
     args = ap.parse_args()
-    if not args.fake and not args.port:
-        ap.error("--port is required (or --fake)")
+    if args.flash_only:
+        # No login in this mode, so it must never be reachable from the network.
+        args.listen = "127.0.0.1"
+    elif not args.fake and not args.port:
+        ap.error("--port is required (or --fake or --flash-only)")
 
     app = App(args)
     Handler.app = app
-    app.poller.start()
-    app.uploader.start()
+    if not app.flash_only:
+        app.poller.start()
+        app.uploader.start()
     srv = Server((args.listen, args.http_port), Handler)
     print("hive admin on http://%s:%d/ (%s)" % (args.listen, args.http_port,
-          "simulated" if args.fake else args.port), flush=True)
+          "flash only" if app.flash_only else "simulated" if args.fake else args.port), flush=True)
     srv.serve_forever()
 
 

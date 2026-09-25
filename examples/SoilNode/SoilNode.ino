@@ -30,6 +30,7 @@
 #include <Hivewire.h>
 #include <HivewireOta.h>
 #include <HivewireFirmware.h>
+#include <HivewireProvision.h>
 #include <Preferences.h>
 #include <Wire.h>
 
@@ -38,6 +39,10 @@
 #endif
 // Seed only: the id lives in NVS after first boot, so one image can be pushed
 // to every node and each keeps who it is (same rule as RangeNode).
+//
+// Build with -DHW_NODE_ID=0 for the GENERIC image the flasher uses: a board
+// that boots with id 0 never joins the swarm; it reports itself over USB and
+// waits for `setid <n>` (see HivewireProvision.h).
 static uint8_t NODE_ID = HW_NODE_ID;
 
 // ---- pins -------------------------------------------------------------------
@@ -374,6 +379,10 @@ void setup() {
   NODE_ID = prefs.getUChar("id", HW_NODE_ID);
   prefs.end();
 
+  if (NODE_ID == 0) hwprov::waitForId("soilnode", "SoilNode");   // never returns
+  hwprov::printId("SoilNode", NODE_ID);
+  hwprov::radioSelfTest();          // before the swarm radio: a scan hops channels
+
   node.onRaw([](const uint8_t *d, int n) { fw.ingest(d, n); });
   if (!node.begin(NODE_ID, HW_ROLE_SENSOR, SLOTS, N_SLOTS)) {
     Serial.println("hivewire: begin failed");
@@ -419,6 +428,7 @@ void loop() {
   node.loop();
   ota.loop();
   fw.loop();
+  hwprov::poll("soilnode", "SoilNode", NODE_ID);
 
   // A hive that reboots restarts its epoch at 1, and adoption needs a HIGHER
   // one -- so without this a node would ignore a rebooted hive forever. After
