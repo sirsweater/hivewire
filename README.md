@@ -3,6 +3,10 @@
 Leaderless ESP-NOW state synchronisation for ESP32 swarms, with an optional
 bridge to a Meshtastic LoRa node.
 
+> Using Hivewire in a project, or changing it — including as an AI agent? Start
+> with [AGENTS.md](AGENTS.md): the mental model, the rules that are easy to
+> break, and how to verify a change.
+
 Verified on ESP32-C6 hardware: `7 passed, 0 failed` from
 [`examples/SelfTest`](examples/SelfTest), which asserts the safety properties
 against live radios rather than in simulation, plus an overnight soak driving
