@@ -385,12 +385,28 @@ int HivewireNode::findSlot(uint8_t id) const {
   return -1;
 }
 
+uint32_t HivewireNode::hiveRssiAgeMs() const {
+  if (!_rssiHiveAt) return UINT32_MAX;
+  // Signed: the radio callback can stamp _rssiHiveAt after millis() is read.
+  int32_t age = (int32_t)(millis() - _rssiHiveAt);
+  return age < 0 ? 0 : (uint32_t)age;
+}
+
 void HivewireNode::_noteRssi(int8_t rssi) {
   if (!rssi) return;
   _rssiLast = rssi;
   // More negative is weaker. Seed on the first reading rather than comparing
   // against the 0 sentinel, which would look like the strongest signal possible.
   if (!_rssiWorst || rssi < _rssiWorst) _rssiWorst = rssi;
+  uint32_t now = millis();
+  if (!_rssiBucketAt || now - _rssiBucketAt >= RSSI_BUCKET_MS) {
+    // A bucket with nothing in it would make the next bucket's best look
+    // like the only evidence; that is fine -- it IS the only recent evidence.
+    _rssiBestPrev = _rssiBestCur;
+    _rssiBestCur = 0;
+    _rssiBucketAt = now;
+  }
+  if (!_rssiBestCur || rssi > _rssiBestCur) _rssiBestCur = rssi;
 }
 
 void HivewireNode::deafenTo(uint8_t srcId, uint16_t secs) {
@@ -601,6 +617,10 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
     if (plen > HIVEWIRE_MAX_STATE) return;                       // malformed
     if (len < (int)sizeof(HwBeacon) + plen) return;              // truncated
     const uint8_t *payload = data + sizeof(HwBeacon);
+
+    // Straight from the hive (it sends hops=0; a node re-gossiping sends 1).
+    // _noteRssi() ran for this very packet just before _ingest().
+    if (b->hops == 0 && _rssiLast) { _rssiHive = _rssiLast; _rssiHiveAt = millis(); }
 
     if (b->epoch > _epoch) {
       _epoch = b->epoch; _ttl = b->ttlSecs; _adoptedAt = millis();

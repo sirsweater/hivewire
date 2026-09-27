@@ -15,8 +15,8 @@
      "cause": "The node stopped hearing the coordinator and fell back to its safe state: out of range, the coordinator is down, or the swarm channel differs.",
      "fix": "Check the coordinator is running; move the node or add a relay; confirm every unit uses the same HW_SWARM_CHANNEL."},
     {"code": 104, "name": "WEAK_LINK", "area": "radio", "severity": "warning", "by": "node",
-     "title": "Link weaker than -90 dBm",
-     "cause": "Traffic is arriving at the edge of range and some will be lost.",
+     "title": "Link to the hive weaker than -90 dBm",
+     "cause": "The hive's own beacons, heard directly, arrive at the edge of range, so some traffic will be lost. Raised once when the link turns weak (and again every few hours while it stays weak); a node that only hears the hive through a relay does not raise it.",
      "fix": "Move the node or a relay closer, and keep metal and batteries away from the board's antenna."},
 
     {"code": 201, "name": "FW_CRC_BAD", "area": "firmware", "severity": "warning", "by": "node",

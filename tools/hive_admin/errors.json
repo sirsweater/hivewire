@@ -36,8 +36,8 @@
    "area": "radio",
    "severity": "warning",
    "by": "node",
-   "title": "Link weaker than -90 dBm",
-   "cause": "Traffic is arriving at the edge of range and some will be lost.",
+   "title": "Link to the hive weaker than -90 dBm",
+   "cause": "The hive's own beacons, heard directly, arrive at the edge of range, so some traffic will be lost. Raised once when the link turns weak (and again every few hours while it stays weak); a node that only hears the hive through a relay does not raise it.",
    "fix": "Move the node or a relay closer, and keep metal and batteries away from the board's antenna."
   },
   "201": {

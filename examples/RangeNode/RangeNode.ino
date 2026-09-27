@@ -88,7 +88,9 @@ static const uint32_t FORGET_EPOCH_AFTER_MS = 600000;   // 10 min
 // --- samplers --------------------------------------------------------------
 static void sUptimeMin(void *o)  { uint16_t v = millis() / 60000UL; memcpy(o, &v, 2); }
 static void sBoots(void *o)      { uint8_t  v = bootCount > 255 ? 255 : bootCount; memcpy(o, &v, 1); }
-static void sRssiLast(void *o)   { int8_t   v = node.lastRssi();  memcpy(o, &v, 1); }
+// Slot 3 is the best path in the last 1-2 minutes, not the last packet: see
+// bestRssi(). Slot 4 (worst since reset) still shows the margin.
+static void sRssiLast(void *o)   { int8_t   v = node.bestRssi();  memcpy(o, &v, 1); }
 static void sRssiWorst(void *o)  { int8_t   v = node.worstRssi(); memcpy(o, &v, 1); }
 static void sNeighbors(void *o)  { uint8_t  v = node.neighbors(); memcpy(o, &v, 1); }
 static void sBeacons(void *o)    { uint32_t c = node.beaconsRx(); uint16_t v = c > 65535 ? 65535 : c; memcpy(o, &v, 2); }

@@ -38,11 +38,11 @@ by the library. An application documents its own in its node type
 
 **What to do.** Check the coordinator is running; move the node or add a relay; confirm every unit uses the same HW_SWARM_CHANNEL.
 
-### E104 `WEAK_LINK` — Link weaker than -90 dBm
+### E104 `WEAK_LINK` — Link to the hive weaker than -90 dBm
 
 *Warning, raised by the node.*
 
-**Cause.** Traffic is arriving at the edge of range and some will be lost.
+**Cause.** The hive's own beacons, heard directly, arrive at the edge of range, so some traffic will be lost. Raised once when the link turns weak (and again every few hours while it stays weak); a node that only hears the hive through a relay does not raise it.
 
 **What to do.** Move the node or a relay closer, and keep metal and batteries away from the board's antenna.
 

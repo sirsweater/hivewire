@@ -345,8 +345,14 @@ class Soak:
         self.logs["tried"] += 1
         if out and ("N%d |" % nid) in out:
             self.logs["answered"] += 1
+            # Each distinct error line once per run: the gateway echoes every
+            # line on two uplinks, and the node's ring still holds last hour's.
+            seen = self.__dict__.setdefault("log_lines_seen", set())
             for code in re.findall(r"N%d \| (E\d+[^\n]*)" % nid, out):
-                self.event("node %d log carries %s" % (nid, code.strip()[:80]))
+                key = (nid, code.strip())
+                if key not in seen:
+                    seen.add(key)
+                    self.event("node %d log carries %s" % (nid, code.strip()[:80]))
         else:
             hops = self.nodes[nid]["hops"][-12:]
             relayed = sum(1 for h in hops if h > 0)

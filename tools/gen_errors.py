@@ -105,17 +105,42 @@ inline void hwErrSlotCount(void *out) {
   memcpy(out, &v, 2);
 }
 
-// Raise WEAK_LINK when the last packet heard was weaker than `dbm`, at most
-// once per `everyMs` -- a node at the edge of range would otherwise raise it
-// on every beacon. Call from loop().
+// WEAK_LINK: the hive's own beacons, heard directly, are arriving weaker than
+// `dbm`. Call from loop(); it samples once a minute.
+//
+// Two things the first version got wrong, both found in a soak. It judged the
+// LAST packet from anyone, so a node beside the hive (-69 dBm median) logged
+// "weak link -91 dBm" whenever a far neighbour happened to speak last. And it
+// logged every 30 minutes while weak, so within hours the 8-line log ring held
+// nothing else -- a diagnostic crowding out every other diagnostic.
+//
+// Now: the hive's direct beacons only (a node that hears the hive only through
+// relays says nothing -- that is relaying working, not a weak link), smoothed,
+// logged once on the way down and once on the way back up, and repeated while
+// still weak only every `remindMs`. The count in slot 27 still says how often.
 inline void hwErrCheckLink(HivewireNode &node, int8_t dbm = -90,
-                           uint32_t everyMs = 30UL * 60 * 1000) {
-  static uint32_t last = 0;
-  int8_t r = node.lastRssi();
-  if (r == 0 || r >= dbm) return;              // 0 = nothing heard yet
-  if (last && millis() - last < everyMs) return;
-  last = millis();
-  hwErr(node, HW_E_WEAK_LINK, 0, "weak link %d dBm", r);
+                           uint32_t remindMs = 6UL * 3600 * 1000) {
+  static uint32_t lastSample = 0, raisedAt = 0;
+  static int16_t avg10 = 0;              // dBm x10, smoothed; 0 = no sample yet
+  static bool weak = false;
+  uint32_t now = millis();
+  if (lastSample && now - lastSample < 60000UL) return;
+  lastSample = now;
+  int8_t r = node.hiveRssi();
+  if (r == 0 || node.hiveRssiAgeMs() > 10UL * 60 * 1000) return;   // relayed or not yet heard
+  avg10 = avg10 ? (int16_t)((avg10 * 3 + r * 10) / 4) : (int16_t)(r * 10);
+  int avg = avg10 / 10;
+  if (!weak && avg < dbm) {
+    weak = true;
+    raisedAt = now;
+    hwErr(node, HW_E_WEAK_LINK, 0, "weak link %d dBm", avg);
+  } else if (weak && avg > dbm + 3) {    // 3 dB of hysteresis: no flapping at the line
+    weak = false;
+    node.log("link ok %d dBm", avg);
+  } else if (weak && now - raisedAt >= remindMs) {
+    raisedAt = now;
+    hwErr(node, HW_E_WEAK_LINK, 0, "still weak %d dBm", avg);
+  }
 }
 '''
 

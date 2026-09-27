@@ -347,6 +347,27 @@ class HivewireNode {
   int8_t   worstRssi() const { return _rssiWorst; }
   void     resetRssi() { _rssiLast = 0; _rssiWorst = 0; }
 
+  // Signal of the HIVE's own beacons, heard directly (a neighbour re-gossiping
+  // a beacon marks it hops=1 and is not counted). lastRssi() is whatever
+  // packet came last, from anyone -- a node beside the hive at -69 dBm read
+  // as "weak" every time a far neighbour happened to speak last. This is the
+  // number a "how good is my link to the hive" question needs. 0 = never.
+  int8_t   hiveRssi() const { return _rssiHive; }
+
+  // The STRONGEST signal heard in the last 1-2 minutes, from anyone: the best
+  // path this node currently has. What a "signal" reading should show. The
+  // last packet's RSSI jumps with whoever spoke last, and once nodes relayed
+  // commands and replies for each other, that was ever more often a neighbour
+  // across the house -- every node on the dashboard read "weak signal" while
+  // its real links were unchanged. 0 = nothing heard yet.
+  int8_t   bestRssi() const {
+    int8_t c = _rssiBestCur, p = _rssiBestPrev;   // 0 means "nothing in that bucket"
+    if (!c) return p;
+    if (!p) return c;
+    return c > p ? c : p;
+  }
+  uint32_t hiveRssiAgeMs() const;
+
   // Beacons actually received, and how long since the last one. Inferring
   // these from neighbors() instead measures "a neighbour was visible", which
   // is a different and much blunter thing -- it cannot see packet loss while
@@ -480,6 +501,12 @@ class HivewireNode {
   uint32_t _seen[256];
 
   int8_t   _rssiLast = 0, _rssiWorst = 0;
+  volatile int8_t   _rssiHive = 0;         // last direct beacon from the hive
+  // bestRssi(): the strongest packet in this minute-long bucket and the last one.
+  static const uint32_t RSSI_BUCKET_MS = 60000;
+  volatile int8_t   _rssiBestCur = 0, _rssiBestPrev = 0;
+  volatile uint32_t _rssiBucketAt = 0;
+  volatile uint32_t _rssiHiveAt = 0;
   uint32_t _beaconsRx = 0;
   uint8_t  _deafId = 0;
   uint32_t _deafUntil = 0;

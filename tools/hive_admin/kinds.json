@@ -12,7 +12,7 @@
       "6":  {"label": "Sensors ok", "bits": {"1": "air sensor", "2": "soil probe", "4": "battery divider"}},
       "7":  {"label": "Boots"},
       "8":  {"label": "Uptime", "unit": "min"},
-      "9":  {"label": "Signal", "unit": "dBm", "chart": true},
+      "9":  {"label": "Signal", "unit": "dBm", "chart": true, "note": "best path in the last 1-2 minutes (firmware from 2026-09-27; before that, the last packet heard)"},
       "10": {"label": "Battery (node's own %)", "unit": "%", "chart": true, "zero_means": "no divider fitted"},
       "22": {"label": "Action", "writable": true, "min": 0, "max": 5, "action": true},
       "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255, "action": true},
@@ -43,7 +43,7 @@
     "slots": {
       "1":  {"label": "Uptime", "unit": "min"},
       "2":  {"label": "Boots"},
-      "3":  {"label": "Signal (last)", "unit": "dBm", "chart": true},
+      "3":  {"label": "Signal (best, 2 min)", "unit": "dBm", "chart": true},
       "4":  {"label": "Signal (worst)", "unit": "dBm", "chart": true},
       "5":  {"label": "Neighbours", "chart": true},
       "6":  {"label": "Beacons received"},

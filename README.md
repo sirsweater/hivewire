@@ -201,9 +201,18 @@ describe theirs in `kinds.json`.
 
 A node raises one with `hwErr(node, HW_E_..., subject, "detail")`: it goes into
 the node's log, and the last code and a count are published in slots 26 and 27,
-so the host sees them on its normal poll. The first thing all three nodes of a
-real swarm reported after updating was `E104`, a link weaker than -90 dBm — a
-swarm running at the edge of range, which nothing had said before.
+so the host sees them on its normal poll.
+
+The codes found a bug in their own first day. Every node of a real swarm
+reported `E104` (weak link) every 30 minutes, including one that heard the hive
+at -69 dBm: the check judged the last packet from *anyone*, and once nodes
+relayed for each other that was often a neighbour across the house. It also
+filled each node's 8-line log with nothing else. `E104` now judges only the
+hive's own beacons, heard directly, smoothed, and is logged once when the link
+turns weak and once when it recovers. The node beside the hive reports nothing;
+the two that really do hear it faintly (-93 and -95 dBm) report it once each.
+The dashboard's signal reading had the same flaw and now shows the best path
+heard in the last one to two minutes (`bestRssi()`).
 
 ## Updating a deployed unit
 
@@ -638,6 +647,14 @@ apart, so before pacing only the first ever aired: over 6.6 hours, 28 of 28
 digests arrived without their data. After: 45 of 45 complete. The uplink also
 waits for the node to finish talking to it before replying, which stopped the
 first line of a reply to a LoRa command going missing about half the time.
+
+**The node can be unplugged.** The boards connect by three wires (TX, RX,
+ground), each powered on its own. With the node gone, the gateway keeps running
+on its other uplinks, logs `E501` once rather than every retry, backs its
+reconnect attempts off to every 10 minutes, and holds its receive pin at idle
+with a pull-up: floating beside its own TX, that pin was seen to read back a
+scrap of the gateway's own digest as a "command". Any text with no sender --
+which only a frame of its own can be — is ignored.
 
 A command that arrives on any channel other than the private one is refused
 **silently** — answering it would tell a stranger the swarm exists. Commands

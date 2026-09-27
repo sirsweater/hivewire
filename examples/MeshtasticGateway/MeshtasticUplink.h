@@ -20,6 +20,7 @@
 #pragma once
 #include <Hivewire.h>
 #include <Meshtastic.h>
+#include <driver/gpio.h>
 
 // The library's callbacks are plain C function pointers with no user data, so
 // the active instance is held here. One uplink per sketch.
@@ -86,6 +87,13 @@ class MeshtasticUplink : public HivewireUplink {
     // which mt_serial_init() calls.
     Serial1.setRxBufferSize(RX_BUFFER_BYTES);
     mt_serial_init(_rx, _tx, _baud);
+    // Hold the receive line at idle (high) when nothing drives it. With the
+    // node unplugged -- which is now supported: the boards are cabled, not
+    // stacked -- the pin floats beside our own TX, and a gateway was seen to
+    // log a "command" that was a scrap of its own outgoing digest. The weak
+    // pull-up does not disturb a driven line. gpio_pullup_en, not pinMode(),
+    // which would take the pin back from the UART.
+    if (_rx >= 0) gpio_pullup_en((gpio_num_t)_rx);
     set_text_message_callback(&MeshtasticUplink::onText);
     // Register these purely as liveness evidence: any inbound packet, of any
     // kind, proves the node still regards us as a client. Without them we
@@ -137,22 +145,31 @@ class MeshtasticUplink : public HivewireUplink {
     // gone, so re-handshake then -- fast when it matters, and never firing at
     // all when the link is healthy. A blind periodic refresh either wastes
     // handshakes or leaves you broken for most of its interval.
+    // Back off while it stays silent: 1, 2, 4, 8 min, then every 10. With the
+    // node unplugged (supported: the boards are cabled, not stacked) the old
+    // fixed 60 s retry wrote "E501 link stale" into the 32-line ring every 90 s
+    // and pushed everything else out of it within the hour.
+    uint32_t gap = HANDSHAKE_MIN_GAP_MS << (_failedHandshakes < 4 ? _failedHandshakes : 4);
+    if (gap > HANDSHAKE_MAX_GAP_MS) gap = HANDSHAKE_MAX_GAP_MS;
     if (now - lastInboundAt() >= STALE_AFTER_MS &&
-        now - _lastHandshake >= HANDSHAKE_MIN_GAP_MS) {
+        now - _lastHandshake >= gap) {
       // Say WHICH kind of silence this is. "Nothing has arrived" covers two
       // very different faults, and from the log alone they are identical:
       // a genuinely quiet mesh, or a node that has stopped driving the wire.
       // Distinguishing them cost a full day here -- the node went on reporting
       // successful sends into a line its own GPS power-down had pulled low, so
       // every layer above looked healthy. One pin read separates them.
+      // Into the ring once per outage; every retry still goes to USB.
+      bool first = (_failedHandshakes == 0);
       if (rxLineDead()) {
         Serial.println("[uplink] inbound silent AND rx line is low: "
                        "the node is not driving the wire");
-        note("E501 rx line dead, not idle");
+        if (first) note("E501 rx line dead, not idle");
       } else {
         Serial.println("[uplink] inbound silent, re-establishing session");
-        note("E501 link stale, rehandshake");
+        if (first) note("E501 link stale, rehandshake");
       }
+      if (_failedHandshakes < 255) _failedHandshakes++;
       _session = false;
       handshake();
     }
@@ -209,6 +226,8 @@ class MeshtasticUplink : public HivewireUplink {
   static const uint32_t STALE_AFTER_MS      = 90000;   // 90 s
   // Floor between handshakes so a genuinely quiet mesh cannot make us spin.
   static const uint32_t HANDSHAKE_MIN_GAP_MS = 60000;  // 60 s
+  // Ceiling of the back-off while the node stays silent (unplugged, say).
+  static const uint32_t HANDSHAKE_MAX_GAP_MS = 600000; // 10 min
   // Big enough to hold a whole want_config reply without the driver dropping
   // bytes while the library is asleep in its parser.
   static const size_t   RX_BUFFER_BYTES      = 4096;
@@ -345,7 +364,10 @@ class MeshtasticUplink : public HivewireUplink {
   void note(const char *msg) { if (_log) _log(msg); }
 
   static void markInbound() {
-    if (g_mtUplink) g_mtUplink->_lastInbound = millis();
+    if (g_mtUplink) {
+      g_mtUplink->_lastInbound = millis();
+      g_mtUplink->_failedHandshakes = 0;   // it answered: back to prompt retries
+    }
   }
 
   // Registered purely as liveness evidence. Any inbound packet of any kind
@@ -381,6 +403,14 @@ class MeshtasticUplink : public HivewireUplink {
   static void onText(uint32_t from, uint32_t to, uint8_t channel,
                      const char *text) {
     if (!g_mtUplink) return;
+    // A packet a CLIENT sends has from = 0 (the node fills in its own number
+    // when it transmits); every packet the node hands us from the air carries
+    // a real sender. So from == 0 here can only be our own frame read back --
+    // never a command, and not proof of a live session either.
+    if (from == 0) {
+      g_mtUplink->note("echo ignored");
+      return;
+    }
     markInbound();   // liveness first: even a refused message proves the session
     if (channel != g_mtUplink->_ch) {
       Serial.printf("[uplink] REFUSED ch=%u (not swarm channel): %s\n",
@@ -401,6 +431,7 @@ class MeshtasticUplink : public HivewireUplink {
   bool _ready = false;
   bool _session = false;
   uint32_t _lastHandshake = 0;
+  uint8_t  _failedHandshakes = 0;         // in a row, since the node last spoke
   size_t   _lastPbSize = 0;
   uint32_t _stallSince = 0;
   uint32_t _lastInbound = 0;

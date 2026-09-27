@@ -339,7 +339,8 @@ static void sBattPct(void *o)  { memcpy(o, &battPct, 1); }
 static void sOk(void *o)       { memcpy(o, &sensorOk, 1); }
 static void sBoots(void *o)    { uint8_t v = bootCount > 255 ? 255 : bootCount; memcpy(o, &v, 1); }
 static void sUptimeMin(void *o){ uint16_t v = millis() / 60000UL; memcpy(o, &v, 2); }
-static void sRssi(void *o)     { int8_t v = node.lastRssi(); memcpy(o, &v, 1); }
+// Best path in the last 1-2 minutes, not the last packet: see bestRssi().
+static void sRssi(void *o)     { int8_t v = node.bestRssi(); memcpy(o, &v, 1); }
 static void sAction(void *o)   { memcpy(o, &lastAction, 1); }
 static void sOtaArm(void *o)   { memcpy(o, &otaArm, 1); }
 static void sFwCrc(void *o)    { memcpy(o, &runningCrc, 4); }
