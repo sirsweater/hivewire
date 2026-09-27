@@ -167,6 +167,44 @@ A coordinator fetches a node's ring with `requestLog(id)`.
 The refusal entries are the highest-value ones: from outside, a refused write
 and a message that never arrived look identical. Now the node says which.
 
+## Reaching a node behind a relay
+
+Status always travelled inward through relays; commands did not travel out. A
+node the hive heard only through a neighbour could report, but could not be
+written to or asked for its log: over a 16-hour soak, a node relayed 83% of the
+time answered **none** of the log requests sent to it, and 0 of 4 writes to a
+node in the same position arrived.
+
+Now every unit with relaying on (`relayHops > 0`, the default) also passes on,
+once each:
+
+- **writes** (`HW_MSG_SET`) outward, unless addressed to itself;
+- **log requests** outward, at most once a second per target;
+- **log replies** and **firmware replies** (NACKs) inward, toward the hive.
+
+There is no protocol change, so old and new units mix. A write is recognised by
+its sender and sequence number and **applied once** however many copies arrive
+— slot 22 is an action, and a relayed duplicate of "reboot" must not reboot the
+node twice. Log and firmware replies are recognised by a checksum of the frame;
+the hive prints each log line once. Measured after the update: the node that had
+answered no log request in 16 hours answered 3 of 3 through the relay.
+
+## Error codes
+
+Every failure a user could run into has a permanent number, so a report can be
+matched to a cause without reading the code: `E101` a radio that hears nothing,
+`E206` an update that rolled back, `E303/3` an input that looks unconnected (the
+`/3` is the slot it feeds), `E605` the host's power supply sagging. The registry
+is [`errors/codes.json`](errors/codes.json); [ERRORS.md](ERRORS.md) explains each
+one and what to do about it. Codes 1000–1999 belong to applications, which
+describe theirs in `kinds.json`.
+
+A node raises one with `hwErr(node, HW_E_..., subject, "detail")`: it goes into
+the node's log, and the last code and a count are published in slots 26 and 27,
+so the host sees them on its normal poll. The first thing all three nodes of a
+real swarm reported after updating was `E104`, a link weaker than -90 dBm — a
+swarm running at the edge of range, which nothing had said before.
+
 ## Updating a deployed unit
 
 [`src/HivewireOta.h`](src/HivewireOta.h) is **opt-in and header-only** — include
@@ -286,6 +324,27 @@ Instrumenting further found software bugs, none of them radio:
    The sender now keeps asking a known member for 5 s of silence before
    dropping it.
 
+### Pushing to one node
+
+`push <len> <crc32> <node>` sends an image to one node rather than the whole
+swarm. Other nodes ignore it outright, instead of downloading a whole image of
+another family only to refuse it — pausing their sensors for the length of the
+transfer.
+
+A single target also changes what patience makes sense. For the whole swarm, a
+node that goes quiet is dropped after 5 s so the rest are not held up. For one
+node, nobody else is waiting, and skipping a window is fatal — a receiver can
+never rejoin a window it missed. Measured: a push to a node that reached the
+hive directly about half the time died at 20% after one short dropout. So a
+targeted push keeps asking for the same window through up to 75 s of silence
+(inside the receiver's own 90 s stall limit) and ends cleanly past that.
+
+That node had a second problem: it heard the hive perfectly — its log showed
+the transfer starting and data arriving — but the hive rarely heard *it*, so
+no window could ever close. Relays now carry firmware NACKs inward; with one
+relay doing so, the same push completed (1,182,336 bytes in 266 s) and the node
+confirmed the new image.
+
 The USB link between host and gateway is now self-healing rather than merely
 careful: each subchunk is requested as `MORE <offset> <len>` and answered with
 the data plus a CRC32 over *offset and data*, so a short, corrupted, or
@@ -303,7 +362,7 @@ image to its peers over exactly the transfer the hive uses — no hive, no host,
 no internet in the data path. That is what lets an update reach nodes beyond
 the hive's own range: whoever got it hands it on.
 
-In the RangeNode example it is one writable slot:
+In the RangeNode and SoilNode examples it is one writable slot:
 
 ```
 set 2 24 3      node 2: send your firmware to node 3
@@ -327,9 +386,15 @@ A node declines an image identical to the one it runs (`fw: already running
 an image it has not yet confirmed refuses to seed it onward: a bad build can
 only travel once it has proved itself.
 
-**Not yet done:** seeding is triggered by command, not automatic. Hop-by-hop
-spread beyond the hive's range works mechanically but has not been tested with
-nodes physically out of the hive's reach.
+**Used for real** to update a soil node the hive could not reach at all: its
+reports only ever arrived through a relay, so a push from the hive could never
+complete. `set 11 24 12` had node 11 pass its freshly confirmed image to node 12,
+which verified it, rebooted into it and confirmed it — in under two and a half
+minutes, with nobody touching either board.
+
+**Not yet done:** seeding is triggered by command, not automatic. A node can
+only seed its own family's image, so a relay of another kind cannot carry an
+update through.
 
 ## The safety net under every update
 
@@ -420,7 +485,7 @@ moved to it.)
 That second uplink is what makes a new command possible:
 
 ```
-push <len> <crc32>
+push <len> <crc32> [node]
 ```
 
 sent over *either* uplink, arms a transfer; the bytes are then expected over
@@ -461,6 +526,11 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
   page (record the probe dry, then wet); moisture is computed from the raw
   reading, so recalibrating applies to the whole history and never needs a
   reflash.
+- **Problems** — every error code the host, the gateway and the nodes have
+  raised, in plain words with what to do, and **Report a problem**: a report of
+  the swarm's state with names, locations, network addresses and tokens
+  removed, shown in full and editable, then opened as a pre-filled GitHub issue
+  (or copied, or downloaded).
 - **g4rden** — optional upload of plant readings to the
   [g4rden](https://g4rden.com) site, speaking the same API as its Zigbee head:
   pair once with a claim code, map each node to a device, then preview the
@@ -470,6 +540,19 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
   where the last one finished, so an outage catches up instead of leaving a
   hole, and each carries a sequence number so a lost response cannot write the
   same readings twice.
+
+Two things it does because a soak caught them going wrong:
+
+- **A write is re-sent until the node confirms it.** The gateway's `ACK set`
+  only means it *sent* the write — one broadcast, which a node at -87 dBm
+  missed 1 time in 6. The page watches the node's own reports for the new value
+  and re-sends a setting until it appears (`E606` after five tries). It never
+  re-sends an action: slots marked `"action": true` in `kinds.json` (reboot,
+  arm an update, seed) go out exactly once.
+- **Nothing is stored from a node that has gone quiet.** The gateway keeps a
+  node's last values after it stops reporting and lists them in every `dump`
+  with a growing age; a node switched off for three hours was being recorded,
+  and uploaded, as reporting the same values every 15 minutes.
 
 It uses the standard library and pyserial only, and loads nothing from the
 internet, so it works at a site with no connection. It polls the gateway's
@@ -546,7 +629,19 @@ D1 2.1=412 2.2=88 3.1=395
 ```
 
 `ok` against `up` is the number that matters — how many units have actually
-converged, so a straggler is visible without polling. Commands back:
+converged, so a straggler is visible without polling.
+
+**Lines are paced, 2.5 s apart.** A Meshtastic node accepts one text message
+from a client every two seconds and silently drops the rest (its PhoneAPI rate
+limit). A digest is a health line and several data lines written microseconds
+apart, so before pacing only the first ever aired: over 6.6 hours, 28 of 28
+digests arrived without their data. After: 45 of 45 complete. The uplink also
+waits for the node to finish talking to it before replying, which stopped the
+first line of a reply to a LoRa command going missing about half the time.
+
+A command that arrives on any channel other than the private one is refused
+**silently** — answering it would tell a stranger the swarm exists. Commands
+back:
 
 ```
 mode <n> [param] [ttl]            posture; reaches every unit
@@ -558,6 +653,18 @@ log [nodeId]                      replay a unit's diagnostic ring
 Meshtastic is a dependency of **one file**. The library core is pure ESP-NOW and
 never includes it, so a LoRaWAN or cellular uplink is a new implementation of
 `HivewireUplink`, not a fork.
+
+## Testing it for hours
+
+[`tools/soak`](tools/soak) holds the long-running tests these numbers come from.
+`hive_soak.py` runs on the hive's host next to the admin page and records every
+node's reports, gaps, reboots and signal, the gateway's census, writes confirmed
+against the node's own reports, over-the-air log fetches, what the g4rden site
+accepted, and the host's power, temperature and disk. `lora_soak.py` runs on any
+machine with a second Meshtastic radio on the private channel and measures the
+LoRa link from the far end: digest completeness, round trips, writes, and that
+commands on the public channel are refused. Both write `events.log` (anything
+unexpected) and a `summary.md` rewritten every ten minutes.
 
 ## Install
 
@@ -625,7 +732,7 @@ Things that cost real time, in case they save you some:
   define, every unit must agree) lets you act on it without touching library
   internals. One caution from testing it: switching to a channel with zero
   WiFi neighbours did **not** meaningfully change a reliability problem that
-  turned out to be USB-noise-shaped (see the firmware distribution section) --
+  turned out to be USB-noise-shaped (see the firmware distribution section) —
   co-channel WiFi congestion and broadband RF noise are different problems,
   and moving off a busy channel only fixes the first one.
 
@@ -662,6 +769,14 @@ with the node unplugged.
   it will under-suppress.
 - The coordinator allocates a 256-entry node table; shrink it if RAM is tight.
 - A node's slot table fills at `HIVEWIRE_MAX_SLOTS`; further ids are dropped.
+- A relayed write, log request or reply is passed on once by **every** relay
+  that hears it — a flood with duplicate suppression, not routing. Fine for a
+  household swarm; wasteful for a large one.
+- A log reply frame that is lost is not re-sent; the hive's retries only cover
+  a lost request. Expect an occasional line missing from a fetched log.
+- Firmware *data* is not relayed, only the replies: a pushed node must hear the
+  hive directly, and one it cannot hear is updated by seeding from a peer of its
+  own family.
 - Relay has now been exercised where a node really was reachable only through
   another — a unit on the far side of a house, deafened to the coordinator, so
   `coordinator → relay → node` was the only path. It adopted two successive

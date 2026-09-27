@@ -15,7 +15,7 @@ Run this ON THE PI (it owns /dev/ttyACM3), not on the PC -- that's the
 only device with direct USB access to the gateway.
 
 Usage:
-    python3 hivewire_push.py /path/to/firmware.bin [/dev/ttyACM3]
+    python3 hivewire_push.py /path/to/firmware.bin [/dev/ttyACM3] [node id]
 """
 import os
 import re
@@ -41,11 +41,14 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
 
     if len(sys.argv) < 2:
-        print("usage: hivewire_push.py <image.bin> [port]", file=sys.stderr)
+        print("usage: hivewire_push.py <image.bin> [port] [node]", file=sys.stderr)
         sys.exit(1)
 
     img_path = sys.argv[1]
     port = sys.argv[2] if len(sys.argv) > 2 else PORT_DEFAULT
+    # One node only (needs a gateway that takes push's optional third field);
+    # default everyone, as before.
+    target = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
     with open(img_path, "rb") as f:
         img = f.read()
@@ -78,7 +81,8 @@ def main():
               (len(stale), stale[:120]))
     s.reset_input_buffer()
 
-    cmd = "push %d %d\n" % (len(img), crc)
+    cmd = ("push %d %d %d\n" % (len(img), crc, target) if target is not None
+           else "push %d %d\n" % (len(img), crc))
     print("-> %s" % cmd.strip())
     s.write(cmd.encode())
     s.flush()

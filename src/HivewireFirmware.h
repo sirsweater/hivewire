@@ -37,6 +37,7 @@
 
 #pragma once
 #include <Hivewire.h>
+#include <HivewireErrors.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
@@ -221,7 +222,7 @@ class HivewireFwReceiver {
     // radio link. Same trap as the beacon-age underflow fixed in the core.
     uint32_t lastRx = _lastRx;
     if (_active && (int32_t)(millis() - lastRx) > (int32_t)STALL_MS) {
-      _node.log("fw: stalled, abandoned");
+      hwErr(_node, HW_E_FW_TRANSFER_STALLED, 0, "fw: stalled, abandoned");
       Update.abort();
       _active = false;
     }
@@ -254,7 +255,7 @@ class HivewireFwReceiver {
 
     if (_before) _before();
     if (!Update.begin(b->imageLen)) {
-      _node.log("fw: no space %lu", (unsigned long)b->imageLen);
+      hwErr(_node, HW_E_FW_NO_SPACE, 0, "fw: no space %lu", (unsigned long)b->imageLen);
       return;
     }
     _imageLen = b->imageLen;
@@ -396,21 +397,21 @@ class HivewireFwReceiver {
   void finalise() {
 
     if (_written != _imageLen) {
-      _node.log("fw: short %lu/%lu", (unsigned long)_written, (unsigned long)_imageLen);
+      hwErr(_node, HW_E_FW_WRITE_FAILED, 0, "fw: short %lu/%lu", (unsigned long)_written, (unsigned long)_imageLen);
       Update.abort(); _active = false; return;
     }
     if (_crc != _imageCrc) {
       // Refuse rather than boot it. A corrupt image that runs is a brick you
       // have to walk to; a refused one leaves a working node exactly as it was.
-      _node.log("fw: crc bad, refused");
+      hwErr(_node, HW_E_FW_CRC_BAD, 0, "fw: crc bad, refused");
       Update.abort(); _active = false; return;
     }
     if (_family && !imageHas(_family)) {
-      _node.log("fw: wrong family, refused");
+      hwErr(_node, HW_E_FW_WRONG_FAMILY, 0, "fw: wrong family, refused");
       Update.abort(); _active = false; return;
     }
     if (!Update.end(true)) {
-      _node.log("fw: end failed");
+      hwErr(_node, HW_E_FW_WRITE_FAILED, 0, "fw: end failed");
       Update.abort(); _active = false; return;
     }
     _node.log("fw: ok, rebooting");
@@ -538,6 +539,7 @@ class HivewireFwSenderT {
     memset(_aud, 0, sizeof(_aud));
     memset(_heard, 0, sizeof(_heard));
     _memberRetry = false;
+    _lastReplyAt = millis();
 
     HwFwBegin b{};
     b.h = {HIVEWIRE_MAGIC, HIVEWIRE_PROTOCOL, HW_MSG_FW_BEGIN, _coord.id()};
@@ -572,6 +574,7 @@ class HivewireFwSenderT {
     // from then on every window waits for it (see WAIT).
     _heard[h->srcId >> 3] |= (1 << (h->srcId & 7));
     _aud[h->srcId >> 3]   |= (1 << (h->srcId & 7));
+    _lastReplyAt = millis();
     FWDBG("[fwtx] nack from=%u w=%u replies=%u nack0=%02x\n",
           h->srcId, n->window, _replies, _nack[0]);
   }
@@ -732,6 +735,24 @@ class HivewireFwSenderT {
         // so. A window that genuinely finished should have gotten at least one
         // reply; if it did not, ask again -- WITHOUT clearing what a straggler
         // may already have told us -- before believing it.
+        // ONE named node, and it has gone quiet. The rules below are for a
+        // swarm -- keep the rest moving, skip the window, let the straggler end
+        // short -- but with a single target nobody else is waiting, and a
+        // skipped window guarantees the image is refused: a receiver can never
+        // rejoin a window it missed. Measured: a push to a node that reached
+        // the hive directly about half the time died at 20% after one short
+        // dropout. So keep asking for the SAME window while it is plausibly
+        // coming back -- up to TARGET_PATIENCE_MS, safely inside the
+        // receiver's own STALL_MS -- and past that, end cleanly.
+        if (!heardAny && _target != HIVEWIRE_TARGET_ALL) {
+          // Signed: the radio callback can stamp _lastReplyAt after millis()
+          // was read here, and an unsigned difference would wrap to ~49 days.
+          int32_t silent = (int32_t)(millis() - _lastReplyAt);
+          if (silent < (int32_t)TARGET_PATIENCE_MS) { pollRetry(); return; }
+          FWDBG("[fwtx] target silent %ld ms at w=%u, ending\n", (long)silent, _window);
+          finish();
+          return;
+        }
         if (!heardAny && _pollTries < MAX_POLL_TRIES) { pollRetry(); return; }
 
         // Nobody answered even after every retry. That is different from "one
@@ -758,7 +779,10 @@ class HivewireFwSenderT {
         bool any = false;
         for (size_t i = 0; i < sizeof(_nack); i++) if (_nack[i]) { any = true; break; }
         if (!any) { advance(); return; }
-        if (++_round > MAX_ROUNDS) {
+        if (++_round > (_target == HIVEWIRE_TARGET_ALL ? MAX_ROUNDS : MAX_ROUNDS_TARGET)) {
+          // One named node that still has holes after this many repairs: the
+          // window cannot close, and skipping it only guarantees a refusal.
+          if (_target != HIVEWIRE_TARGET_ALL) { finish(); return; }
           // Somebody is unreachable. Press on rather than stalling the whole
           // swarm: nodes that did not get a complete image refuse it on CRC and
           // stay on the firmware they already had.
@@ -809,6 +833,11 @@ class HivewireFwSenderT {
   static const uint8_t  MAX_ROUNDS     = 6;
   static const uint8_t  MAX_POLL_TRIES = 4;     // retries when NOBODY answers
   static const uint32_t MEMBER_PATIENCE_MS = 5000;  // a known member's silence, before dropping it
+  // A push to ONE node: how long its silence is waited out (must stay under
+  // the receiver's STALL_MS of 90 s), and how many repair rounds one window
+  // may take before the transfer ends.
+  static const uint32_t TARGET_PATIENCE_MS = 75000;
+  static const uint8_t  MAX_ROUNDS_TARGET  = 40;
   // Consecutive fully-silent windows tolerated before concluding the receiver
   // is truly gone, rather than just quiet for a while.
   //
@@ -913,6 +942,7 @@ class HivewireFwSenderT {
   Provider _provider = nullptr;
   State    _state = IDLE;
   uint8_t  _target = 0;
+  volatile uint32_t _lastReplyAt = 0;   // any node's last NACK (written by the radio callback)
   uint32_t _imageLen = 0, _imageCrc = 0, _fill = 0, _sent = 0, _polledAt = 0;
   uint32_t _nextAt = 0;     // when NEXT went out; see NEXT_SETTLE_MS
   uint32_t _provided = 0;   // cumulative bytes handed over; the sole EOF signal

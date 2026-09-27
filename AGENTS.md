@@ -43,6 +43,7 @@ src/Hivewire.h, .cpp          core: node, beacons, Trickle, slots, relay, logs
 src/HivewireOta.h             Wi-Fi pull updates + the provisional-boot rollback net
 src/HivewireFirmware.h        ESP-NOW image distribution; firmware families
 src/HivewireProvision.h       node number over USB after flashing (setid), radio self-test
+src/HivewireErrors.h          error codes + hwErr() (GENERATED from errors/codes.json)
 src/Hivewire*Uplink.h         Serial / HTTP / multi-uplink digests out of the swarm
 examples/BasicNode            smallest useful node
 examples/SelfTest             asserts the safety properties on live radios
@@ -53,6 +54,8 @@ examples/FirmwarePush         hive that takes an image over USB and distributes 
 tools/hive_admin/             web admin for the hive's host (Pi); Flash page
 tools/build_images.py         builds the generic images the Flash page writes
 tools/hivewire_push.py        streams an image to the gateway's `push` command
+tools/gen_errors.py           errors/codes.json -> HivewireErrors.h, ERRORS.md, admin lookup
+tools/soak/                   long-running tests: hive_soak.py (host), lora_soak.py (LoRa link)
 hardware/                     enclosure brief (the PCB lives in its own repo)
 ```
 
@@ -96,7 +99,8 @@ Rules that matter when writing a node:
   the bundled sketches and the admin: `20`/`21` deafen to one sender for N
   seconds (a test hook for forcing relay paths), `22` action (4 = reboot,
   5 = start a Wi-Fi OTA pull), `23` OTA arm, `24` seed this node's firmware to
-  another node, `25` running firmware CRC. The admin also stores the hive's
+  another node (RangeNode and SoilNode), `25` running firmware CRC, `26` last error (`code | subject << 16`),
+  `27` errors since boot. The admin also stores the hive's
   observed hop count as pseudo-slot `250`. Don't reuse those for other meanings.
 - **Node ids 1–254.** `0` is `HIVEWIRE_TARGET_ALL` on the wire and means
   "unassigned" for provisioning. Store the id in NVS and never let a new image
@@ -135,7 +139,13 @@ arduino-cli compile --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc \
 - Pulling a USB serial port open with pyserial's defaults raises DTR/RTS, which
   **resets** a C6. Open with both low if you need to talk to a running board.
 - Over-the-air pushes take the plain app image (`Sketch.ino.bin`), never
-  `.merged.bin`.
+  `.merged.bin`. Push to one node (`hivewire_push.py image.bin <port> <node>`);
+  a node the hive only hears through a relay is updated once a relay runs
+  firmware that passes NACKs on, and one it cannot reach at all by seeding
+  (`set <peer> 24 <node>`) from a confirmed same-family peer.
+- A generic image (node id 0) is safe to push: a board that somehow has no
+  stored id reverts to its previous image instead of waiting for `setid`
+  (`HivewireOta::revertIfProvisional`).
 
 ## 5. The hive, the gateway and the admin
 
@@ -148,8 +158,22 @@ mode <m> <param> <ttl>           set the coordinator's state (example encoding)
 status                           force a digest now
 dump                             every node's slots, USB ONLY (the admin polls this)
 log [id]                         the gateway's ring, or ask a node for its own
-push <len> <crc32>               arm an ESP-NOW firmware transfer; bytes follow on USB
+push <len> <crc32> [node]        arm an ESP-NOW firmware transfer (one node, or all)
 ```
+
+- **`ACK set` only means the gateway SENT the write** -- one ESP-NOW broadcast,
+  which a node at the edge of range misses (a soak lost 1 in 6 at -87 dBm). The
+  node's own report is the confirmation. The admin re-sends a *setting* until
+  the node reports it (E606 after five tries); it never repeats an *action*.
+  Mark one-shot slots (reboot, arm OTA, seed) `"action": true` in `kinds.json`.
+- **Commands are relayed**: `set` and log requests travel outward, log replies
+  and firmware NACKs inward, each passed on once per unit (see the README,
+  "Reaching a node behind a relay"). A `set` is applied once however many
+  copies arrive. An add-on that defines its own reply type can relay it with
+  `node.relayRaw()` from its `onRaw()` handler.
+- **Meshtastic accepts one text message from a client every 2 s** and silently
+  drops the rest (PhoneAPI rate limit). Anything sending several lines over the
+  LoRa uplink must pace them; `MeshtasticUplink` queues and sends one per 2.5 s.
 
 `tools/hive_admin` is the only program that may hold the gateway's port — two
 readers on one tty each see half the replies. Try it without hardware:
@@ -182,6 +206,27 @@ finished:
 
 `examples/SelfTest` asserts the core safety properties against live radios.
 Run it after any change to `src/Hivewire.*`.
+
+### Error codes
+
+Every failure a user could hit gets a code, so a report can be matched to a
+cause without anyone reading the code. The registry is `errors/codes.json`:
+
+- **Add a code in the same change as the failure path** that raises it, with a
+  cause and a fix written for the person holding the board. Run
+  `python tools/gen_errors.py` (CI-style check: `--check`) and commit the
+  generated files with it.
+- **Never renumber or reuse a code**; only add. Ranges: 1xx radio, 2xx firmware,
+  3xx peripherals (generic, with a subject = the slot it concerns), 4xx
+  provisioning, 5xx gateway, 6xx host.
+- **Keep library codes general.** Hivewire does not know it is watching soil;
+  a missing sensor is `E301/<slot>`, not a soil code. Applications use
+  1000–1999 and describe theirs in their `kinds.json` entry under `"errors"`.
+- Raise with `hwErr(node, HW_E_..., subject, "detail")`; publish slots 26/27 with
+  `hwErrSlotLast`/`hwErrSlotCount` so the admin sees codes without asking.
+- The admin's **Problems** page explains every code and builds a report for a
+  GitHub issue with names, locations, addresses and tokens removed (`scrub()` in
+  `hive_admin.py`). Anything new the report includes must go through `scrub()`.
 
 ### Rules that protect deployed units
 
@@ -219,6 +264,9 @@ Run it after any change to `src/Hivewire.*`.
 ## 7. Where help is most useful
 
 - **Tuning `trickleK`** for small swarms (it under-suppresses with 2–3 units).
+- **Relaying firmware data**, not just the NACKs, so a node the hive cannot hear
+  at all can be pushed to directly instead of seeded by a same-family peer.
+- **Routing instead of flooding** for relayed commands, for larger swarms.
 - **More than two relay hops** — only ever tested at two.
 - **Sleepy sensors**: nodes today must stay awake to hear beacons and receive
   firmware; a battery node that deep-sleeps needs a design that keeps both.

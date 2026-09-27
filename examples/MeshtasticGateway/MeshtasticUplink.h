@@ -124,6 +124,7 @@ class MeshtasticUplink : public HivewireUplink {
     // anything that can move the timestamp it is compared against.
     uint32_t now = millis();
     checkParserStall(now);
+    drainQueue(now);
 
     // The node only forwards received packets to a client that has completed a
     // want_config handshake. If the NODE reboots it forgets us -- but our
@@ -147,10 +148,10 @@ class MeshtasticUplink : public HivewireUplink {
       if (rxLineDead()) {
         Serial.println("[uplink] inbound silent AND rx line is low: "
                        "the node is not driving the wire");
-        note("rx line dead, not idle");
+        note("E501 rx line dead, not idle");
       } else {
         Serial.println("[uplink] inbound silent, re-establishing session");
-        note("link stale, rehandshake");
+        note("E501 link stale, rehandshake");
       }
       _session = false;
       handshake();
@@ -163,38 +164,32 @@ class MeshtasticUplink : public HivewireUplink {
   // we can transmit without this, but we will never hear anything without it.
   bool sessionUp() const { return _session; }
 
-  // Build the packet here instead of calling mt_send_text(), which hardcodes
-  // want_ack = true even for a broadcast. On a broadcast that is actively
-  // harmful: the node keeps retransmitting until it hears someone rebroadcast,
-  // so every digest goes out TWICE. Observed on the wire -- "Sending
-  // retransmission ... tries left=2" after every single uplink, then "Received
-  // a ACK ... stopping retransmissions". Double airtime, on the one resource
-  // this design is built to be frugal with.
+  // Queue, don't transmit. The node accepts at most ONE text message from a
+  // client every two seconds and silently drops the rest (PhoneAPI.cpp,
+  // RATE_LIMIT_EXCEEDED; the timer is not reset by a dropped one). A digest is
+  // a health line plus several data lines written microseconds apart, so
+  // before this queue only the first line of every digest ever reached the
+  // air -- measured: 1 of 4 arrived, every time. loop() drains the queue one
+  // line per SEND_GAP_MS. A LoRa packet takes over a second of airtime anyway,
+  // so the pacing costs nothing the radio could have delivered.
   //
-  // Nothing is waiting for an acknowledgement of a broadcast telemetry line. If
-  // one is lost the next carries the same state, which is the entire premise of
-  // advertising state rather than commanding it.
+  // Full queue: drop the OLDEST line. The newest is the more current state,
+  // and a command's ACK must not be lost behind a long log replay.
   void send(const char *line) override {
     if (!_ready) return;
-
-    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_default;
-    p.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
-    p.id       = random(0x7FFFFFFF);
-    p.to       = BROADCAST_ADDR;
-    p.channel  = _ch;
-    p.want_ack = false;
-    p.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
-
-    size_t n = strlen(line);
-    if (n > sizeof(p.decoded.payload.bytes)) n = sizeof(p.decoded.payload.bytes);
-    p.decoded.payload.size = n;
-    memcpy(p.decoded.payload.bytes, line, n);
-
-    meshtastic_ToRadio tr = meshtastic_ToRadio_init_default;
-    tr.which_payload_variant = meshtastic_ToRadio_packet_tag;
-    tr.packet = p;
-    _mt_send_toRadio(tr);
+    if (_qCount == SEND_QUEUE_LINES) {
+      _qHead = (_qHead + 1) % SEND_QUEUE_LINES;
+      _qCount--;
+      _qDropped++;
+    }
+    uint8_t slot = (_qHead + _qCount) % SEND_QUEUE_LINES;
+    snprintf(_q[slot], sizeof(_q[slot]), "%s", line);
+    _qCount++;
   }
+
+  // Lines dropped because the queue was full, since boot.
+  uint32_t dropped() const { return _qDropped; }
+  uint8_t queued() const { return _qCount; }
 
   void onCommand(CommandCallback cb) override { _cb = cb; }
 
@@ -222,6 +217,14 @@ class MeshtasticUplink : public HivewireUplink {
   // ~3 ms of sampling, well over 30 bit times at 115200.
   static const uint8_t  RX_LINE_SAMPLES      = 16;
   static const uint32_t RX_LINE_SAMPLE_US    = 200;
+  // The node's floor between client text messages is 2 s; leave margin for
+  // its clock and ours disagreeing about when "now" was.
+  static const uint32_t SEND_GAP_MS          = 2500;
+  // Quiet time after the node's last frame to us before we send one.
+  static const uint32_t RX_SETTLE_MS         = 400;
+  // A full digest of a dozen nodes plus an ACK, or a log replay.
+  static const uint8_t  SEND_QUEUE_LINES     = 12;
+  static const size_t   SEND_LINE_BYTES      = 200;   // payload caps at 233
 
   // Treat boot as the first "inbound" so we do not re-handshake immediately.
   uint32_t lastInboundAt() const {
@@ -276,6 +279,61 @@ class MeshtasticUplink : public HivewireUplink {
     _stallSince = now;
   }
 
+  // Hand the oldest queued line to the node, at most one per SEND_GAP_MS.
+  void drainQueue(uint32_t now) {
+    if (!_qCount || !_ready) return;
+    if (_sentAny && now - _lastSendAt < SEND_GAP_MS) return;
+    // Not while the node is still talking to us. SUSPECTED, not proven: a
+    // reply to a command that arrived over LoRa lost its FIRST line twice in
+    // a row while the second got through, and nothing else was sent in the 2 s
+    // before it -- consistent with our frame landing while the node was busy
+    // streaming the received packet to us, and being dropped unparsed. Waiting
+    // for the wire to go quiet costs a fraction of a second.
+    if (_lastInbound && now - _lastInbound < RX_SETTLE_MS) return;
+    transmit(_q[_qHead]);
+    _qHead = (_qHead + 1) % SEND_QUEUE_LINES;
+    _qCount--;
+    _lastSendAt = now;
+    _sentAny = true;
+    if (_qDropped != _qDroppedNoted) {
+      _qDroppedNoted = _qDropped;
+      char m[LOG_NOTE_MAX];
+      snprintf(m, sizeof(m), "uplink queue full, %lu dropped", (unsigned long)_qDropped);
+      note(m);
+    }
+  }
+
+  // Build the packet here instead of calling mt_send_text(), which hardcodes
+  // want_ack = true even for a broadcast. On a broadcast that is actively
+  // harmful: the node keeps retransmitting until it hears someone rebroadcast,
+  // so every digest goes out TWICE. Observed on the wire -- "Sending
+  // retransmission ... tries left=2" after every single uplink, then "Received
+  // a ACK ... stopping retransmissions". Double airtime, on the one resource
+  // this design is built to be frugal with.
+  //
+  // Nothing is waiting for an acknowledgement of a broadcast telemetry line. If
+  // one is lost the next carries the same state, which is the entire premise of
+  // advertising state rather than commanding it.
+  void transmit(const char *line) {
+    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_default;
+    p.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    p.id       = random(0x7FFFFFFF);
+    p.to       = BROADCAST_ADDR;
+    p.channel  = _ch;
+    p.want_ack = false;
+    p.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+
+    size_t n = strlen(line);
+    if (n > sizeof(p.decoded.payload.bytes)) n = sizeof(p.decoded.payload.bytes);
+    p.decoded.payload.size = n;
+    memcpy(p.decoded.payload.bytes, line, n);
+
+    meshtastic_ToRadio tr = meshtastic_ToRadio_init_default;
+    tr.which_payload_variant = meshtastic_ToRadio_packet_tag;
+    tr.packet = p;
+    _mt_send_toRadio(tr);
+  }
+
   void handshake() {
     _lastHandshake = millis();
     // Always pass the callback: the library nulls its stored pointer once a
@@ -328,7 +386,7 @@ class MeshtasticUplink : public HivewireUplink {
       Serial.printf("[uplink] REFUSED ch=%u (not swarm channel): %s\n",
                     channel, text);
       char m[LOG_NOTE_MAX];
-      snprintf(m, sizeof(m), "refused ch=%u", channel);
+      snprintf(m, sizeof(m), "E502 refused ch=%u", channel);
       g_mtUplink->note(m);
       return;
     }
@@ -349,4 +407,9 @@ class MeshtasticUplink : public HivewireUplink {
   uint32_t _startedAt = 0;
   CommandCallback _cb = nullptr;
   LogFn _log = nullptr;
+  char     _q[SEND_QUEUE_LINES][SEND_LINE_BYTES];
+  uint8_t  _qHead = 0, _qCount = 0;
+  uint32_t _qDropped = 0, _qDroppedNoted = 0;
+  uint32_t _lastSendAt = 0;
+  bool     _sentAny = false;
 };

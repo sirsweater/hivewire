@@ -43,7 +43,7 @@ inline void printId(const char *family, uint8_t id) {
     Serial.printf("HWID family=%s id=%u mac=%02x:%02x:%02x:%02x:%02x:%02x\n", family, id,
                   m[0], m[1], m[2], m[3], m[4], m[5]);
   else
-    Serial.printf("HWID family=%s id=unassigned mac=%02x:%02x:%02x:%02x:%02x:%02x\n", family,
+    Serial.printf("HWID family=%s id=unassigned mac=%02x:%02x:%02x:%02x:%02x:%02x E401\n", family,
                   m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
@@ -59,7 +59,7 @@ inline int radioSelfTest() {
   WiFi.scanDelete();
   if (n < 0) n = 0;
   if (n > 0) Serial.printf("HWRADIO networks=%d best=%d\n", n, best);
-  else       Serial.printf("HWRADIO networks=0 best=none dead\n");
+  else       Serial.printf("HWRADIO networks=0 best=none dead E101\n");
   return n;
 }
 
@@ -80,7 +80,7 @@ inline void handle(const String &line, const char *ns, const char *family, uint8
   if (line == "id?") { printId(family, id); return; }
   if (line.startsWith("setid ")) {
     long v = line.substring(6).toInt();
-    if (v < 1 || v > 254) { Serial.println("HWID-ERR id must be 1-254"); return; }
+    if (v < 1 || v > 254) { Serial.println("HWID-ERR E402 id must be 1-254"); return; }
     Preferences p;
     p.begin(ns, false);
     p.putUChar("id", (uint8_t)v);

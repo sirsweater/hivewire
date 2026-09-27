@@ -49,6 +49,7 @@
 
 #pragma once
 #include <Hivewire.h>
+#include <HivewireErrors.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Update.h>
@@ -91,7 +92,7 @@ class HivewireOta {
     p.end();
     if (!pending) return;
     if (tries > MAX_PROVISIONAL_BOOTS) {
-      _node.log("ota: %u provisional boots, reverting", tries - 1);
+      hwErr(_node, HW_E_UPDATE_ROLLED_BACK, 0, "ota: %u provisional boots, reverting", tries - 1);
       revert();                         // does not return on success
       return;
     }
@@ -125,7 +126,7 @@ class HivewireOta {
         _confirming = false;
         _node.log("ota: image confirmed");
       } else if ((int32_t)(now - _confirmBy) >= 0) {
-        _node.log("ota: no swarm, reverting");
+        hwErr(_node, HW_E_UPDATE_ROLLED_BACK, 0, "ota: no swarm, reverting");
         revert();                       // does not return
       }
     }
@@ -148,9 +149,9 @@ class HivewireOta {
   // Trigger. Refuses unless armed, and says so in the ring -- from outside, a
   // refused update and a lost command look identical otherwise.
   bool trigger() {
-    if (!HW_OTA_SSID[0]) { _node.log("ota: not configured"); return false; }
+    if (!HW_OTA_SSID[0]) { hwErr(_node, HW_E_OTA_WIFI_FAILED, 0, "ota: not configured"); return false; }
     if (!_armedBy || (int32_t)(millis() - _armedBy) >= 0) {
-      _node.log("ota: refused, not armed");
+      hwErr(_node, HW_E_OTA_WIFI_FAILED, 0, "ota: refused, not armed");
       return false;
     }
     _armedBy = 0;
@@ -170,6 +171,30 @@ class HivewireOta {
   // swarm leaves that node unreachable for good; with node-to-node seeding, it
   // would carry every node it reached along with it.
   void markPending() { setPending(); }
+
+  // For setup(), BEFORE anything that can block: if this boot is a new image's
+  // provisional first run, go straight back to the previous one. Returns
+  // (having done nothing) otherwise.
+  //
+  // For the one failure the normal confirm-or-revert net cannot catch: a
+  // sketch that stops in setup() -- a generic image (node id 0) landing on a
+  // board that never stored its id waits for a USB `setid` forever, loop()
+  // never runs, and the revert in loop() never fires. A node nobody can reach
+  // would be stranded for good. Call this before waiting for anything.
+  static void revertIfProvisional(const char *why) {
+    Preferences p;
+    p.begin(NVS_NS, false);
+    bool pending = p.getUChar(NVS_KEY, 0) != 0;
+    if (pending) { p.putUChar(NVS_KEY, 0); p.putUChar(NVS_TRIES, 0); }
+    p.end();
+    if (!pending) return;
+    const esp_partition_t *prev = esp_ota_get_next_update_partition(NULL);
+    Serial.printf("ota: new image cannot run here (%s), reverting\n", why);
+    if (prev && esp_ota_set_boot_partition(prev) == ESP_OK) {
+      delay(100);
+      ESP.restart();
+    }
+  }
 
  private:
   static const uint32_t ARM_WINDOW_MS = 120000;   // 2 min to follow through
@@ -221,24 +246,24 @@ class HivewireOta {
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_WAIT_MS) delay(200);
     if (WiFi.status() != WL_CONNECTED) {
-      _node.log("ota: wifi failed");
+      hwErr(_node, HW_E_OTA_WIFI_FAILED, 0, "ota: wifi failed");
       return rejoin();
     }
 
     HTTPClient http;
     http.setTimeout(15000);
-    if (!http.begin(HW_OTA_URL)) { _node.log("ota: bad url"); return rejoin(); }
+    if (!http.begin(HW_OTA_URL)) { hwErr(_node, HW_E_OTA_WIFI_FAILED, 0, "ota: bad url"); return rejoin(); }
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
-      _node.log("ota: http %d", code);
+      hwErr(_node, HW_E_OTA_WIFI_FAILED, 0, "ota: http %d", code);
       http.end();
       return rejoin();
     }
 
     int len = http.getSize();
-    if (len <= 0) { _node.log("ota: no length"); http.end(); return rejoin(); }
+    if (len <= 0) { hwErr(_node, HW_E_OTA_WIFI_FAILED, 0, "ota: no length"); http.end(); return rejoin(); }
     if (!Update.begin((size_t)len)) {
-      _node.log("ota: no space %d", len);
+      hwErr(_node, HW_E_FW_NO_SPACE, 0, "ota: no space %d", len);
       http.end();
       return rejoin();
     }
@@ -246,7 +271,7 @@ class HivewireOta {
     size_t wrote = Update.writeStream(*http.getStreamPtr());
     http.end();
     if (wrote != (size_t)len || !Update.end(true)) {
-      _node.log("ota: write %u/%d", (unsigned)wrote, len);
+      hwErr(_node, HW_E_FW_WRITE_FAILED, 0, "ota: write %u/%d", (unsigned)wrote, len);
       Update.abort();
       return rejoin();
     }

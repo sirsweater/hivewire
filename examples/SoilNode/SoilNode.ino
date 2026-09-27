@@ -31,6 +31,7 @@
 #include <HivewireOta.h>
 #include <HivewireFirmware.h>
 #include <HivewireProvision.h>
+#include <HivewireErrors.h>
 #include <Preferences.h>
 #include <Wire.h>
 
@@ -95,6 +96,10 @@ HivewireNode node;
 HivewireOta  ota(node);
 HivewireFwReceiver fw(node);
 HivewireFlashProvider flashSrc;
+// Hands this node's own image to a neighbour (slot 24), the same way RangeNode
+// does. A soil node out of the hive's reach can only be updated by a peer of
+// its own family, and a range node's image is refused by family.
+HivewireFwNodeSender fwTx(node);
 // Only images of this same sketch are accepted -- see setFamily().
 HW_FW_FAMILY("SoilNode");
 
@@ -151,7 +156,7 @@ static bool ahtBegin() {
   Wire.end();
   Wire.begin(I2C_SDA_ALT, I2C_SCL_ALT);
   if (aht20Init()) { node.log("aht20 on alt pins %d/%d", I2C_SDA_ALT, I2C_SCL_ALT); return true; }
-  node.log("aht20 not found");
+  hwErr(node, HW_E_PERIPHERAL_MISSING, 1, "aht20 not found");   // subject: slot 1, air temp
   return false;
 }
 
@@ -282,7 +287,8 @@ static void readSensors() {
     // Stale values would look like a live reading; the ok bit is what says
     // they are not.
     sensorOk &= ~1;
-    if (ahtFound && ++ahtFails % 10 == 1) node.log("aht20 read failed (%u)", ahtFails);
+    if (ahtFound && ++ahtFails % 10 == 1)
+      hwErr(node, HW_E_PERIPHERAL_READ_FAILED, 1, "aht20 read failed (%u)", ahtFails);
   }
 
   // MEDIAN of several samples, not the mean. A capacitive probe's output is
@@ -301,8 +307,8 @@ static void readSensors() {
   bool soilPlausible = soilRaw > 200 && soilRaw < 4000 && soilSteady;
   sensorOk = soilPlausible ? (sensorOk | 2) : (sensorOk & ~2);
   if (!soilPlausible && ++soilBadReads % 20 == 1)
-    node.log("soil: median %u spread %u -- %s", soilRaw, spread,
-             soilSteady ? "out of range" : "probe not connected?");
+    hwErr(node, soilSteady ? HW_E_VALUE_OUT_OF_RANGE : HW_E_INPUT_FLOATING, 3,
+          "soil: median %u spread %u", soilRaw, spread);   // subject: slot 3, soil raw
   float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilRaw) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
   soilPct = pct < 0 ? 0 : pct > 100 ? 100 : (uint8_t)lroundf(pct);
 
@@ -311,6 +317,11 @@ static void readSensors() {
     uint32_t mv = medianMilliVolts(BATT_ADC_PIN) * 2;     // 1M/1M divider halves it
     battMv = mv > 65535 ? 65535 : mv;
     battPct = lipoPercent(battMv);
+    // Once per crossing, not on every read of an empty cell.
+    static bool wasLow = false;
+    bool low = battPct < 15;
+    if (low && !wasLow) hwErr(node, HW_E_BATTERY_LOW, 10, "battery %umV (%u%%)", battMv, battPct);
+    wasLow = low;
     sensorOk |= 4;
   } else {
     battMv = battPct = 0;
@@ -332,6 +343,13 @@ static void sRssi(void *o)     { int8_t v = node.lastRssi(); memcpy(o, &v, 1); }
 static void sAction(void *o)   { memcpy(o, &lastAction, 1); }
 static void sOtaArm(void *o)   { memcpy(o, &otaArm, 1); }
 static void sFwCrc(void *o)    { memcpy(o, &runningCrc, 4); }
+static uint8_t seedTarget = 0;
+static volatile int16_t seedWanted = -1;
+static void sSeed(void *o)     { memcpy(o, &seedTarget, 1); }
+static void aSeed(const void *in) {
+  seedTarget = *(const uint8_t *)in;
+  if (seedTarget) seedWanted = seedTarget;
+}
 
 // ---- appliers ---------------------------------------------------------------
 static void aAction(const void *in) {
@@ -357,7 +375,11 @@ static const HwSlotDef SLOTS[] = {
   {  9, HW_I8,  HW_DIR_OUT,     30000, 900000,     6,   0,   0, sRssi,      nullptr },
   { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,   5, sAction,    aAction },
   { 23, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0, 255, sOtaArm,    aOtaArm },
+  { 24, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0, 255, sSeed,      aSeed   },
   { 25, HW_U32, HW_DIR_OUT,    600000, 900000,     1,   0,   0, sFwCrc,     nullptr },
+  // The error pair every node publishes (HivewireErrors.h): last code and count.
+  { HW_ERR_SLOT_LAST,  HW_U32, HW_DIR_OUT, 30000, 900000, 1, 0, 0, hwErrSlotLast,  nullptr },
+  { HW_ERR_SLOT_COUNT, HW_U16, HW_DIR_OUT, 30000, 900000, 1, 0, 0, hwErrSlotCount, nullptr },
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
@@ -379,13 +401,29 @@ void setup() {
   NODE_ID = prefs.getUChar("id", HW_NODE_ID);
   prefs.end();
 
+  // A pushed image on a board with no stored id cannot know which node it is,
+  // and waiting for a USB `setid` would strand a deployed node: go back to the
+  // image that knew. A no-op on a board being set up by hand.
+  if (NODE_ID == 0) HivewireOta::revertIfProvisional("no node id stored");
   if (NODE_ID == 0) hwprov::waitForId("soilnode", "SoilNode");   // never returns
   hwprov::printId("SoilNode", NODE_ID);
-  hwprov::radioSelfTest();          // before the swarm radio: a scan hops channels
+  // Before the swarm radio: a scan hops channels. Raised now, published once
+  // the node has joined (hwErr keeps it until then).
+  if (hwprov::radioSelfTest() == 0) hwErr(node, HW_E_RADIO_DEAF, 0, "radio heard no networks");
 
-  node.onRaw([](const uint8_t *d, int n) { fw.ingest(d, n); });
+  node.onRaw([](const uint8_t *d, int n) {
+    // Never start accepting an update while sending one: applying it would
+    // reboot this node halfway through the transfer it is serving.
+    if (!fwTx.active()) fw.ingest(d, n);
+    fwTx.ingest(d, n);
+    // Someone else's firmware reply on its way to the hive: carry it, so a
+    // node the hive hears only through us can still be updated. Not while we
+    // are the sender -- then those replies are addressed to us.
+    if (!fwTx.active() && n >= (int)sizeof(HwHeader) &&
+        ((const HwHeader *)d)->type == HW_MSG_FW_NACK) node.relayRaw(d, n);
+  });
   if (!node.begin(NODE_ID, HW_ROLE_SENSOR, SLOTS, N_SLOTS)) {
-    Serial.println("hivewire: begin failed");
+    Serial.println("E102 hivewire: begin failed");
     delay(1000);
     ESP.restart();                  // never sit dead where nobody can reach it
   }
@@ -428,7 +466,34 @@ void loop() {
   node.loop();
   ota.loop();
   fw.loop();
+  fwTx.loop();
   hwprov::poll("soilnode", "SoilNode", NODE_ID);
+  hwErrCheckLink(node);
+
+  // Same rules as RangeNode: never while busy, never to itself, and never an
+  // image that has not yet proven it can rejoin the swarm.
+  if (seedWanted >= 0) {
+    uint8_t v = (uint8_t)seedWanted;
+    seedWanted = -1;
+    uint8_t target = (v == 255) ? HIVEWIRE_TARGET_ALL : v;
+    if (fw.active() || fwTx.active()) {
+      node.log("fw: seed refused, busy");
+    } else if (v == NODE_ID) {
+      node.log("fw: seed refused, self");
+    } else if (ota.updating()) {
+      node.log("fw: seed refused, image unconfirmed");
+    } else if (!flashSrc.begin()) {
+      node.log("fw: seed refused, image unverified");
+    } else if (fwTx.begin(target, flashSrc.length(), flashSrc.crc(), HivewireFlashProvider::feed)) {
+      node.log("fw: seed %lu b crc %08lx to %u", (unsigned long)flashSrc.length(),
+               (unsigned long)flashSrc.crc(), v);
+    } else {
+      node.log("fw: seed refused, sender");
+    }
+  }
+  static bool wasSeeding = false;
+  if (wasSeeding && !fwTx.active()) node.log("fw: seed finished");
+  wasSeeding = fwTx.active();
 
   // A hive that reboots restarts its epoch at 1, and adoption needs a HIGHER
   // one -- so without this a node would ignore a rebooted hive forever. After
@@ -444,7 +509,7 @@ void loop() {
   // No sensor I/O while an image is arriving: the transfer is what this node
   // must not stall, and the readings can wait a minute.
   static uint32_t lastRead = 0;
-  if (!fw.active() && millis() - lastRead >= READ_EVERY_MS) {
+  if (!fw.active() && !fwTx.active() && millis() - lastRead >= READ_EVERY_MS) {
     lastRead = millis();
     readSensors();
     Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) batt=%s ok=%u nb=%u ep=%lu\n",

@@ -33,6 +33,7 @@
 #include <HivewireFirmware.h>
 #include <Preferences.h>
 #include <HivewireProvision.h>
+#include <HivewireErrors.h>
 
 // One firmware, one id per board, chosen at flash time:
 //
@@ -199,6 +200,9 @@ static const HwSlotDef SLOTS[] = {
   { 23, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sOtaArm,      aOtaArm     },
   { 24, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sSeed,        aSeed       },
   { 25, HW_U32, HW_DIR_OUT,    600000, 900000,     1,   0,     0, sFwCrc,       nullptr     },
+  // The error pair every node publishes (HivewireErrors.h): last code and count.
+  { HW_ERR_SLOT_LAST,  HW_U32, HW_DIR_OUT, 30000, 900000, 1, 0, 0, hwErrSlotLast,  nullptr },
+  { HW_ERR_SLOT_COUNT, HW_U16, HW_DIR_OUT, 30000, 900000, 1, 0, 0, hwErrSlotCount, nullptr },
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
@@ -263,9 +267,15 @@ void setup() {
 
   // Generic image (-DHW_NODE_ID=0): report over USB and wait for `setid <n>`
   // instead of joining the swarm as a node nobody numbered.
+  // A pushed image on a board with no stored id cannot know which node it is,
+  // and waiting for a USB `setid` would strand a deployed node: go back to the
+  // image that knew. A no-op on a board being set up by hand.
+  if (NODE_ID == 0) HivewireOta::revertIfProvisional("no node id stored");
   if (NODE_ID == 0) hwprov::waitForId("rangenode", "RangeNode");   // never returns
   hwprov::printId("RangeNode", NODE_ID);
-  hwprov::radioSelfTest();          // before the swarm radio: a scan hops channels
+  // Before the swarm radio: a scan hops channels. Raised now, published once
+  // the node has joined (hwErr keeps it until then).
+  if (hwprov::radioSelfTest() == 0) hwErr(node, HW_E_RADIO_DEAF, 0, "radio heard no networks");
 
   node.onState(onState);
   node.onSafe(onSafe);
@@ -284,10 +294,15 @@ void setup() {
     // reboot this node halfway through the transfer it is serving.
     if (!fwTx.active()) fw.ingest(d, n);
     fwTx.ingest(d, n);
+    // Someone else's firmware reply on its way to the hive: carry it, so a
+    // node the hive hears only through us can still be updated. Not while we
+    // are the sender -- then those replies are addressed to us.
+    if (!fwTx.active() && n >= (int)sizeof(HwHeader) &&
+        ((const HwHeader *)d)->type == HW_MSG_FW_NACK) node.relayRaw(d, n);
   });
 
   if (!node.begin(NODE_ID, HW_ROLE_SENSOR, SLOTS, N_SLOTS)) {
-    Serial.println("hivewire: begin failed");
+    Serial.println("E102 hivewire: begin failed");
     delay(1000);
     ESP.restart();                  // never sit dead where nobody can reach it
   }
@@ -314,6 +329,7 @@ void loop() {
   fw.loop();
   fwTx.loop();
   hwprov::poll("rangenode", "RangeNode", NODE_ID);
+  hwErrCheckLink(node);
 
   if (seedWanted >= 0) {
     uint8_t v = (uint8_t)seedWanted;

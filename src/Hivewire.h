@@ -403,6 +403,12 @@ class HivewireNode {
   typedef void (*RawCallback)(const uint8_t *data, int len);
   void onRaw(RawCallback cb) { _rawCb = cb; }
   bool sendRaw(const uint8_t *data, uint16_t len);
+  // Carry another unit's frame, of a type the core does not define, one hop
+  // further -- once, however many copies arrive. For an onRaw() handler that
+  // knows the frame is a reply meant for the hive (a firmware NACK, say), so a
+  // node the hive cannot hear directly can still answer it. No-op when relaying
+  // is off (relayHops 0) or the frame is this unit's own.
+  void relayRaw(const uint8_t *data, int len);
 
   // Append to this unit's diagnostic ring. The library records its own
   // transport events here too; applications can add their own.
@@ -432,6 +438,21 @@ class HivewireNode {
   void maybeRelay(const uint8_t *data, int len);
   void serviceRelay(uint32_t now);
   bool seenBefore(uint8_t src, uint16_t msgId);
+  // Commands outward, log replies inward: see relayCmd() in Hivewire.cpp.
+  void relayCmd(const uint8_t *data, int len);
+  void serviceCmdRelay(uint32_t now);
+  bool setSeenBefore(uint8_t src, uint8_t seq, uint32_t now);
+  bool logRspSeenBefore(uint8_t src, uint16_t crc, uint32_t now, uint32_t ttl = LOGRSP_SEEN_MS);
+  static const uint8_t  CMD_RELAY_Q      = 4;
+  static const uint8_t  SET_SEEN         = 8;
+  static const uint32_t SET_SEEN_MS      = 30000;  // copies arrive within ~1 s
+  static const uint8_t  LOGRSP_SEEN      = 8;
+  static const uint32_t LOGRSP_SEEN_MS   = 10000;
+  // A raw reply repeats its bytes when the hive re-asks (the same NACK bitmap);
+  // remembering it only briefly lets each re-ask's answer travel too.
+  static const uint32_t RAW_SEEN_MS      = 1500;
+  static const uint32_t LOGREQ_RELAY_GAP_MS = 1000;
+  static const uint32_t LOGREQ_QUIET_MS  = 3000;   // after a replay, ignore echoes
   void trickleReset();
   void serviceTrickle(uint32_t now);
   int  findSlot(uint8_t id) const;
@@ -479,6 +500,20 @@ class HivewireNode {
   uint8_t  _relayBuf[HIVEWIRE_MAX_PAYLOAD];
   uint16_t _relayLen = 0;
   uint32_t _relayAt = 0;
+
+  // Relayed commands and log replies. Filled from the radio callback, drained
+  // by loop(): one writer index, one reader index, so no lock is needed.
+  struct CmdFrame { uint8_t buf[HIVEWIRE_MAX_PAYLOAD]; uint16_t len; uint32_t at; };
+  CmdFrame _cq[CMD_RELAY_Q];
+  volatile uint8_t _cqW = 0, _cqR = 0;
+  struct { uint8_t src, seq; uint32_t at; bool used; } _setSeen[SET_SEEN] = {};
+  uint8_t  _setSeenHead = 0;
+  struct { uint8_t src; uint16_t crc; uint32_t at; bool used; } _lrSeen[LOGRSP_SEEN] = {};
+  uint8_t  _lrSeenHead = 0;
+  uint8_t  _lrqTarget = 0;
+  uint32_t _lrqAt = 0;
+  bool     _lrqSent = false;
+  volatile uint32_t _logRspDoneAt = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -568,4 +603,10 @@ class HivewireCoordinator {
   uint8_t  _tCount = 0;
   bool     _tScheduled = false;
   NodeLogCallback _logCb = nullptr;
+
+  // A log reply now arrives directly AND through relays; pass each frame on once.
+  static const uint8_t  LOGRSP_SEEN    = 8;
+  static const uint32_t LOGRSP_SEEN_MS = 10000;
+  struct { uint8_t src; uint16_t crc; uint32_t at; bool used; } _lrSeen[LOGRSP_SEEN] = {};
+  uint8_t _lrSeenHead = 0;
 };

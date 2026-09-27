@@ -196,6 +196,8 @@ class Flasher:
         self.job["error"] = msg
         if self.store:
             self.store.event("flash", "%s %s: failed, %s" % (self.job["mac"], self.job["image"], msg))
+        if getattr(self, "problems", None):     # set by the admin: raises E604
+            self.problems.once(604, "%s: %s" % (self.job["image"], msg))
 
     def _esptool(self, args, timeout):
         cmd = self.esptool + ["--chip", "esp32c6", "--port", self.job["device"]] + args

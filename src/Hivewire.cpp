@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "Hivewire.h"
+#include "HivewireErrors.h"
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -217,8 +218,14 @@ void HivewireNode::handleLogReq(const uint8_t *data, int len) {
   if (len < (int)sizeof(HwLogReq)) return;
   const HwLogReq *rq = (const HwLogReq *)data;
   if (rq->targetId != HIVEWIRE_TARGET_ALL && rq->targetId != _id) return;
+  // The request now arrives more than once (the hive retries, and relays pass
+  // each retry on). Restarting a replay already under way, or repeating one
+  // just finished, would only send the same lines again.
+  uint32_t now = millis();
+  if (_logRspLeft) return;
+  if (_logRspDoneAt && now - _logRspDoneAt < LOGREQ_QUIET_MS) return;
   _logRspLeft = _logCount;      // send the whole ring, a little at a time
-  _logRspAt = millis();
+  _logRspAt = now;
 }
 
 void HivewireNode::serviceLogRsp(uint32_t now) {
@@ -249,6 +256,85 @@ void HivewireNode::serviceLogRsp(uint32_t now) {
   rsp->count = n;
   esp_now_send(HW_BCAST, buf, off);
   _logRspAt = now + LOGRSP_GAP_MS;            // let the air clear between frames
+  if (!_logRspLeft) _logRspDoneAt = now ? now : 1;
+}
+
+// CRC-16/CCITT over a whole frame: identifies one log-reply frame so each copy
+// of it -- direct, and via every relay -- is passed on or printed only once.
+static uint16_t hwCrc16(const uint8_t *p, int n) {
+  uint16_t c = 0xFFFF;
+  while (n-- > 0) {
+    c ^= (uint16_t)(*p++) << 8;
+    for (int k = 0; k < 8; k++) c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021) : (uint16_t)(c << 1);
+  }
+  return c;
+}
+
+// Commands relayed outward and log replies inward.
+//
+// Status was the only thing ever relayed, so a node that reached the hive only
+// through a neighbour could report but never be told anything: a soak measured
+// 0 of 4 log requests answered by a node relayed 100% of the time, and writes
+// to it simply never arrived. The hive's `set` and log request now travel out
+// the same way status travels in, and the log reply comes back.
+//
+// No protocol change, so old and new units mix: a SET is identified by its
+// sender and sequence number, a log reply by a checksum of the frame, and each
+// unit passes each one on at most once. A log request carries neither, so it is
+// relayed at most once a second per target -- the hive's own retries are 1.5 s
+// apart, so each retry travels, but a relay echoing another relay does not.
+void HivewireNode::relayCmd(const uint8_t *data, int len) {
+  if (!_cfg.relayHops || len <= 0 || len > HIVEWIRE_MAX_PAYLOAD) return;
+  uint8_t w = _cqW, r = _cqR;
+  if ((uint8_t)(w - r) >= CMD_RELAY_Q) return;           // full: drop, it is best effort
+  CmdFrame &f = _cq[w % CMD_RELAY_Q];
+  memcpy(f.buf, data, len);
+  f.len = len;
+  f.at = millis() + (_cfg.relayJitterMs ? random(_cfg.relayJitterMs) : 0);
+  _cqW = w + 1;
+}
+
+void HivewireNode::serviceCmdRelay(uint32_t now) {
+  uint8_t r = _cqR;
+  if (r == _cqW) return;
+  CmdFrame &f = _cq[r % CMD_RELAY_Q];
+  if ((int32_t)(now - f.at) < 0) return;
+  esp_now_send(HW_BCAST, f.buf, f.len);
+  _cqR = r + 1;
+}
+
+// A SET reaches a node directly and again through each relay. Applying it once
+// matters: slot 22 is an ACTION (4 = reboot), and a second copy would do it
+// twice. Entries expire so a hive that rebooted -- its sequence restarts at 1 --
+// is not ignored for reusing a number it used before the reboot.
+bool HivewireNode::setSeenBefore(uint8_t src, uint8_t seq, uint32_t now) {
+  for (uint8_t i = 0; i < SET_SEEN; i++)
+    if (_setSeen[i].used && _setSeen[i].src == src && _setSeen[i].seq == seq &&
+        now - _setSeen[i].at < SET_SEEN_MS) return true;
+  _setSeen[_setSeenHead] = {src, seq, now, true};
+  _setSeenHead = (_setSeenHead + 1) % SET_SEEN;
+  return false;
+}
+
+bool HivewireNode::logRspSeenBefore(uint8_t src, uint16_t crc, uint32_t now, uint32_t ttl) {
+  for (uint8_t i = 0; i < LOGRSP_SEEN; i++)
+    if (_lrSeen[i].used && _lrSeen[i].src == src && _lrSeen[i].crc == crc &&
+        now - _lrSeen[i].at < ttl) return true;
+  _lrSeen[_lrSeenHead] = {src, crc, now, true};
+  _lrSeenHead = (_lrSeenHead + 1) % LOGRSP_SEEN;
+  return false;
+}
+
+// Measured: a push to a node that heard the hive fine but reached it directly
+// only about half the time received 7 KB and then stalled for good -- its NACKs
+// never arrived, so no window could close. A relay that hears it carries them.
+void HivewireNode::relayRaw(const uint8_t *data, int len) {
+  if (len < (int)sizeof(HwHeader)) return;
+  const HwHeader *h = (const HwHeader *)data;
+  if (h->srcId == _id) return;
+  // Tag the key so a raw frame never collides with a log reply in the cache.
+  uint16_t key = hwCrc16(data, len) ^ 0xA5A5;
+  if (!logRspSeenBefore(h->srcId, key, millis(), RAW_SEEN_MS)) relayCmd(data, len);
 }
 
 bool HivewireNode::seenBefore(uint8_t src, uint16_t msgId) {
@@ -532,10 +618,26 @@ void HivewireNode::_ingest(const uint8_t *data, int len) {
     } else if (b->epoch == _epoch && _tCount < 255) {
       _tCount++;                                  // consistent: suppress
     }
-  } else if (h->type == HW_MSG_SET) {
+  } else if (h->type == HW_MSG_SET && len >= (int)sizeof(HwSetHdr)) {
+    const HwSetHdr *sh = (const HwSetHdr *)data;
+    if (setSeenBefore(h->srcId, sh->seq, millis())) return;   // a relayed copy
     handleSet(data, len);
-  } else if (h->type == HW_MSG_LOGREQ) {
+    // Addressed to this node alone: nobody further out needs it.
+    if (sh->targetId != _id) relayCmd(data, len);
+  } else if (h->type == HW_MSG_LOGREQ && len >= (int)sizeof(HwLogReq)) {
     handleLogReq(data, len);
+    const HwLogReq *rq = (const HwLogReq *)data;
+    uint32_t now = millis();
+    if (rq->targetId != _id &&
+        (!_lrqSent || rq->targetId != _lrqTarget || now - _lrqAt >= LOGREQ_RELAY_GAP_MS)) {
+      _lrqTarget = rq->targetId;
+      _lrqAt = now;
+      _lrqSent = true;
+      relayCmd(data, len);
+    }
+  } else if (h->type == HW_MSG_LOGRSP && len >= (int)sizeof(HwLogRsp)) {
+    // Another node's history on its way to the hive: carry it one hop, once.
+    if (!logRspSeenBefore(h->srcId, hwCrc16(data, len), millis())) relayCmd(data, len);
   } else if (h->type == HW_MSG_STATUS) {
     maybeRelay(data, len);
   } else if (_rawCb) {
@@ -571,6 +673,7 @@ void HivewireNode::loop() {
   if (now - _lastTx >= _cfg.minTxGapMs) sendStatus();
   serviceTrickle(now);
   serviceRelay(now);
+  serviceCmdRelay(now);
   serviceLogRsp(now);
 
   // Orphaned, or the state expired: give it up without being told. The library
@@ -587,8 +690,8 @@ void HivewireNode::loop() {
   if (_holding && (isOrphan || expired)) {
     _holding = false;
     _stateLen = 0;
-    if (isOrphan) log("safe: no beacon %lus",
-                      (unsigned long)(beaconAgeMs() / 1000UL));
+    if (isOrphan) hwErr(*this, HW_E_NO_COORDINATOR, 0, "safe: no beacon %lus",
+                        (unsigned long)(beaconAgeMs() / 1000UL));
     else          log("safe: ttl %us elapsed", _ttl);
     _ttl = 0;
     if (_safeCb) _safeCb();
@@ -802,6 +905,14 @@ void HivewireCoordinator::_ingest(const uint8_t *data, int len) {
     // and the ring arrives as several frames, so this must not stop after the
     // first one -- it clears the whole retry schedule, not one attempt.
     if (h->srcId == _logReqTarget) _logReqTries = 0;
+    // The same frame arrives directly and through each relay; print it once.
+    uint16_t crc = hwCrc16(data, len);
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < LOGRSP_SEEN; i++)
+      if (_lrSeen[i].used && _lrSeen[i].src == h->srcId && _lrSeen[i].crc == crc &&
+          now - _lrSeen[i].at < LOGRSP_SEEN_MS) return;
+    _lrSeen[_lrSeenHead] = {h->srcId, crc, now, true};
+    _lrSeenHead = (_lrSeenHead + 1) % LOGRSP_SEEN;
     const HwLogRsp *rsp = (const HwLogRsp *)data;
     size_t off = sizeof(HwLogRsp);
     char line[HIVEWIRE_LOG_WIDTH + 1];

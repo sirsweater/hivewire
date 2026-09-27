@@ -45,6 +45,7 @@ function fmtVal(spec, v) {
   // with no battery divider reports 0, and "0.00 V" would read as flat.
   if (v === 0 && spec.zero_means) return spec.zero_means;
   if (spec.hex) return (v >>> 0).toString(16).padStart(8, "0");
+  if (spec.error) { const c = v & 0xFFFF, sub = (v >>> 16) & 0xFF; return c ? "E" + c + (sub ? "/" + sub : "") : "none"; }
   if (spec.bool) return v ? "yes" : "no";
   if (spec.bits) {
     const bad = Object.entries(spec.bits).filter(([b]) => !(v & +b)).map(([, l]) => l);
@@ -693,6 +694,73 @@ views.events = async (el) => {
     </table></div></div>`;
 };
 
+// Problems: every Hivewire error code in plain words, and a way to report one.
+// The report is built on the host with names, locations, addresses and tokens
+// removed; it is shown here in full, editable, before anything leaves.
+const MAX_ISSUE_URL = 7500;   // GitHub refuses much longer prefilled URLs
+function issueUrl(repo, title, body) {
+  const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}&body=`;
+  let b = body, url = base + encodeURIComponent(b);
+  if (url.length > MAX_ISSUE_URL) {
+    const note = "\n\n*(Report cut short to fit a link. The full report was downloaded; attach it here.)*";
+    while (b.length && (base + encodeURIComponent(b + note)).length > MAX_ISSUE_URL) b = b.slice(0, Math.floor(b.length * 0.9));
+    return { url: base + encodeURIComponent(b + note), cut: true };
+  }
+  return { url, cut: false };
+}
+function saveText(name, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+  a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+views.problems = async (el) => {
+  const p = await api("/api/problems");
+  const nodeErrs = (STATE.nodes || []).filter((n) => n.error);
+  const sev = (s) => (s === "error" ? "bad" : s === "info" ? "plain" : "warn");
+  const codeRow = (e, extra) => `<div class="warn-line"><span class="pill ${sev(e.severity)}">${esc(e.label || "E" + e.code)}</span>
+      <b>${esc(e.title)}</b>${extra ? ` <span class="muted small">${esc(extra)}</span>` : ""}
+      ${e.cause ? `<div class="small muted">${esc(e.cause)}</div>` : ""}
+      ${e.fix ? `<div class="small"><b>What to do:</b> ${esc(e.fix)}</div>` : ""}</div>`;
+  el.innerHTML = `<div class="head"><h1>Problems</h1><div class="muted small">Hivewire error codes raised by the host, the gateway and the nodes. Every code is explained in ERRORS.md.</div></div>
+    <div class="grid cols-2">
+      <div class="card stack"><h2>This host</h2>
+        ${p.active.map((a) => codeRow(a, a.detail + " — since " + fmtTime(a.since))).join("") || '<p class="muted">Nothing wrong right now.</p>'}</div>
+      <div class="card stack"><h2>Nodes</h2>
+        ${nodeErrs.map((n) => codeRow(n.error, nodeTitle(n) + (n.error.count ? " — " + n.error.count + " since boot" : ""))).join("") || '<p class="muted">No node has reported an error since it booted.</p>'}</div>
+    </div>
+    <div class="card stack" style="margin-top:16px"><h2>Report a problem</h2>
+      <p class="muted small">Builds a report of this swarm's state for the Hivewire developers. Names, locations, network addresses and tokens are removed first. Read it, add what happened at the top, then open it as a GitHub issue (you need a GitHub account), or copy or download it to send another way.</p>
+      <div class="row"><button id="rep-make" class="primary">Prepare report</button></div>
+      <div id="rep" hidden class="stack">
+        <input id="rep-title" style="width:100%">
+        <textarea id="rep-body" rows="18" class="mono small" style="width:100%"></textarea>
+        <div class="row"><button id="rep-open" class="primary">Open GitHub issue</button><button id="rep-copy">Copy</button><button id="rep-save">Download</button></div>
+      </div></div>
+    <div class="card" style="margin-top:16px"><h2>Recent error events</h2><div class="tablewrap"><table>
+      <tr><th>When</th><th>What</th></tr>
+      ${p.events.map((e) => `<tr><td class="small" style="white-space:nowrap">${fmtTime(e.ts)}</td><td>${esc(e.text)}</td></tr>`).join("") || '<tr><td colspan="2" class="muted">None.</td></tr>'}
+    </table></div></div>`;
+  let repo = "";
+  $("#rep-make").onclick = async () => {
+    const r = await api("/api/problems/report");
+    repo = r.repo;
+    $("#rep-title").value = r.title; $("#rep-body").value = r.body; $("#rep").hidden = false;
+    $("#rep-body").focus(); $("#rep-body").setSelectionRange(r.body.indexOf("\n") + 2, r.body.indexOf("\n") + 2);
+  };
+  $("#rep-open").onclick = () => {
+    const { url, cut } = issueUrl(repo, $("#rep-title").value, $("#rep-body").value);
+    if (cut) saveText("hivewire-report.md", $("#rep-body").value);
+    window.open(url, "_blank", "noopener");
+  };
+  $("#rep-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText($("#rep-title").value + "\n\n" + $("#rep-body").value); toast("Copied"); }
+    catch (_) { $("#rep-body").select(); toast("Select-all done: copy with Ctrl+C"); }
+  };
+  $("#rep-save").onclick = () => saveText("hivewire-report.md", "# " + $("#rep-title").value + "\n\n" + $("#rep-body").value);
+};
+
 views.settings = async (el) => {
   const cfg = await api("/api/config");
   const nodes = STATE.nodes;
@@ -802,6 +870,9 @@ async function refresh(rerender = false) {
     else if (STATE.snapshot_time && STATE.time - STATE.snapshot_time > 300) { c.className = "pill warn"; c.textContent = "gateway quiet " + fmtAge(STATE.time - STATE.snapshot_time); }
     else if (STATE.snapshot_time) { c.className = "pill good"; c.textContent = STATE.fake ? "simulated" : "gateway ok"; }
     else { c.className = "pill"; c.textContent = "connecting…"; }
+    const pr = $("#probs"), np = (STATE.problems || []).length;
+    pr.hidden = !np;
+    pr.textContent = np === 1 ? "E" + STATE.problems[0].code + " " + STATE.problems[0].title : np + " problems";
     const r = route();
     if (rerender || r.name === "dashboard") render();
   } catch (e) { /* login redirect handled in api() */ }

@@ -256,7 +256,7 @@ static void checkTriggers() {
 //   status                                 force a digest now
 //   dump                                   every node's slots, to USB ONLY
 //   log                                    replay the diagnostic ring
-//   push <len> <crc32>                     arm a firmware transfer; the bytes
+//   push <len> <crc32> [node]              arm a firmware transfer; the bytes
 //                                          come over USB -- see below
 static void handleCommand(const char *line) {
   // Sized to Meshtastic's own ceiling (see MAX_LINE above), comfortably wider
@@ -336,18 +336,23 @@ static void handleCommand(const char *line) {
       uplink("ERR push already in progress");
     } else {
       unsigned long len = 0, crc = 0;
-      if (sscanf(buf + 4, "%lu %lu", &len, &crc) == 2 && len) {
+      int target = HIVEWIRE_TARGET_ALL;   // optional third field: one node only
+      if (sscanf(buf + 4, "%lu %lu %d", &len, &crc, &target) >= 2 && len &&
+          target >= 0 && target <= 254) {
         // Stop the command-line reader from fighting the byte-transfer reader
         // over the same Serial stream -- see HivewireSerialUplink.h. Resumed
         // in loop() the moment fwSender goes inactive again.
         netUplink.pause();
         fwBytes.start(len);
-        fwSender.begin(HIVEWIRE_TARGET_ALL, (uint32_t)len, (uint32_t)crc,
+        // A named target keeps other nodes out of it entirely: a RangeNode
+        // image sent to everyone makes every soil node download it only to
+        // refuse it by family, pausing their sensors for the whole transfer.
+        fwSender.begin((uint8_t)target, (uint32_t)len, (uint32_t)crc,
                        HivewireSerialProvider::feed);
-        logf("push %lu b", len);
+        logf("push %lu b to %d", len, target);
         Serial.println("READY");
       } else {
-        uplink("ERR usage: push <len> <crc32>");
+        uplink("ERR usage: push <len> <crc32> [node]");
       }
     }
   }

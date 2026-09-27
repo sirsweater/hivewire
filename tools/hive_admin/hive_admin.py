@@ -31,6 +31,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import socketserver
 import sqlite3
 import subprocess
@@ -345,6 +346,9 @@ class FakeGateway(Gateway):
         self.ep = 3
         self.mode = 0
         self.soil = 2100.0
+        # Written settings, applied with a real radio's unreliability: half of
+        # all writes never arrive, so the page's retry path gets exercised.
+        self.written = {}               # (node, slot) -> value
 
     def transact(self, cmd, until=None, timeout=4.0, quiet=None):
         with self.lock:
@@ -357,22 +361,32 @@ class FakeGateway(Gateway):
                 temp = 2150 + 250 * __import__("math").sin(t / 900)
                 lines = [
                     "DUMP 2 age=%d hops=0 1=%d 2=3 3=-41 4=-67 5=2 6=%d 7=4 8=0 9=2 10=0 11=%d "
-                    "12=0 13=0 20=0 21=600 22=0 23=0 24=0 25=3502314079"
-                    % (random.randint(0, 20), t // 60, 400 + t // 5, self.ep, ),
+                    "12=0 13=0 20=%d 21=%d 22=0 23=0 24=0 25=3502314079"
+                    % (random.randint(0, 20), t // 60, 400 + t // 5, self.ep,
+                       self.written.get((2, 20), 0), self.written.get((2, 21), 600)),
                     "DUMP 3 age=%d hops=0 1=%d 2=6 3=-38 4=-71 5=2 6=%d 7=3 8=0 9=2 10=0 11=%d "
-                    "12=0 13=0 20=0 21=600 22=0 23=0 24=0 25=3502314079"
-                    % (random.randint(0, 20), t // 60, 390 + t // 5, self.ep),
+                    "12=0 13=0 20=%d 21=%d 22=0 23=0 24=0 25=3502314079"
+                    % (random.randint(0, 20), t // 60, 390 + t // 5, self.ep,
+                       self.written.get((3, 20), 0), self.written.get((3, 21), 600)),
+                    # 26/27: last error E303 (input floating) about slot 3, 3 since boot
                     "DUMP 11 age=%d hops=0 1=%d 2=%d 3=%d 4=45 5=%d 6=3 7=2 8=%d 9=-30 "
-                    "22=0 23=0 25=1281381655"
+                    "22=0 23=0 25=1281381655 26=196911 27=3"
                     % (random.randint(0, 30), temp, 4500 + random.randint(-80, 80), self.soil,
                        4050 + random.randint(-10, 10), t // 60),
+                    # Switched off hours ago: the gateway still lists its last
+                    # values, with an age that keeps growing.
+                    "DUMP 13 age=%d hops=0 1=2417 2=4025 3=2693 4=7 5=4072 6=7 7=2 8=720 9=-40 "
+                    "22=0 23=0 25=1281381655" % (9800 + t),
                 ]
-                return "\n".join(lines) + "\nDUMP END 3 ep=%d m=%d up=3 ok=3 flt=0\n" % (self.ep, self.mode)
+                return "\n".join(lines) + "\nDUMP END %d ep=%d m=%d up=3 ok=3 flt=0\n" % (
+                    len(lines), self.ep, self.mode)
             if cmd.startswith("mode"):
                 self.mode = int(cmd.split()[1]); self.ep += 1
                 return "[uplink-usb] ACK mode=%d ep=%d\n" % (self.mode, self.ep)
             if cmd.startswith("set"):
                 _, tgt, slot, val = cmd.split()
+                if tgt.isdigit() and random.random() < 0.5:
+                    self.written[(int(tgt), int(slot))] = int(val)
                 return "[uplink-usb] ACK set %s=%s\n" % (slot, val)
             if cmd.startswith("log "):
                 nid = int(cmd.split()[1])
@@ -381,6 +395,101 @@ class FakeGateway(Gateway):
             if cmd == "log":
                 return "[uplink-usb] L | boot ok | cmd dump\n"
             return ""
+
+
+# ---------------------------------------------------------------------------
+# Problems: Hivewire's error codes, and the host's own conditions
+# ---------------------------------------------------------------------------
+# Codes and their meaning come from errors.json (generated from the library's
+# errors/codes.json) plus any an application declares in kinds.json under
+# "errors". Nodes carry theirs in slots 26/27; the host raises its own here.
+# A report of all of it -- stripped of anything that says whose swarm this is
+# or where -- can be sent as a GitHub issue from the Problems page.
+ERR_SLOT_LAST, ERR_SLOT_COUNT = 26, 27
+REPORT_REPO = "sirsweater/hivewire"
+
+
+class Problems:
+    def __init__(self, store, kinds):
+        self.store = store
+        self.lock = threading.Lock()
+        self.active = {}                # code -> {"detail", "since"}
+        try:
+            reg = json.load(open(os.path.join(HERE, "errors.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            reg = {"codes": {}, "app_range": [1000, 1999]}
+        self.app_range = reg.get("app_range", [1000, 1999])
+        self.codes = {int(k): dict(v) for k, v in reg.get("codes", {}).items()}
+        for kind, spec in kinds.items():
+            for k, v in (spec.get("errors") or {}).items():
+                self.codes.setdefault(int(k), dict(v, area="application", by="node", kind=kind))
+
+    def explain(self, code):
+        c = self.codes.get(int(code))
+        if c:
+            return dict(c, code=int(code))
+        lo, hi = self.app_range
+        return {"code": int(code), "title": "application code, not described in kinds.json"
+                if lo <= int(code) <= hi else "unknown code (newer firmware than this page?)",
+                "severity": "warning", "fix": "", "cause": "", "name": "UNKNOWN"}
+
+    def raise_(self, code, detail):
+        """Start a condition. Logged once when it starts, not on every check."""
+        with self.lock:
+            if code in self.active:
+                self.active[code]["detail"] = detail
+                return
+            self.active[code] = {"detail": detail, "since": now()}
+        self.store.event("error", "E%d %s" % (code, detail))
+
+    def clear(self, code):
+        with self.lock:
+            p = self.active.pop(code, None)
+        if p:
+            self.store.event("error", "E%d resolved after %s" % (code, fmt_age(now() - p["since"])))
+
+    def once(self, code, detail):
+        """A one-off event rather than a lasting condition (a failed flash)."""
+        self.store.event("error", "E%d %s" % (code, detail))
+
+    def active_list(self):
+        with self.lock:
+            items = sorted(self.active.items())
+        return [dict(self.explain(c), detail=p["detail"], since=p["since"]) for c, p in items]
+
+    def node_error(self, slots):
+        v = slots.get(ERR_SLOT_LAST)
+        if not v:
+            return None
+        code, subject = v & 0xFFFF, (v >> 16) & 0xFF
+        if not code:
+            return None
+        e = self.explain(code)
+        e.update(subject=subject, count=slots.get(ERR_SLOT_COUNT),
+                 label="E%d%s" % (code, "/%d" % subject if subject else ""))
+        return e
+
+
+# What a report must never carry: where the swarm is, whose it is, or anything
+# that would let someone reach it. Applied to every line of free text.
+_SCRUB = [
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+    # Lookarounds, not \b: a USB device name puts "_" right before the MAC,
+    # and "_" counts as a word character, so \b never matched there.
+    (re.compile(r"(?<![0-9a-fA-F:])[0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5}(?![0-9a-fA-F:])"), "<mac>"),
+    (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "<email>"),
+    (re.compile(r"https?://\S+"), "<url>"),
+    (re.compile(r"\b(?:gw|dv)_[A-Za-z0-9]+"), "<id>"),
+    (re.compile(r"/home/[^/\s]+"), "~"),
+    (re.compile(r"[A-Za-z]:\\Users\\[^\\\s]+"), "~"),
+    (re.compile(r"\b[A-Za-z0-9_\-]{24,}\b"), "<redacted>"),
+]
+
+
+def scrub(text):
+    for rx, sub in _SCRUB:
+        text = rx.sub(sub, str(text))
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +506,58 @@ class Poller(threading.Thread):
         self.last_logged = {}           # (node, slot) -> (value, ts)
         self.wake = threading.Event()
         self.seen_nodes = set()
+        # Writes the gateway acknowledged but no node has confirmed yet. The
+        # gateway's ACK only means it SENT the write: one broadcast, which a
+        # node at the edge of range misses often enough to matter (a soak
+        # measured 1 in 6 lost at -87 dBm). The node's own report is the only
+        # proof it arrived, so keep re-sending until that report shows it.
+        self.pending = {}               # (node, slot) -> {value, sent, tries, first}
+        self.pending_lock = threading.Lock()
+        self.problems = None            # set by App
+        self.fails = 0                  # polls in a row that got no dump
+
+    WRITE_RETRY_S = 45
+    WRITE_TRIES = 5
+
+    def track_write(self, nid, slot, value):
+        with self.pending_lock:
+            self.pending[(nid, slot)] = {"value": value, "sent": now(), "tries": 1, "first": now()}
+
+    def pending_writes(self):
+        with self.pending_lock:
+            return {"%d.%d" % k: dict(v) for k, v in self.pending.items()}
+
+    def check_writes(self, d, t):
+        with self.pending_lock:
+            items = list(self.pending.items())
+        for (nid, slot), p in items:
+            rec = d["nodes"].get(nid)
+            heard_at = t - rec["age"] if rec else 0
+            if rec and heard_at >= p["sent"] - 1 and rec["slots"].get(slot) == p["value"]:
+                self.store.event("command", "set %d %d %d confirmed by the node (%d %s, %.0f s)" % (
+                    nid, slot, p["value"], p["tries"], "try" if p["tries"] == 1 else "tries",
+                    t - p["first"]))
+                with self.pending_lock:
+                    self.pending.pop((nid, slot), None)
+            elif t - p["sent"] >= self.WRITE_RETRY_S:
+                if p["tries"] >= self.WRITE_TRIES:
+                    msg = "set %d %d %d not applied after %d tries" % (nid, slot, p["value"], p["tries"])
+                    if self.problems:
+                        self.problems.once(606, msg)
+                    else:
+                        self.store.event("error", "E606 " + msg)
+                    with self.pending_lock:
+                        self.pending.pop((nid, slot), None)
+                    continue
+                ack = self.gw.command("set %d %d %d" % (nid, slot, p["value"]), r"ACK set|ERR")
+                with self.pending_lock:
+                    if (nid, slot) in self.pending:
+                        p = self.pending[(nid, slot)]
+                        p["tries"] += 1
+                        p["sent"] = now()
+                if not ack or not ack.startswith("ACK"):
+                    self.store.event("command", "set %d %d %d retry -> %s" % (
+                        nid, slot, p["value"], ack or "no reply"))
 
     def run(self):
         reported = "(not yet polled)"
@@ -405,6 +566,7 @@ class Poller(threading.Thread):
                 self.poll()
             except Exception as e:      # never let the poller die
                 self.last_error = "%s: %s" % (type(e).__name__, e)
+            self.note_problems()
             # Say so in the log when polling starts or stops working -- once
             # per change, not once per poll.
             if self.last_error != reported:
@@ -413,6 +575,24 @@ class Poller(threading.Thread):
                 reported = self.last_error
             self.wake.wait(max(5, self.cfg.data.get("poll_seconds", 60)))
             self.wake.clear()
+
+    def note_problems(self):
+        """Poll outcome -> host codes. A single missed dump is normal (a line
+        lost on the USB link); three in a row is a gateway that is not there."""
+        if not self.problems:
+            return
+        err = self.last_error or ""
+        if err.startswith("clock is"):
+            self.problems.raise_(602, err)
+            return
+        self.problems.clear(602)
+        if not err:
+            self.fails = 0
+            self.problems.clear(601)
+        elif "another tool" not in err and "push" not in err:
+            self.fails += 1
+            if self.fails >= 3:
+                self.problems.raise_(601, "%d polls in a row failed: %s" % (self.fails, err))
 
     def poll(self):
         if self.gw.pushing:
@@ -441,6 +621,7 @@ class Poller(threading.Thread):
         d["time"] = t
         self.snapshot = d
         full = self.cfg.data.get("full_every_seconds", 900)
+        stale = self.cfg.data.get("stale_seconds", 300)
         rows = []
         for nid, rec in d["nodes"].items():
             if nid not in self.seen_nodes:
@@ -448,6 +629,15 @@ class Poller(threading.Thread):
                 if not self.cfg.node(nid):
                     self.store.event("node", "node %d first seen" % nid)
                     self.cfg.set_node(nid, {"first_seen": t})
+            # The gateway keeps a node's last values after it goes quiet, and
+            # lists them in every dump with a growing age. Storing them would
+            # record a switched-off node as reporting the same values every
+            # 15 minutes -- found by a soak, where a node that had been off for
+            # three hours still showed "last heard 3 min ago" and its frozen
+            # readings were uploaded as current. Nothing from a quiet node is
+            # new, so store nothing; the page still shows it, marked stale.
+            if rec["age"] > stale:
+                continue
             for sid, v in list(rec["slots"].items()) + [(HOPS_SLOT, rec["hops"])]:
                 prev = self.last_logged.get((nid, sid))
                 if prev is None or prev[0] != v or t - prev[1] >= full:
@@ -455,6 +645,7 @@ class Poller(threading.Thread):
                     self.last_logged[(nid, sid)] = (v, t)
         if rows:
             self.store.add_readings(rows)
+        self.check_writes(d, t)
 
 
 # ---------------------------------------------------------------------------
@@ -770,9 +961,26 @@ class Uploader(threading.Thread):
             res["error"] = ("g4rden rejected the token (401). The gateway was probably "
                             "removed on the site; pair again with a fresh claim code.")
         self.last = res
+        # What the site says it KEPT, not just that it answered: a soak compares
+        # these, and a clock that disagrees with the site's skews every age sent.
+        extra = ""
+        j = res.get("json") or {}
+        if res.get("ok"):
+            extra = ", accepted %s" % j.get("accepted", "?")
+            if j.get("duplicate"):
+                extra += " (duplicate of the last upload)"
+            st = (j.get("config") or {}).get("serverTime")
+            if isinstance(st, (int, float)) and st > 0:
+                res["clock_skew_s"] = round(res["ts"] - (st / 1000.0 if st > 1e11 else st), 1)
+                extra += ", clock %+.0f s vs site" % res["clock_skew_s"]
+        else:
+            extra = " -- %s" % (res.get("error") or res.get("status"))
         self.app.store.event("upload", "%s %d reading(s) across %d node(s)%s" % (
-            "sent" if res.get("ok") else "FAILED sending", res["sent"], res["nodes"],
-            "" if res.get("ok") else " -- %s" % (res.get("error") or res.get("status"))))
+            "sent" if res.get("ok") else "FAILED sending", res["sent"], res["nodes"], extra))
+        if res.get("ok"):
+            self.app.problems.clear(603)
+        else:
+            self.app.problems.raise_(603, "g4rden upload failed: %s" % (res.get("error") or res.get("status")))
         return res
 
     def run(self):
@@ -820,6 +1028,13 @@ class App:
                                known_ids=lambda: list(self.cfg.data.get("nodes", {}).keys()),
                                protect_present=not (self.flash_only or args.fake))
         self.kinds = json.load(open(os.path.join(HERE, "kinds.json"), encoding="utf-8"))
+        self.problems = Problems(self.store, self.kinds)
+        self.power_bits = None
+        self.flasher.problems = self.problems
+        if self.poller:
+            self.poller.problems = self.problems
+        if shutil.which("vcgencmd") and not args.fake:
+            threading.Thread(target=self.watch_power, daemon=True).start()
         # Signed-in sessions survive a restart. They used to live only in
         # memory, so every deploy and every power cut silently signed the
         # owner out -- which reads as "the password stopped working", not as
@@ -867,6 +1082,84 @@ class App:
     def save_sessions(self):
         self.cfg.data["sessions"] = dict(self.sessions)
         self.cfg.save()
+
+    def confirmable(self, nid, slot):
+        """Whether a write to this slot can be re-sent until the node confirms it.
+        Only a setting the node reports back can be confirmed at all; and an
+        ACTION (reboot, arm OTA, seed firmware) must never be repeated behind
+        the operator's back -- a reboot re-sent five times is five reboots.
+        Actions are marked `"action": true` in kinds.json."""
+        snap = self.poller.snapshot or {}
+        rec = (snap.get("nodes") or {}).get(nid)
+        if not rec or slot not in rec["slots"]:
+            return False
+        spec = self.kinds.get(self.kind_of(nid, rec["slots"]), {})
+        return not (spec.get("slots", {}).get(str(slot), {}).get("action"))
+
+    def watch_power(self):
+        """A Raspberry Pi says when its supply sags. Undervoltage with a
+        gateway and boards on its USB is how SD cards get corrupted, and it
+        looks like flaky radios long before it looks like power."""
+        while True:
+            try:
+                out = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True,
+                                     text=True, timeout=10).stdout
+                m = re.search(r"0x([0-9a-fA-F]+)", out)
+                if m:
+                    bits = int(m.group(1), 16)
+                    self.power_bits = bits
+                    if bits & 0x1:
+                        self.problems.raise_(605, "undervoltage right now (throttled=0x%x)" % bits)
+                    else:
+                        self.problems.clear(605)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            time.sleep(60)
+
+    def problem_report(self):
+        """Everything useful for diagnosing this swarm, nothing that says whose
+        or where it is: no names, locations, addresses, ids or tokens."""
+        st = self.state()
+        L = ["**What went wrong?** (what you did, what you expected, what happened)", "", "", "",
+             "---", "*Generated by the Hivewire admin page. Names, locations, network",
+             "addresses and tokens are removed; check it before sending.*", ""]
+        try:
+            model = open("/proc/device-tree/model", errors="replace").read().strip("\x00\n ")
+        except OSError:
+            model = sys.platform
+        L += ["### Host", "",
+              "- admin %s, Python %s, %s" % (Uploader.FW, sys.version.split()[0], model),
+              "- gateway: %s" % ("simulated" if self.args.fake else ("ok" if st["snapshot_time"] else "no data")),
+              "- poll: %s" % scrub(st.get("error") or "ok")]
+        if self.power_bits is not None:
+            L.append("- power flags: 0x%x" % self.power_bits)
+        h = st.get("health") or {}
+        if h:
+            L.append("- swarm: %s" % " ".join("%s=%s" % kv for kv in sorted(h.items())))
+        act = self.problems.active_list()
+        L += ["", "### Active problems", ""]
+        L += ["- **E%d** %s -- %s" % (a["code"], a["title"], scrub(a["detail"])) for a in act] or ["- none"]
+        L += ["", "### Nodes", "",
+              "| id | kind | heard | hops | firmware | last error | errors since boot | warnings |",
+              "|---|---|---|---|---|---|---|---|"]
+        for n in st["nodes"]:
+            e = n.get("error")
+            fw = n["slots"].get(25)
+            L.append("| %d | %s | %s ago | %s | %s | %s | %s | %s |" % (
+                n["id"], n.get("kind") or "?", fmt_age(n["age"]), n["hops"],
+                "%08x" % (fw & 0xFFFFFFFF) if fw is not None else "-",
+                "%s %s" % (e["label"], e["title"]) if e else "-",
+                n["slots"].get(ERR_SLOT_COUNT, "-"),
+                scrub("; ".join(w for w in n["warnings"] if not (e and w.startswith(e["label"]))) or "-")))
+        evs = [e for e in self.store.events(400) if e["kind"] in ("error", "flash", "upload", "system")][:25]
+        L += ["", "### Recent events", "", "```"]
+        L += ["%s %s %s" % (time.strftime("%m-%d %H:%M", time.localtime(e["ts"])), e["kind"], scrub(e["text"]))
+              for e in reversed(evs)] or ["(none)"]
+        L += ["```"]
+        worst = act[0] if act else next((n["error"] for n in st["nodes"] if n.get("error")), None)
+        title = ("E%d: %s" % (worst["code"], worst["title"])) if worst else "Problem report"
+        return {"title": title, "body": "\n".join(L),
+                "repo": self.cfg.data.get("report_repo") or REPORT_REPO}
 
     def kind_of(self, nid, slots):
         """A kind set in Settings wins; else one recognised from the slots;
@@ -986,7 +1279,12 @@ class App:
                     # divider reports 0, and must not look like a flat one.
                     if v <= low["value"] and v != low.get("ignore"):
                         warnings.append("%s (%s%s)" % (low["label"], v, low.get("unit", "")))
+                err = self.problems.node_error(rec["slots"])
+                if err:
+                    warnings.insert(0, "%s %s%s" % (err["label"], err["title"],
+                                    " (%s since boot)" % err["count"] if err.get("count") else ""))
                 nodes.append({"id": nid, "kind": kind, "name": meta.get("name") or "",
+                              "error": err,
                               "location": meta.get("location") or "", "age": age,
                               "hops": rec["hops"], "slots": rec["slots"],
                               "derived": self.derived(nid, kind, rec["slots"]),
@@ -994,6 +1292,7 @@ class App:
         return {"time": now(), "snapshot_time": snap["time"] if snap else None,
                 "health": snap["health"] if snap else None, "nodes": nodes,
                 "error": self.poller.last_error, "pushing": self.gw.pushing,
+                "problems": self.problems.active_list(),
                 "fake": bool(self.args.fake)}
 
 
@@ -1219,6 +1518,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json(app.state())
         if path == "/api/kinds":
             return self.send_json(app.kinds)
+        if path == "/api/problems":
+            evs = [e for e in app.store.events(400) if e["kind"] == "error"][:50]
+            return self.send_json({"active": app.problems.active_list(), "events": evs,
+                                   "codes": {str(k): v for k, v in sorted(app.problems.codes.items())}})
+        if path == "/api/problems/report":
+            return self.send_json(app.problem_report())
         if path == "/api/config":
             d = {k: v for k, v in app.cfg.data.items()
                  if k not in ("password", "secret", "sessions")}
@@ -1506,7 +1811,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("bad target")
             ack = app.gw.command("set %s %d %d" % (target, slot, value), r"ACK set|ERR")
             app.store.event("command", "set %s %d %d -> %s" % (target, slot, value, ack or "no reply"))
-            return self.send_json({"reply": ack})
+            tracking = False
+            if ack and ack.startswith("ACK") and target.isdigit():
+                tracking = app.confirmable(int(target), slot)
+                if tracking:
+                    app.poller.track_write(int(target), slot, value)
+            return self.send_json({"reply": ack, "confirming": tracking})
         if path == "/api/mode":
             b = self.jbody()
             m, p, ttl = int(b["mode"]), int(b.get("param", 0)), int(b.get("ttl", 0))
