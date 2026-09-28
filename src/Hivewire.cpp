@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <esp_system.h>
 #include <string.h>
 #include <math.h>
 #include <stdarg.h>
@@ -188,7 +189,37 @@ bool HivewireNode::begin(uint8_t nodeId, uint8_t role,
   randomSeed(esp_random());
   trickleReset();
   log("boot id=%u role=%u", nodeId, role);
+  noteResetReason();
   return true;
+}
+
+// Why the chip last restarted, into the log -- and as an error when it was
+// not asked to. Found by a range node that restarted 65 times in a night and
+// then went silent: from outside, a crash, a watchdog and a sagging power
+// supply all look like "the boot counter went up". The chip knows which.
+static const char *hwResetName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "power on";
+    case ESP_RST_EXT:       return "reset pin";
+    case ESP_RST_SW:        return "software";      // update, reboot command, restart()
+    case ESP_RST_PANIC:     return "crash";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT:  return "brownout";      // the supply sagged
+    default:                return "other";
+  }
+}
+
+void HivewireNode::noteResetReason() {
+  esp_reset_reason_t r = esp_reset_reason();
+  bool unexpected = r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT ||
+                    r == ESP_RST_WDT || r == ESP_RST_BROWNOUT;
+  if (unexpected)
+    hwErr(*this, HW_E_UNEXPECTED_RESET, (uint8_t)r, "reset: %s", hwResetName(r));
+  else
+    log("reset: %s", hwResetName(r));
 }
 
 void HivewireNode::log(const char *fmt, ...) {

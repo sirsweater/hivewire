@@ -449,6 +449,7 @@ class HivewireNode {
   void sendBeacon(uint8_t hops);
   void sendStatus();
   void handleSet(const uint8_t *data, int len);
+  void noteResetReason();
   void handleLogReq(const uint8_t *data, int len);
   void serviceLogRsp(uint32_t now);
   // Small frames survive a marginal link far better than one big one, and the

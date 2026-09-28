@@ -23,6 +23,7 @@ enum HwErrCode : uint16_t {
   HW_E_FW_WRITE_FAILED = 205,          // Firmware image could not be written or finalised
   HW_E_UPDATE_ROLLED_BACK = 206,       // New firmware did not rejoin the swarm and was rolled back
   HW_E_OTA_WIFI_FAILED = 207,          // Over-the-air Wi-Fi update could not complete
+  HW_E_UNEXPECTED_RESET = 208,         // Node restarted without being asked to
   HW_E_PERIPHERAL_MISSING = 301,       // A peripheral did not answer
   HW_E_PERIPHERAL_READ_FAILED = 302,   // A peripheral stopped answering
   HW_E_INPUT_FLOATING = 303,           // An input looks unconnected

@@ -134,6 +134,17 @@ static bool aht20Init() {
   return true;
 }
 
+// CRC-8 the AHT20 appends to every reading (poly 0x31, init 0xFF, over the
+// status byte and five data bytes -- datasheet section 5.4).
+static uint8_t aht20Crc(const uint8_t *p, int n) {
+  uint8_t c = 0xFF;
+  while (n--) {
+    c ^= *p++;
+    for (int k = 0; k < 8; k++) c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x31) : (uint8_t)(c << 1);
+  }
+  return c;
+}
+
 static bool aht20Read(float &tC, float &rh) {
   Wire.beginTransmission(AHT20_ADDR);
   Wire.write(0xAC); Wire.write(0x33); Wire.write(0x00);   // measure
@@ -143,10 +154,18 @@ static bool aht20Read(float &tC, float &rh) {
   uint8_t b[7];
   for (int i = 0; i < 7; i++) b[i] = Wire.read();
   if (b[0] & 0x80) return false;                 // still busy
+  // A reading garbled on the bus -- or a sensor answering with all zeros,
+  // which decodes to exactly -50.0 C and 0 %RH -- used to be published as a
+  // real one: a rhubarb pot "fell" to -50 C on an afternoon in the 30s, and
+  // it went into the history and up to g4rden. The CRC catches garbling, the
+  // calibrated bit an uninitialised sensor, and the range whatever is left.
+  if (aht20Crc(b, 6) != b[6]) return false;
+  if (!(b[0] & 0x08)) return false;              // not calibrated: values are meaningless
   uint32_t h = ((uint32_t)b[1] << 12) | ((uint32_t)b[2] << 4) | (b[3] >> 4);
   uint32_t t = (((uint32_t)b[3] & 0x0F) << 16) | ((uint32_t)b[4] << 8) | b[5];
   rh = h / 1048576.0f * 100.0f;
   tC = t / 1048576.0f * 200.0f - 50.0f;
+  if (tC < -40.0f || tC > 85.0f || rh <= 0.0f || rh > 100.0f) return false;   // outside what it can measure
   return true;
 }
 

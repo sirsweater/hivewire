@@ -104,6 +104,14 @@ by the library. An application documents its own in its node type
 
 **What to do.** Check HW_OTA_SSID and HW_OTA_URL in the build, arm the node first, and that the image server is reachable.
 
+### E208 `UNEXPECTED_RESET` — Node restarted without being asked to
+
+*Warning, raised by the node.*
+
+**Cause.** The chip reported why it restarted, and it was not power-on, an update or a reboot command. The subject is the reason: 9 brownout (the power supply sagged), 4 crash, 5/6/7 a watchdog.
+
+**What to do.** Brownout (/9): power it from a solid supply -- a wall USB charger with a short cable, not a power bank, which may switch off at low current. Crash or watchdog: fetch the node's log and report it, with the firmware CRC.
+
 ## Peripherals (raised by applications about any slot)
 
 ### E301 `PERIPHERAL_MISSING` — A peripheral did not answer
