@@ -4,8 +4,8 @@
     "match": {"has": [1, 2, 3, 6], "lacks": [20]},
     "headline": ["d:soil", "1", "2", "d:battery"],
     "slots": {
-      "1":  {"label": "Air temperature", "unit": "°C", "scale": 0.01, "decimals": 1, "chart": true},
-      "2":  {"label": "Humidity", "unit": "%RH", "scale": 0.01, "decimals": 0, "chart": true},
+      "1":  {"label": "Air temperature", "unit": "°C", "scale": 0.01, "decimals": 1, "chart": true, "valid": [-4000, 8500]},
+      "2":  {"label": "Humidity", "unit": "%RH", "scale": 0.01, "decimals": 0, "chart": true, "valid": [1, 10000]},
       "3":  {"label": "Soil (raw ADC)", "chart": true},
       "4":  {"label": "Soil (firmware %)", "unit": "%", "note": "uses the placeholder calibration compiled in; the admin's own soil % uses yours"},
       "5":  {"label": "Battery voltage (raw)", "unit": "V", "scale": 0.001, "decimals": 2, "chart": true, "zero_means": "no divider fitted", "note": "as the node measures it; the calibrated value applies this board's correction"},

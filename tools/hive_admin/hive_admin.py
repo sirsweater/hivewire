@@ -514,6 +514,7 @@ class Poller(threading.Thread):
         self.pending = {}               # (node, slot) -> {value, sent, tries, first}
         self.pending_lock = threading.Lock()
         self.problems = None            # set by App
+        self.plausible = None           # set by App: (nid, slot, value) -> bool
         self.fails = 0                  # polls in a row that got no dump
 
     WRITE_RETRY_S = 45
@@ -639,6 +640,8 @@ class Poller(threading.Thread):
             if rec["age"] > stale:
                 continue
             for sid, v in list(rec["slots"].items()) + [(HOPS_SLOT, rec["hops"])]:
+                if self.plausible and not self.plausible(nid, sid, v):
+                    continue            # a failed sensor read, not a measurement
                 prev = self.last_logged.get((nid, sid))
                 if prev is None or prev[0] != v or t - prev[1] >= full:
                     rows.append((t, nid, sid, v))
@@ -851,7 +854,7 @@ class Uploader(threading.Thread):
     def reading_from(self, nid, ts, slots, now_ts):
         r = {"age": max(0, now_ts - ts)}
         for name, slot, scale, dec in self.FIELDS:
-            if slot in slots:
+            if slot in slots and self.app.plausible(nid, slot, slots[slot]):
                 v = slots[slot] * scale
                 r[name] = round(v, dec) if dec else int(v)
         if 3 in slots:
@@ -1033,6 +1036,7 @@ class App:
         self.flasher.problems = self.problems
         if self.poller:
             self.poller.problems = self.problems
+            self.poller.plausible = self.plausible
         if shutil.which("vcgencmd") and not args.fake:
             threading.Thread(target=self.watch_power, daemon=True).start()
         # Signed-in sessions survive a restart. They used to live only in
@@ -1095,6 +1099,20 @@ class App:
             return False
         spec = self.kinds.get(self.kind_of(nid, rec["slots"]), {})
         return not (spec.get("slots", {}).get(str(slot), {}).get("action"))
+
+    def plausible(self, nid, slot, value):
+        """Whether a stored value is one the sensor could really have measured.
+        kinds.json gives a slot `"valid": [min, max]` in raw units. A failed
+        air-sensor read used to arrive as exactly -50.0 C and 0 %RH and was
+        stored, charted and uploaded as real; the firmware now refuses such a
+        read, and this keeps any already stored -- or sent by a node not yet
+        updated -- out of charts, reports and uploads without deleting them."""
+        meta = self.cfg.node(nid)
+        kind = meta.get("kind") or meta.get("auto_kind")
+        rng = (self.kinds.get(kind, {}).get("slots", {}).get(str(slot), {}) or {}).get("valid")
+        if not rng or value is None:
+            return True
+        return rng[0] <= value <= rng[1]
 
     def watch_power(self):
         """A Raspberry Pi says when its supply sags. Undervoltage with a
@@ -1610,9 +1628,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return [(t, round(v * sc / 1000.0, 2) if v else None) for t, v in raw]
             return []
         s = int(slot)
-        pts = app.store.series(node, s, t0, t1)
+        pts = [(t, v) for t, v in app.store.series(node, s, t0, t1) if app.plausible(node, s, v)]
         before = app.store.last_before(node, s, t0)
-        if before:
+        if before and app.plausible(node, s, before[1]):
             pts.insert(0, (t0, before[1]))
         return pts
 
