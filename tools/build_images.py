@@ -27,7 +27,15 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-FAMILIES = ["SoilNode", "RangeNode"]
+# family -> (sketch folder under examples/, extra build flags). WaterNode is
+# the SoilNode sketch with its pump compiled in: its own family, so a pump image
+# never lands on a sensor-only board or the other way round.
+FAMILIES = {
+    "SoilNode":  ("SoilNode", ""),
+    "WaterNode": ("SoilNode", "-DHW_WITH_PUMP=1"),
+    "PumpNode":  ("PumpNode", ""),
+    "RangeNode": ("RangeNode", ""),
+}
 FQBN = "esp32:esp32:esp32c6:CDCOnBoot=cdc"
 
 
@@ -53,7 +61,7 @@ def commit():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=os.path.join(os.path.expanduser("~"), "hive_data", "firmware"))
-    ap.add_argument("--only", choices=FAMILIES)
+    ap.add_argument("--only", choices=list(FAMILIES))
     ap.add_argument("--channel", type=int,
                     help="swarm radio channel, only if your swarm is not on the default (6)")
     args = ap.parse_args()
@@ -65,17 +73,19 @@ def main():
     flags = "-DHW_NODE_ID=0" + (" -DHW_SWARM_CHANNEL=%d" % args.channel if args.channel else "")
     rev = commit()
     ok = True
-    for fam in [args.only] if args.only else FAMILIES:
+    for fam in [args.only] if args.only else list(FAMILIES):
+        sketch, extra = FAMILIES[fam]
+        fam_flags = (flags + " " + extra).strip()
         work = os.path.join(os.path.expanduser("~"), ".hivewire-build", fam)
         outdir = os.path.join(work, "out")
         shutil.rmtree(outdir, ignore_errors=True)
         print("building %s ..." % fam, flush=True)
         r = subprocess.run([cli, "compile", "--fqbn", FQBN, "--library", REPO,
-                            "--build-property", "compiler.cpp.extra_flags=" + flags,
+                            "--build-property", "compiler.cpp.extra_flags=" + fam_flags,
                             "--build-path", os.path.join(work, "build"), "--output-dir", outdir,
-                            os.path.join(REPO, "examples", fam)],
+                            os.path.join(REPO, "examples", sketch)],
                            capture_output=True, text=True)
-        merged = os.path.join(outdir, fam + ".ino.merged.bin")
+        merged = os.path.join(outdir, sketch + ".ino.merged.bin")   # named after the sketch
         if r.returncode != 0 or not os.path.exists(merged):
             print(r.stdout[-2000:], r.stderr[-2000:])
             print("%s FAILED" % fam)

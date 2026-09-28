@@ -154,6 +154,22 @@ by the library. An application documents its own in its node type
 
 **What to do.** Charge or replace it.
 
+### E306 `OUTPUT_LIMIT` — An output refused to run: a safety limit
+
+*Warning, raised by the node.*
+
+**Cause.** A pump or other output was asked to do more than its limits allow (per run, per day), or is not calibrated yet, so it did not start. The subject is the slot of the limit it hit.
+
+**What to do.** Check the request against the limit; raise the limit only if the larger amount is really intended, or calibrate the output first.
+
+### E307 `SUPPLY_EMPTY` — An output's supply is empty
+
+*Error, raised by the node.*
+
+**Cause.** The float switch (or other supply sensor) reports nothing left, so the output was not started or was stopped part way.
+
+**What to do.** Refill the reservoir. If it is full, check the float switch wiring and its mode setting.
+
 ## Provisioning
 
 ### E401 `UNASSIGNED` — Board has no node number yet

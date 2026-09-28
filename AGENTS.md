@@ -49,6 +49,8 @@ examples/BasicNode            smallest useful node
 examples/SelfTest             asserts the safety properties on live radios
 examples/RangeNode            relay/range extender, LEDs off, weak-link warnings
 examples/SoilNode             plant sensor: AHT20, capacitive soil probe, battery
+                              (-DHW_WITH_PUMP=1: the WaterNode family, sensor + pump)
+examples/PumpNode             a pump or valve alone (HivewirePump.h)
 examples/MeshtasticGateway    the hive: coordinator + LoRa + USB, `dump`/`push`
 examples/FirmwarePush         hive that takes an image over USB and distributes it
 tools/hive_admin/             web admin for the hive's host (Pi); Flash page
@@ -100,7 +102,7 @@ Rules that matter when writing a node:
   seconds (a test hook for forcing relay paths), `22` action (4 = reboot,
   5 = start a Wi-Fi OTA pull), `23` OTA arm, `24` seed this node's firmware to
   another node (RangeNode and SoilNode), `25` running firmware CRC, `26` last error (`code | subject << 16`),
-  `27` errors since boot. The admin also stores the hive's
+  `27` errors since boot, `40`-`48` a pump (HivewirePump.h). The admin also stores the hive's
   observed hop count as pseudo-slot `250`. Don't reuse those for other meanings.
 - **Node ids 1–254.** `0` is `HIVEWIRE_TARGET_ALL` on the wire and means
   "unassigned" for provisioning. Store the id in NVS and never let a new image

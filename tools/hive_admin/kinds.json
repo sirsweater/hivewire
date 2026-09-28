@@ -1,7 +1,7 @@
 {
   "SoilNode": {
     "description": "Plant sensor: air temperature and humidity, soil moisture, battery",
-    "match": {"has": [1, 2, 3, 6], "lacks": [20]},
+    "match": {"has": [1, 2, 3, 6], "lacks": [20, 40]},
     "headline": ["d:soil", "1", "2", "d:battery"],
     "slots": {
       "1":  {"label": "Air temperature", "unit": "°C", "scale": 0.01, "decimals": 1, "chart": true, "valid": [-4000, 8500]},
@@ -71,5 +71,70 @@
       {"label": "Forget epoch", "slot": 22, "value": 3, "confirm": "Make this node accept any epoch?"},
       {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}
     ]
+  },
+  "WaterNode": {
+    "description": "Plant sensor with a pump: soil, air, battery, and watering by the ml",
+    "match": {"has": [1, 2, 3, 6, 40], "lacks": [20]},
+    "headline": ["d:soil", "45", "47", "46"],
+    "slots": {
+      "1": {"label": "Air temperature", "unit": "°C", "scale": 0.01, "decimals": 1, "chart": true, "valid": [-4000, 8500]},
+      "2": {"label": "Humidity", "unit": "%RH", "scale": 0.01, "decimals": 0, "chart": true, "valid": [1, 10000]},
+      "3": {"label": "Soil (raw ADC)", "chart": true},
+      "4": {"label": "Soil (firmware %)", "unit": "%", "note": "uses the placeholder calibration compiled in; the admin's own soil % uses yours"},
+      "5": {"label": "Battery voltage (raw)", "unit": "V", "scale": 0.001, "decimals": 2, "chart": true, "zero_means": "no divider fitted", "note": "as the node measures it; the calibrated value applies this board's correction"},
+      "6": {"label": "Sensors ok", "bits": {"1": "air sensor", "2": "soil probe", "4": "battery divider"}},
+      "7": {"label": "Boots"},
+      "8": {"label": "Uptime", "unit": "min"},
+      "9": {"label": "Signal", "unit": "dBm", "chart": true, "note": "best path in the last 1-2 minutes (firmware from 2026-09-27; before that, the last packet heard)"},
+      "10": {"label": "Battery (node's own %)", "unit": "%", "chart": true, "zero_means": "no divider fitted"},
+      "22": {"label": "Action", "writable": true, "min": 0, "max": 5, "action": true},
+      "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255, "action": true},
+      "24": {"label": "Seed firmware to node", "writable": true, "min": 0, "max": 255, "action": true},
+      "25": {"label": "Firmware CRC", "hex": true},
+      "26": {"label": "Last error", "error": true, "note": "code/subject, explained on the Problems page"},
+      "27": {"label": "Errors since boot"},
+      "250": {"label": "Hops to the hive", "chart": true, "note": "0 = heard directly; 1 = its report only reached the hive through a relay"},
+      "40": {"label": "Water now (ml)", "unit": "ml", "writable": true, "min": 0, "max": 5000, "action": true, "note": "write N to pump N ml; 0 stops the pump"},
+      "41": {"label": "Run for (s)", "unit": "s", "writable": true, "min": 0, "max": 600, "action": true, "note": "calibration: run N seconds into a measuring cup, then set ml/min"},
+      "42": {"label": "Pump flow", "unit": "ml/min", "writable": true, "min": 1, "max": 5000, "note": "measured: ml in the cup x 60 / seconds run"},
+      "43": {"label": "Max per watering", "unit": "ml", "writable": true, "min": 1, "max": 5000},
+      "44": {"label": "Max per 24 h", "unit": "ml", "writable": true, "min": 1, "max": 20000},
+      "45": {"label": "Pumped, last 24 h", "unit": "ml", "chart": true},
+      "46": {"label": "Pump state", "enum": {"0": "idle", "1": "running", "2": "done", "3": "refused: limit", "4": "stopped: supply empty", "5": "stopped: safety", "6": "stopped: time limit", "7": "refused: not calibrated"}},
+      "47": {"label": "Reservoir", "enum": {"0": "EMPTY", "1": "ok", "2": "no float switch"}},
+      "48": {"label": "Float switch", "writable": true, "min": 0, "max": 2, "enum": {"0": "none", "1": "closed = water", "2": "open = water"}}
+    },
+    "derived": {"soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true}, "battery": {"type": "lipo_pct", "from": 5, "label": "Battery", "unit": "%", "decimals": 0, "chart": true}, "volts": {"type": "volts", "from": 5, "label": "Battery voltage", "unit": "V", "decimals": 2, "chart": true}},
+    "ok_slot": {"slot": 6, "bits": {"1": "air sensor not reading", "2": "soil probe not reading"}},
+    "warn_below": [{"slot": "d:battery", "value": 20, "label": "battery low", "ignore": 0, "unit": "%"}, {"slot": 9, "value": -85, "label": "weak signal", "unit": " dBm"}, {"slot": 47, "value": 0, "label": "reservoir EMPTY"}],
+    "actions": [{"label": "Water 100 ml", "slot": 40, "value": 100, "confirm": "Pump 100 ml now?"}, {"label": "Stop pump", "slot": 40, "value": 0}, {"label": "Calibrate: run 30 s", "slot": 41, "value": 30, "confirm": "Run the pump for 30 s into a measuring cup? Then set Pump flow = ml x 2."}, {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}],
+    "errors": {"1001": {"title": "A watering never reached the soil", "cause": "The pump ran a dose, but 15 minutes later the soil probe showed no rise: an empty bucket the float switch missed, a tube off its stake, or a pump that is not pumping.", "fix": "Check the bucket, the tube from pump to pot, and that the pump runs (the Run 30 s button). If it all looks right, the probe may be too far from where the water lands.", "severity": "warning"}}
+  },
+  "PumpNode": {
+    "description": "A pump (or valve) with no sensors: waters by the ml, with limits and a float switch",
+    "match": {"has": [40], "lacks": [3, 20]},
+    "headline": ["45", "47", "46", "9"],
+    "slots": {
+      "7": {"label": "Boots"},
+      "8": {"label": "Uptime", "unit": "min"},
+      "9": {"label": "Signal", "unit": "dBm", "chart": true, "note": "best path in the last 1-2 minutes (firmware from 2026-09-27; before that, the last packet heard)"},
+      "22": {"label": "Action", "writable": true, "min": 0, "max": 5, "action": true},
+      "23": {"label": "OTA arm", "writable": true, "min": 0, "max": 255, "action": true},
+      "24": {"label": "Seed firmware to node", "writable": true, "min": 0, "max": 255, "action": true},
+      "25": {"label": "Firmware CRC", "hex": true},
+      "26": {"label": "Last error", "error": true, "note": "code/subject, explained on the Problems page"},
+      "27": {"label": "Errors since boot"},
+      "40": {"label": "Water now (ml)", "unit": "ml", "writable": true, "min": 0, "max": 5000, "action": true, "note": "write N to pump N ml; 0 stops the pump"},
+      "41": {"label": "Run for (s)", "unit": "s", "writable": true, "min": 0, "max": 600, "action": true, "note": "calibration: run N seconds into a measuring cup, then set ml/min"},
+      "42": {"label": "Pump flow", "unit": "ml/min", "writable": true, "min": 1, "max": 5000, "note": "measured: ml in the cup x 60 / seconds run"},
+      "43": {"label": "Max per watering", "unit": "ml", "writable": true, "min": 1, "max": 5000},
+      "44": {"label": "Max per 24 h", "unit": "ml", "writable": true, "min": 1, "max": 20000},
+      "45": {"label": "Pumped, last 24 h", "unit": "ml", "chart": true},
+      "46": {"label": "Pump state", "enum": {"0": "idle", "1": "running", "2": "done", "3": "refused: limit", "4": "stopped: supply empty", "5": "stopped: safety", "6": "stopped: time limit", "7": "refused: not calibrated"}},
+      "47": {"label": "Reservoir", "enum": {"0": "EMPTY", "1": "ok", "2": "no float switch"}},
+      "48": {"label": "Float switch", "writable": true, "min": 0, "max": 2, "enum": {"0": "none", "1": "closed = water", "2": "open = water"}}
+    },
+    "actions": [{"label": "Water 100 ml", "slot": 40, "value": 100, "confirm": "Pump 100 ml now?"}, {"label": "Stop pump", "slot": 40, "value": 0}, {"label": "Calibrate: run 30 s", "slot": 41, "value": 30, "confirm": "Run the pump for 30 s into a measuring cup? Then set Pump flow = ml x 2."}, {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}],
+    "warn_below": [{"slot": 47, "value": 0, "label": "reservoir EMPTY"}]
   }
 }

@@ -377,6 +377,15 @@ class FakeGateway(Gateway):
                     # values, with an age that keeps growing.
                     "DUMP 13 age=%d hops=0 1=2417 2=4025 3=2693 4=7 5=4072 6=7 7=2 8=720 9=-40 "
                     "22=0 23=0 25=1281381655" % (9800 + t),
+                    # A WaterNode: soil sensor plus a pump (slots 40-48). A dose
+                    # written to 40 shows up as ml pumped (45) and state done (46).
+                    "DUMP 14 age=%d hops=0 1=%d 2=5100 3=%d 4=40 5=4090 6=7 7=3 8=%d 9=-60 "
+                    "22=0 23=0 25=1281381655 40=%d 41=0 42=%d 43=%d 44=%d 45=%d 46=%d 47=1 48=%d"
+                    % (random.randint(0, 20), temp, 1900 - self.written.get((14, "dosed"), 0) // 10,
+                       t // 60, self.written.get((14, 40), 0), self.written.get((14, 42), 0),
+                       self.written.get((14, 43), 250), self.written.get((14, 44), 1500),
+                       self.written.get((14, "dosed"), 0), 2 if self.written.get((14, "dosed")) else 0,
+                       self.written.get((14, 48), 0)),
                 ]
                 return "\n".join(lines) + "\nDUMP END %d ep=%d m=%d up=3 ok=3 flt=0\n" % (
                     len(lines), self.ep, self.mode)
@@ -387,6 +396,9 @@ class FakeGateway(Gateway):
                 _, tgt, slot, val = cmd.split()
                 if tgt.isdigit() and random.random() < 0.5:
                     self.written[(int(tgt), int(slot))] = int(val)
+                    if int(tgt) == 14 and int(slot) == 40 and self.written.get((14, 42)):
+                        # the simulated pump only doses once calibrated, like the real one
+                        self.written[(14, "dosed")] = self.written.get((14, "dosed"), 0) + int(val)
                 return "[uplink-usb] ACK set %s=%s\n" % (slot, val)
             if cmd.startswith("log "):
                 nid = int(cmd.split()[1])

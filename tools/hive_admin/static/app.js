@@ -45,6 +45,7 @@ function fmtVal(spec, v) {
   // with no battery divider reports 0, and "0.00 V" would read as flat.
   if (v === 0 && spec.zero_means) return spec.zero_means;
   if (spec.hex) return (v >>> 0).toString(16).padStart(8, "0");
+  if (spec.enum) return spec.enum[String(v)] ?? String(v);
   if (spec.error) { const c = v & 0xFFFF, sub = (v >>> 16) & 0xFF; return c ? "E" + c + (sub ? "/" + sub : "") : "none"; }
   if (spec.bool) return v ? "yes" : "no";
   if (spec.bits) {

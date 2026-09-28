@@ -22,6 +22,18 @@
  * Updatable over the air exactly like RangeNode: the hive or a peer can push
  * an image, and a bad one reverts on its own (HivewireOta's safety net).
  *
+ * WATERNODE: the same sketch built with -DHW_WITH_PUMP=1 is a different
+ * firmware family, "WaterNode": everything above plus a pump or valve on the
+ * same board (see HivewirePump.h for the slots and every safety rule):
+ *
+ *   Pump switch  logic-level MOSFET module input (e.g. isolated LR7843) -> GPIO4
+ *                (the module's own supply and the pump are on the 12 V side)
+ *   Float switch optional, GPIO5 <-> GND (set its mode in slot 48)
+ *
+ * After each dose the soil probe must show the water arrived: no rise within
+ * 15 minutes raises application code 1001 (a dry reservoir the float switch
+ * missed, a tube off the stake, a dead pump).
+ *
  *   arduino-cli compile --build-property compiler.cpp.extra_flags=-DHW_NODE_ID=11
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -34,6 +46,16 @@
 #include <HivewireErrors.h>
 #include <Preferences.h>
 #include <Wire.h>
+
+#ifndef HW_WITH_PUMP
+#define HW_WITH_PUMP 0
+#endif
+#if HW_WITH_PUMP
+#include <HivewirePump.h>
+#define NODE_FAMILY "WaterNode"
+#else
+#define NODE_FAMILY "SoilNode"
+#endif
 
 #ifndef HW_NODE_ID
 #define HW_NODE_ID 11
@@ -100,8 +122,22 @@ HivewireFlashProvider flashSrc;
 // does. A soil node out of the hive's reach can only be updated by a peer of
 // its own family, and a range node's image is refused by family.
 HivewireFwNodeSender fwTx(node);
-// Only images of this same sketch are accepted -- see setFamily().
-HW_FW_FAMILY("SoilNode");
+// Only images of this same family are accepted -- see setFamily(). SoilNode
+// and WaterNode are separate families: a pump image must never land on a
+// board without a pump, or a sensor-only image on one that has one.
+HW_FW_FAMILY(NODE_FAMILY);
+
+#if HW_WITH_PUMP
+#define PUMP_PIN  4
+#define FLOAT_PIN 5
+HivewirePump pump(node, PUMP_PIN, FLOAT_PIN);
+// Application code (1000-1999, described in kinds.json): a dose the soil
+// probe never saw arrive.
+#define WATER_E_DOSE_NOT_SEEN 1001
+static const uint32_t DOSE_CHECK_MS   = 15UL * 60 * 1000;
+static const uint16_t DOSE_CHECK_MIN_ML = 50;     // smaller doses may not move the probe
+static const uint16_t DOSE_SEEN_DROP  = 30;       // raw counts: wetter reads LOWER
+#endif
 
 // ---- readings, refreshed in loop() -- samplers only copy them ---------------
 // Samplers run inside the library's slot scheduler; an 80 ms I2C conversion
@@ -379,6 +415,26 @@ static void aAction(const void *in) {
 }
 static void aOtaArm(const void *in) { otaArm = *(const uint8_t *)in; ota.arm(otaArm); }
 
+#if HW_WITH_PUMP
+// ---- pump slots (numbers and meaning: HivewirePump.h) ----------------------
+static uint16_t doseReq = 0, runReq = 0;
+static void sDose(void *o)     { memcpy(o, &doseReq, 2); }
+static void aDose(const void *in) { memcpy(&doseReq, in, 2); pump.requestDose(doseReq); }
+static void sRunS(void *o)     { memcpy(o, &runReq, 2); }
+static void aRunS(const void *in) { memcpy(&runReq, in, 2); pump.requestRunSeconds(runReq); }
+static void sFlow(void *o)     { uint16_t v = pump.flow(); memcpy(o, &v, 2); }
+static void aFlow(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_FLOW, v); }
+static void sMaxDose(void *o)  { uint16_t v = pump.maxDose(); memcpy(o, &v, 2); }
+static void aMaxDose(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_MAX_DOSE, v); }
+static void sMaxDay(void *o)   { uint16_t v = pump.maxDay(); memcpy(o, &v, 2); }
+static void aMaxDay(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_MAX_DAY, v); }
+static void sDayMl(void *o)    { uint16_t v = pump.dayMl(); memcpy(o, &v, 2); }
+static void sPumpState(void *o){ uint8_t v = pump.state(); memcpy(o, &v, 1); }
+static void sReservoir(void *o){ uint8_t v = pump.reservoir(); memcpy(o, &v, 1); }
+static void sFloat(void *o)    { uint8_t v = pump.floatMode(); memcpy(o, &v, 1); }
+static void aFloat(const void *in) { pump.requestSetting(HW_PUMP_SLOT_FLOAT, *(const uint8_t *)in); }
+#endif
+
 // Slot ids 22, 23 and 25 match RangeNode, so the same maintenance commands
 // (reboot, arm, firmware CRC) work on every node type.
 //  id  type    dir            sample  report  thresh min  max  sampler     applier
@@ -400,10 +456,24 @@ static const HwSlotDef SLOTS[] = {
   // The error pair every node publishes (HivewireErrors.h): last code and count.
   { HW_ERR_SLOT_LAST,  HW_U32, HW_DIR_OUT, 30000, 900000, 1, 0, 0, hwErrSlotLast,  nullptr },
   { HW_ERR_SLOT_COUNT, HW_U16, HW_DIR_OUT, 30000, 900000, 1, 0, 0, hwErrSlotCount, nullptr },
+#if HW_WITH_PUMP
+  { HW_PUMP_SLOT_DOSE,      HW_U16, HW_DIR_INOUT,     0, 900000, 0, 0, 5000, sDose,      aDose    },
+  { HW_PUMP_SLOT_RUN_S,     HW_U16, HW_DIR_INOUT,     0, 900000, 0, 0,  600, sRunS,      aRunS    },
+  { HW_PUMP_SLOT_FLOW,      HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 1, 5000, sFlow,      aFlow    },
+  { HW_PUMP_SLOT_MAX_DOSE,  HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 1, 5000, sMaxDose,   aMaxDose },
+  { HW_PUMP_SLOT_MAX_DAY,   HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 1, 20000, sMaxDay,   aMaxDay  },
+  { HW_PUMP_SLOT_DAY_ML,    HW_U16, HW_DIR_OUT,    5000, 900000, 1, 0,    0, sDayMl,     nullptr  },
+  { HW_PUMP_SLOT_STATE,     HW_U8,  HW_DIR_OUT,    1000, 900000, 1, 0,    0, sPumpState, nullptr  },
+  { HW_PUMP_SLOT_RESERVOIR, HW_U8,  HW_DIR_OUT,    5000, 900000, 1, 0,    0, sReservoir, nullptr  },
+  { HW_PUMP_SLOT_FLOAT,     HW_U8,  HW_DIR_INOUT, 60000, 900000, 1, 0,    2, sFloat,     aFloat   },
+#endif
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
 void setup() {
+#if HW_WITH_PUMP
+  pump.off();                       // before anything slow: a floating pin is not "off"
+#endif
   Serial.begin(115200);
   delay(200);
   analogReadResolution(12);
@@ -425,8 +495,8 @@ void setup() {
   // and waiting for a USB `setid` would strand a deployed node: go back to the
   // image that knew. A no-op on a board being set up by hand.
   if (NODE_ID == 0) HivewireOta::revertIfProvisional("no node id stored");
-  if (NODE_ID == 0) hwprov::waitForId("soilnode", "SoilNode");   // never returns
-  hwprov::printId("SoilNode", NODE_ID);
+  if (NODE_ID == 0) hwprov::waitForId("soilnode", NODE_FAMILY);   // never returns
+  hwprov::printId(NODE_FAMILY, NODE_ID);
   // Before the swarm radio: a scan hops channels. Raised now, published once
   // the node has joined (hwErr keeps it until then).
   if (hwprov::radioSelfTest() == 0) hwErr(node, HW_E_RADIO_DEAF, 0, "radio heard no networks");
@@ -455,6 +525,14 @@ void setup() {
   }
   fw.setFamily(hwFwFamily);
   fw.onApplied([] { ota.markPending(); });
+#if HW_WITH_PUMP
+  pump.begin();
+  // Stop pumping when the hive goes quiet, and before any update: an update
+  // is an outage, and a pump must not be left running through one.
+  node.onSafe([] { pump.stop(HW_PUMP_STOPPED_SAFE); });
+  ota.onBeforeUpdate([] { pump.stop(HW_PUMP_STOPPED_SAFE); });
+  fw.onBeforeUpdate([] { pump.stop(HW_PUMP_STOPPED_SAFE); });
+#endif
 
   ahtFound = ahtBegin();
   uint16_t bl = 0, bh = 0, cl = 0, ch = 0;
@@ -487,7 +565,35 @@ void loop() {
   ota.loop();
   fw.loop();
   fwTx.loop();
-  hwprov::poll("soilnode", "SoilNode", NODE_ID);
+  hwprov::poll("soilnode", NODE_FAMILY, NODE_ID);
+#if HW_WITH_PUMP
+  pump.loop();
+  // Did the water arrive? Soil raw at the start of a dose, compared 15 min
+  // after it ends. A capacitive probe reads LOWER when wetter.
+  {
+    static bool was = false;
+    static uint16_t rawBefore = 0;
+    static uint32_t checkAt = 0;
+    static uint16_t doseMl = 0;
+    bool on = pump.running();
+    if (on && !was) rawBefore = soilRaw;
+    if (!on && was && pump.state() == HW_PUMP_DONE && pump.lastDoseMl() >= DOSE_CHECK_MIN_ML &&
+        (sensorOk & 2)) {
+      checkAt = millis() + DOSE_CHECK_MS;
+      doseMl = pump.lastDoseMl();
+      if (!checkAt) checkAt = 1;
+    }
+    was = on;
+    if (checkAt && (int32_t)(millis() - checkAt) >= 0) {
+      checkAt = 0;
+      if ((sensorOk & 2) && soilRaw + DOSE_SEEN_DROP > rawBefore)
+        hwErr(node, WATER_E_DOSE_NOT_SEEN, HW_PUMP_SLOT_DOSE, "dose %u ml not seen: soil %u -> %u",
+              doseMl, rawBefore, soilRaw);
+      else
+        node.log("dose %u ml seen: soil %u -> %u", doseMl, rawBefore, soilRaw);
+    }
+  }
+#endif
   hwErrCheckLink(node);
 
   // Same rules as RangeNode: never while busy, never to itself, and never an

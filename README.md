@@ -671,6 +671,30 @@ Meshtastic is a dependency of **one file**. The library core is pure ESP-NOW and
 never includes it, so a LoRaWAN or cellular uplink is a new implementation of
 `HivewireUplink`, not a fork.
 
+## Watering: a pump on the swarm
+
+[`src/HivewirePump.h`](src/HivewirePump.h) drives a pump or valve through a
+logic-level MOSFET module, and holds every rule that keeps the water in the
+bucket: off at power-up and whenever the hive goes quiet or an update starts;
+doses asked for in ml against per-watering and per-24 h caps that are
+**refused, never clipped** (`E306`); a 24 h total that survives restarts, so a
+node in a reset loop cannot water once per boot; an absolute run-time ceiling
+whatever the calibration says; and an optional float switch (`E307` when the
+supply is empty). Two firmware families use it, each its own image:
+
+- **WaterNode** — SoilNode built with `-DHW_WITH_PUMP=1`: the soil sensor and a
+  pump on one board. After each dose it checks the probe saw the water arrive,
+  and raises application code 1001 if not.
+- **PumpNode** — a pump alone, for one bucket feeding a bed.
+
+Slots 40–48: `40` water N ml now (0 stops), `41` run N seconds (to calibrate
+into a measuring cup), `42` flow ml/min, `43`/`44` caps per watering and per
+24 h, `45` ml in the last 24 h, `46` state, `47` reservoir, `48` float switch
+mode. Wiring: switch input on GPIO4, float switch on GPIO5 to GND.
+
+**Not yet run on hardware.** Built and exercised against the admin's simulated
+swarm only, until a pump is on the bench.
+
 ## Testing it for hours
 
 [`tools/soak`](tools/soak) holds the long-running tests these numbers come from.

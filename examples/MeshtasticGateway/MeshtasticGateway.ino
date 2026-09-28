@@ -74,6 +74,13 @@ static const HwWritableSlot WRITABLE[] = {
   { 22, HW_U8 },     // 1=counters 2=rssi 3=forget epoch 4=reboot 5=OTA
   { 23, HW_U8 },     // arm OTA for THIS node id (see HivewireOta.h)
   { 24, HW_U8 },     // seed this node's firmware to node N, 255 = all (RangeNode)
+  // Pumps (HivewirePump.h: WaterNode, PumpNode).
+  { 40, HW_U16 },    // dose: pump N ml now, 0 = stop
+  { 41, HW_U16 },    // run N seconds (calibration)
+  { 42, HW_U16 },    // flow, ml/min
+  { 43, HW_U16 },    // max ml per watering
+  { 44, HW_U16 },    // max ml per 24 h
+  { 48, HW_U8 },     // float switch mode
 };
 static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 

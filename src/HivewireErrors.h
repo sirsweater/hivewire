@@ -29,6 +29,8 @@ enum HwErrCode : uint16_t {
   HW_E_INPUT_FLOATING = 303,           // An input looks unconnected
   HW_E_VALUE_OUT_OF_RANGE = 304,       // A reading is outside its plausible range
   HW_E_BATTERY_LOW = 305,              // Battery low
+  HW_E_OUTPUT_LIMIT = 306,             // An output refused to run: a safety limit
+  HW_E_SUPPLY_EMPTY = 307,             // An output's supply is empty
   HW_E_UNASSIGNED = 401,               // Board has no node number yet
   HW_E_BAD_NODE_ID = 402,              // Node number rejected
   HW_E_UPLINK_DOWN = 501,              // Gateway lost an uplink
