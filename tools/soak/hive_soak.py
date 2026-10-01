@@ -44,6 +44,11 @@ HOME = os.path.expanduser("~")
 GW_CMD = os.path.join(HOME, "gw_cmd.py")
 
 
+# Returned by Soak.gw() when a firmware push holds the gateway's port: the probe
+# is skipped, not counted as a failure.
+SKIPPED = object()
+
+
 def now():
     return time.time()
 
@@ -245,10 +250,20 @@ class Soak:
     def gw(self, cmd, secs):
         if not os.path.exists(GW_CMD):
             return None
+        # A firmware push owns the gateway's port for minutes. Opening it
+        # underneath one killed the push ("multiple access on port") and left
+        # the target with half an image -- so step aside, like the admin does.
+        if sh("pgrep -f '[h]ivewire_push.py'").strip():
+            self.pushes_waited = getattr(self, "pushes_waited", 0) + 1
+            if self.pushes_waited == 1 or self.pushes_waited % 10 == 0:
+                self.event("skipped a gateway probe: a firmware push is using the port")
+            return SKIPPED
         return sh("python3 %s %s %s" % (GW_CMD, json.dumps(cmd), secs), timeout=secs + 25)
 
     def probe_dump(self):
         out = self.gw("dump", 6)
+        if out is SKIPPED:
+            return
         s = self.gw_stats
         if not out or "DUMP END" not in out:
             s["dump_failed"] += 1
@@ -303,6 +318,8 @@ class Soak:
         # already holds would be "confirmed" by a write that never arrived.
         want = 601 if self.last_value(target, 21) == 600 else 600
         out = self.gw("set %d 21 %d" % (target, want), 6)
+        if out is SKIPPED:
+            return
         self.check_gw_uptime(out)
         self.writes["tried"] += 1
         if out and "ACK set 21=%d" % want in out:
@@ -341,6 +358,8 @@ class Soak:
         nid = ids[self.log_rr % len(ids)]
         self.log_rr += 1
         out = self.gw("log %d" % nid, 12)
+        if out is SKIPPED:
+            return
         self.check_gw_uptime(out)
         self.logs["tried"] += 1
         if out and ("N%d |" % nid) in out:
