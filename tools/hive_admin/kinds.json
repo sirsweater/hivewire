@@ -107,7 +107,7 @@
     "derived": {"soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true}, "battery": {"type": "lipo_pct", "from": 5, "label": "Battery", "unit": "%", "decimals": 0, "chart": true}, "volts": {"type": "volts", "from": 5, "label": "Battery voltage", "unit": "V", "decimals": 2, "chart": true}},
     "ok_slot": {"slot": 6, "bits": {"1": "air sensor not reading", "2": "soil probe not reading"}},
     "warn_below": [{"slot": "d:battery", "value": 20, "label": "battery low", "ignore": 0, "unit": "%"}, {"slot": 9, "value": -85, "label": "weak signal", "unit": " dBm"}, {"slot": 47, "value": 0, "label": "reservoir EMPTY"}],
-    "actions": [{"label": "Water 100 ml", "slot": 40, "value": 100, "confirm": "Pump 100 ml now?"}, {"label": "Stop pump", "slot": 40, "value": 0}, {"label": "Calibrate: run 30 s", "slot": 41, "value": 30, "confirm": "Run the pump for 30 s into a measuring cup? Then set Pump flow = ml x 2."}, {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}],
+    "actions": [{"label": "Test pump (5 s)", "slot": 41, "value": 5, "confirm": "Run the pump for 5 seconds? Works before calibration; watch that it starts and stops."}, {"label": "Water 100 ml", "slot": 40, "value": 100, "confirm": "Pump 100 ml now?"}, {"label": "Stop pump", "slot": 40, "value": 0}, {"label": "Calibrate: run 30 s", "slot": 41, "value": 30, "confirm": "Run the pump for 30 s into a measuring cup? Then set Pump flow = ml x 2."}, {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}],
     "errors": {"1001": {"title": "A watering never reached the soil", "cause": "The pump ran a dose, but 15 minutes later the soil probe showed no rise: an empty bucket the float switch missed, a tube off its stake, or a pump that is not pumping.", "fix": "Check the bucket, the tube from pump to pot, and that the pump runs (the Run 30 s button). If it all looks right, the probe may be too far from where the water lands.", "severity": "warning"}}
   },
   "PumpNode": {
@@ -134,7 +134,7 @@
       "47": {"label": "Reservoir", "enum": {"0": "EMPTY", "1": "ok", "2": "no float switch"}},
       "48": {"label": "Float switch", "writable": true, "min": 0, "max": 2, "enum": {"0": "none", "1": "closed = water", "2": "open = water"}}
     },
-    "actions": [{"label": "Water 100 ml", "slot": 40, "value": 100, "confirm": "Pump 100 ml now?"}, {"label": "Stop pump", "slot": 40, "value": 0}, {"label": "Calibrate: run 30 s", "slot": 41, "value": 30, "confirm": "Run the pump for 30 s into a measuring cup? Then set Pump flow = ml x 2."}, {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}],
+    "actions": [{"label": "Test pump (5 s)", "slot": 41, "value": 5, "confirm": "Run the pump for 5 seconds? Works before calibration; watch that it starts and stops."}, {"label": "Water 100 ml", "slot": 40, "value": 100, "confirm": "Pump 100 ml now?"}, {"label": "Stop pump", "slot": 40, "value": 0}, {"label": "Calibrate: run 30 s", "slot": 41, "value": 30, "confirm": "Run the pump for 30 s into a measuring cup? Then set Pump flow = ml x 2."}, {"label": "Reboot", "slot": 22, "value": 4, "confirm": "Reboot this node?"}],
     "warn_below": [{"slot": 47, "value": 0, "label": "reservoir EMPTY"}]
   }
 }
