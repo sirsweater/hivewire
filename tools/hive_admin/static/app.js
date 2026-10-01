@@ -571,7 +571,8 @@ views.flash = async (el) => {
 views.g4rden = async (el) => {
   const r = await api("/api/g4rden");
   const g = r.config, nodes = STATE.nodes;
-  const soilNodes = nodes.filter((n) => n.kind === "SoilNode" || g.devices[n.id]);
+  // Any node with a soil probe can be a plant's sensor: SoilNode, WaterNode...
+  const soilNodes = nodes.filter((n) => ((KINDS[n.kind] || {}).derived || {}).soil || g.devices[n.id]);
   const lastLine = (x) => x ? `${fmtTime(x.ts)} — ${x.ok ? `sent ${x.sent} reading(s) across ${x.nodes} node(s)` : `failed: ${esc(x.error || "HTTP " + x.status)}`}` : "never";
   el.innerHTML = `
     <div class="head spread"><div><h1>g4rden</h1>
@@ -793,7 +794,8 @@ views.settings = async (el) => {
   tbl.innerHTML = `<tr><th>#</th><th>Name</th><th>Location</th><th>Type</th><th>Soil dry / wet (raw)</th><th>Battery correction</th><th>Hide</th><th></th></tr>` +
     nodes.map((n) => {
       const c = cfg.nodes[n.id] || {};
-      const soil = n.kind === "SoilNode";
+      // Any type with a soil probe (SoilNode, WaterNode...), not one name.
+      const soil = !!((KINDS[n.kind] || {}).derived || {}).soil;
       return `<tr data-id="${n.id}">
         <td>${n.id}</td>
         <td><input data-k="name" value="${esc(c.name || "")}" placeholder="${esc(nodeTitle(n))}" style="width:150px"></td>
