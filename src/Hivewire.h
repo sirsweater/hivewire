@@ -29,7 +29,13 @@
 #define HIVEWIRE_PROTOCOL   5
 #define HIVEWIRE_MAX_STATE  16   // application payload carried by a beacon
 #define HIVEWIRE_MAX_PAYLOAD 240  // ESP-NOW caps near 250; leave headroom
-#define HIVEWIRE_MAX_SLOTS   24   // per node, coordinator-side storage
+// Per node, coordinator-side storage. Was 24 -- until a WaterNode (soil sensor,
+// pump and automatic watering) published 31 and the hive silently dropped the
+// rest, so its new settings could never be confirmed. 40 costs ~25 KB more of
+// the hive's heap (the table is 256 nodes, allocated at begin()).
+#ifndef HIVEWIRE_MAX_SLOTS
+#define HIVEWIRE_MAX_SLOTS   40
+#endif
 #define HIVEWIRE_TARGET_ALL  0    // MSG_SET addressed to every node
 
 // ---------------------------------------------------------------------------

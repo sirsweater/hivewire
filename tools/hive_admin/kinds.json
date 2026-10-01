@@ -102,7 +102,13 @@
       "45": {"label": "Pumped, last 24 h", "unit": "ml", "chart": true},
       "46": {"label": "Pump state", "enum": {"0": "idle", "1": "running", "2": "done", "3": "refused: limit", "4": "stopped: supply empty", "5": "stopped: safety", "6": "stopped: time limit", "7": "refused: not calibrated"}},
       "47": {"label": "Reservoir", "enum": {"0": "EMPTY", "1": "ok", "2": "no float switch"}},
-      "48": {"label": "Float switch", "writable": true, "min": 0, "max": 2, "enum": {"0": "none", "1": "closed = water", "2": "open = water"}}
+      "48": {"label": "Float switch", "writable": true, "min": 0, "max": 2, "enum": {"0": "none", "1": "closed = water", "2": "open = water"}},
+      "49": {"label": "Automatic watering", "writable": true, "min": 0, "max": 1, "enum": {"0": "off", "1": "on"}, "note": "set from the Automatic watering card"},
+      "50": {"label": "Water below (raw)", "writable": true, "min": 1, "max": 4095, "note": "raw probe reading that counts as dry; the card converts your %"},
+      "51": {"label": "Automatic amount", "unit": "ml", "writable": true, "min": 1, "max": 5000},
+      "52": {"label": "Minimum gap", "unit": "min", "writable": true, "min": 10, "max": 43200},
+      "53": {"label": "Automatic watering state", "enum": {"0": "off", "1": "watching", "2": "waiting out the gap", "3": "LOCKED: watering not seen", "4": "paused: no soil reading", "5": "watering"}},
+      "54": {"label": "Since last automatic watering", "unit": "min", "note": "65535 = none yet"}
     },
     "derived": {"soil": {"type": "soil_pct", "from": 3, "label": "Soil moisture", "unit": "%", "decimals": 0, "chart": true}, "battery": {"type": "lipo_pct", "from": 5, "label": "Battery", "unit": "%", "decimals": 0, "chart": true}, "volts": {"type": "volts", "from": 5, "label": "Battery voltage", "unit": "V", "decimals": 2, "chart": true}},
     "ok_slot": {"slot": 6, "bits": {"1": "air sensor not reading", "2": "soil probe not reading"}},

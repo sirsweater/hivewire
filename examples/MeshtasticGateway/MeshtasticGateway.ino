@@ -81,6 +81,10 @@ static const HwWritableSlot WRITABLE[] = {
   { 43, HW_U16 },    // max ml per watering
   { 44, HW_U16 },    // max ml per 24 h
   { 48, HW_U8 },     // float switch mode
+  { 49, HW_U8 },     // automatic watering on/off
+  { 50, HW_U16 },    // water below this soil raw reading
+  { 51, HW_U16 },    // automatic watering amount, ml
+  { 52, HW_U16 },    // minimum gap between automatic waterings, minutes
 };
 static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 

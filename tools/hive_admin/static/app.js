@@ -216,6 +216,22 @@ views.node = async (el, id) => {
     <div class="grid cols-2" style="margin-top:16px">
       <div class="card"><h2>Current values</h2><div class="tablewrap"><table id="slots"></table></div></div>
       <div class="stack">
+        ${(k.slots || {})["49"] ? `<div class="card stack" id="auto-card"><h2>Automatic watering</h2>
+          <div id="auto-status" class="muted"></div>
+          <form id="auto-form" class="stack">
+            <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="au-on"> Water automatically</label>
+            <div class="row">
+              <label class="f">Water when moisture is below (%)<input id="au-pct" type="number" min="0" max="100" step="1" style="width:110px" required></label>
+              <label class="f">Amount each time (ml)<input id="au-ml" type="number" min="1" max="5000" style="width:110px" required></label>
+            </div>
+            <div class="row">
+              <label class="f">At least this long between (hours)<input id="au-gap" type="number" min="0.2" max="720" step="0.5" style="width:110px" required></label>
+              <label class="f">Never more than per 24 h (ml)<input id="au-day" type="number" min="1" max="20000" style="width:110px"></label>
+            </div>
+            <div class="row"><button class="primary">Save</button></div>
+          </form>
+          <p class="muted small">The node decides on its own, even when the Pi is off. It waters only after two dry readings a minute apart, never sooner than the gap, never past the daily maximum, and switches itself off if a watering does not show up in the soil.</p>
+          <div id="auto-reply" class="mono muted small"></div></div>` : ""}
         <div class="card"><h2>Actions</h2><div class="row" id="actions"></div>
           <form id="setform" class="row" style="margin-top:14px">
             <select id="set-slot"></select><input id="set-val" type="number" style="width:110px" placeholder="value" required>
@@ -230,6 +246,34 @@ views.node = async (el, id) => {
           <div id="nodelog" class="log mono" hidden></div></div>
       </div>
     </div>`;
+  if ($("#auto-form")) {
+    const cfg = await api("/api/config");
+    const c = (cfg.nodes || {})[nid] || {};
+    const cal = c.soil_dry != null && c.soil_wet != null && c.soil_dry !== c.soil_wet;
+    const toPct = (raw) => Math.round(100 * (c.soil_dry - raw) / (c.soil_dry - c.soil_wet));
+    const s = n.slots;
+    const stateText = { 0: "off", 1: "on, watching the soil", 2: "on, waiting out the gap", 3: "LOCKED OFF: a watering did not show up in the soil. Check the tube and probe, then save with it switched on again",
+                        4: "paused: no soil reading", 5: "watering now" };
+    const since = s[54] == null || s[54] === 65535 ? "none yet" : fmtAge(s[54] * 60);
+    $("#auto-status").innerHTML = `${esc(stateText[s[53]] ?? "unknown")} · last automatic watering: ${esc(since)}` +
+      (s[45] != null ? ` · pumped in the last 24 h: ${s[45]} ml` : "") +
+      (cal ? "" : `<div class="warn-line">⚠ Calibrate this probe first (Settings: Use as dry, Use as wet). Automatic watering needs it.</div>`);
+    $("#au-on").checked = !!s[49];
+    if (cal && s[50]) $("#au-pct").value = toPct(s[50]);
+    if (s[51]) $("#au-ml").value = s[51];
+    $("#au-gap").value = s[52] ? +(s[52] / 60).toFixed(1) : 12;
+    if (s[44]) $("#au-day").value = s[44];
+    $("#auto-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { node: nid, enable: $("#au-on").checked, below_pct: +$("#au-pct").value,
+                     ml: +$("#au-ml").value, gap_hours: +$("#au-gap").value, day_ml: $("#au-day").value };
+      try {
+        const r = await api("/api/autowater", body);
+        $("#auto-reply").textContent = (r.ok ? "Sent; the node confirms each setting within a minute or two. " : "Some settings were not acknowledged: ") + r.replies.join(" · ");
+        toast(r.ok ? "Automatic watering saved" : "Not all settings went through");
+      } catch (err) { $("#auto-reply").textContent = err.message; toast(err.message); }
+    };
+  }
   $("#addmark").onclick = async () => {
     const text = prompt("What happened? (shows as a line on every chart)", "");
     if (!text) return;

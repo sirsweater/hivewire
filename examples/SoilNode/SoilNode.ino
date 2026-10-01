@@ -433,6 +433,17 @@ static void sPumpState(void *o){ uint8_t v = pump.state(); memcpy(o, &v, 1); }
 static void sReservoir(void *o){ uint8_t v = pump.reservoir(); memcpy(o, &v, 1); }
 static void sFloat(void *o)    { uint8_t v = pump.floatMode(); memcpy(o, &v, 1); }
 static void aFloat(const void *in) { pump.requestSetting(HW_PUMP_SLOT_FLOAT, *(const uint8_t *)in); }
+// Automatic watering (HivewirePump.h, slots 49-54).
+static void sAutoOn(void *o)   { uint8_t v = pump.autoOn(); memcpy(o, &v, 1); }
+static void aAutoOn(const void *in) { pump.requestSetting(HW_PUMP_SLOT_AUTO_ON, *(const uint8_t *)in); }
+static void sAutoBelow(void *o){ uint16_t v = pump.autoBelowRaw(); memcpy(o, &v, 2); }
+static void aAutoBelow(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_AUTO_BELOW, v); }
+static void sAutoMl(void *o)   { uint16_t v = pump.autoMl(); memcpy(o, &v, 2); }
+static void aAutoMl(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_AUTO_ML, v); }
+static void sAutoGap(void *o)  { uint16_t v = pump.autoGapMin(); memcpy(o, &v, 2); }
+static void aAutoGap(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_AUTO_GAP, v); }
+static void sAutoState(void *o){ uint8_t v = pump.autoState(); memcpy(o, &v, 1); }
+static void sAutoSince(void *o){ uint16_t v = pump.minutesSinceAuto(); memcpy(o, &v, 2); }
 #endif
 
 // Slot ids 22, 23 and 25 match RangeNode, so the same maintenance commands
@@ -466,6 +477,12 @@ static const HwSlotDef SLOTS[] = {
   { HW_PUMP_SLOT_STATE,     HW_U8,  HW_DIR_OUT,    1000, 900000, 1, 0,    0, sPumpState, nullptr  },
   { HW_PUMP_SLOT_RESERVOIR, HW_U8,  HW_DIR_OUT,    5000, 900000, 1, 0,    0, sReservoir, nullptr  },
   { HW_PUMP_SLOT_FLOAT,     HW_U8,  HW_DIR_INOUT, 60000, 900000, 1, 0,    2, sFloat,     aFloat   },
+  { HW_PUMP_SLOT_AUTO_ON,   HW_U8,  HW_DIR_INOUT, 60000, 900000, 1, 0,    1, sAutoOn,    aAutoOn    },
+  { HW_PUMP_SLOT_AUTO_BELOW,HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 1, 4095, sAutoBelow, aAutoBelow },
+  { HW_PUMP_SLOT_AUTO_ML,   HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 1, 5000, sAutoMl,    aAutoMl    },
+  { HW_PUMP_SLOT_AUTO_GAP,  HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 10, 43200, sAutoGap, aAutoGap   },
+  { HW_PUMP_SLOT_AUTO_STATE,HW_U8,  HW_DIR_OUT,    5000, 900000, 1, 0,    0, sAutoState, nullptr    },
+  { HW_PUMP_SLOT_AUTO_SINCE,HW_U16, HW_DIR_OUT,   60000, 900000, 30, 0,   0, sAutoSince, nullptr    },
 #endif
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
@@ -568,6 +585,9 @@ void loop() {
   hwprov::poll("soilnode", NODE_FAMILY, NODE_ID);
 #if HW_WITH_PUMP
   pump.loop();
+  // Automatic watering judges the same reading the slots publish; bit 1 of
+  // sensorOk says the probe is really there (a floating pin is not "dry").
+  pump.autoLoop((sensorOk & 2) != 0, soilRaw);
   // Did the water arrive? Soil raw at the start of a dose, compared 15 min
   // after it ends. A capacitive probe reads LOWER when wetter.
   {
@@ -575,20 +595,26 @@ void loop() {
     static uint16_t rawBefore = 0;
     static uint32_t checkAt = 0;
     static uint16_t doseMl = 0;
+    static bool wasAuto = false;
     bool on = pump.running();
     if (on && !was) rawBefore = soilRaw;
     if (!on && was && pump.state() == HW_PUMP_DONE && pump.lastDoseMl() >= DOSE_CHECK_MIN_ML &&
         (sensorOk & 2)) {
       checkAt = millis() + DOSE_CHECK_MS;
       doseMl = pump.lastDoseMl();
+      wasAuto = pump.lastDoseWasAuto();
       if (!checkAt) checkAt = 1;
     }
     was = on;
     if (checkAt && (int32_t)(millis() - checkAt) >= 0) {
       checkAt = 0;
-      if ((sensorOk & 2) && soilRaw + DOSE_SEEN_DROP > rawBefore)
+      if ((sensorOk & 2) && soilRaw + DOSE_SEEN_DROP > rawBefore) {
         hwErr(node, WATER_E_DOSE_NOT_SEEN, HW_PUMP_SLOT_DOSE, "dose %u ml not seen: soil %u -> %u",
               doseMl, rawBefore, soilRaw);
+        // Only an AUTOMATIC watering locks automatic watering off: a manual
+        // one into a measuring cup is supposed to miss the soil.
+        if (wasAuto) pump.autoLockout();
+      }
       else
         node.log("dose %u ml seen: soil %u -> %u", doseMl, rawBefore, soilRaw);
     }

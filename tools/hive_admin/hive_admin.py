@@ -1616,6 +1616,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "history": hist})
         return self.fail("not found", 404)
 
+    def autowater(self, b):
+        """Automatic watering settings for a pump node with a soil probe, in the
+        person's units: water below a moisture %, an amount in ml, a minimum
+        gap in hours, a daily maximum in ml. The node judges dryness on its RAW
+        probe reading (it has no calibration of its own), so the % is converted
+        here with this probe's measured dry and wet points -- and refused if
+        they were never measured, since a guessed scale would water at a guess.
+        Settings go first and the on switch last, each re-sent until the node's
+        own report confirms it."""
+        app = self.app
+        nid = int(b["node"])
+        enable = 1 if b.get("enable") else 0
+        pct = float(b["below_pct"])
+        ml = int(b["ml"])
+        gap_min = int(round(float(b["gap_hours"]) * 60))
+        day_ml = int(b["day_ml"]) if b.get("day_ml") not in (None, "") else None
+        if not 0 <= pct <= 100:
+            raise ValueError("moisture must be 0-100 %")
+        if not 1 <= ml <= 5000:
+            raise ValueError("amount must be 1-5000 ml")
+        if not 10 <= gap_min <= 43200:
+            raise ValueError("gap must be between 10 minutes and 30 days")
+        if day_ml is not None and not (ml <= day_ml <= 20000):
+            raise ValueError("the daily maximum must be at least one watering, and at most 20000 ml")
+        dry, wet, calibrated = app.calibration(nid)
+        if not calibrated:
+            raise ValueError("calibrate this node's soil probe first (Settings: Use as dry, Use as wet)")
+        below_raw = int(round(dry - pct / 100.0 * (dry - wet)))
+        below_raw = max(1, min(4095, below_raw))
+        snap = (app.poller.snapshot or {}).get("nodes", {}).get(nid, {})
+        cap = (snap.get("slots") or {}).get(43)
+        writes = [(51, ml), (52, gap_min), (50, below_raw)]
+        if cap is not None and ml > cap:
+            writes.append((43, ml))         # an automatic watering must not be refused by its own cap
+        if day_ml is not None:
+            writes.append((44, day_ml))
+        writes.append((49, enable))
+        replies = []
+        for slot, value in writes:
+            ack = app.gw.command("set %d %d %d" % (nid, slot, value), r"ACK set|ERR")
+            replies.append("%d=%d %s" % (slot, value, ack or "no reply"))
+            if ack and ack.startswith("ACK"):
+                app.poller.track_write(nid, slot, value)
+        app.store.event("command", "node %d automatic watering %s: below %.0f%% (raw %d), %d ml, gap %s h%s" % (
+            nid, "ON" if enable else "off", pct, below_raw, ml, b["gap_hours"],
+            ", max %d ml/24 h" % day_ml if day_ml is not None else ""))
+        return {"ok": all("ACK" in r for r in replies), "below_raw": below_raw, "replies": replies}
+
     def series(self, node, slot, t0, t1):
         """Stored values are change-based: a value holds until the next row.
         Prepend the value in force at t0 so a chart starts at the left edge."""
@@ -1847,6 +1895,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if tracking:
                     app.poller.track_write(int(target), slot, value)
             return self.send_json({"reply": ack, "confirming": tracking})
+        if path == "/api/autowater":
+            return self.send_json(self.autowater(self.jbody()))
         if path == "/api/mode":
             b = self.jbody()
             m, p, ttl = int(b["mode"]), int(b.get("param", 0)), int(b.get("ttl", 0))
