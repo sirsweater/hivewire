@@ -253,7 +253,11 @@ class Soak:
         # A firmware push owns the gateway's port for minutes. Opening it
         # underneath one killed the push ("multiple access on port") and left
         # the target with half an image -- so step aside, like the admin does.
-        if sh("pgrep -f '[h]ivewire_push.py'").strip():
+        # Match the push PROCESS (python3 running hivewire_push.py), not any
+        # command line that merely mentions it: the admin runs with
+        # --push-script .../hivewire_push.py, and the looser pattern matched
+        # the admin itself, so every probe of a whole soak was skipped.
+        if sh("pgrep -f 'python3 [^ ]*hivewire_push[.]py'").strip():
             self.pushes_waited = getattr(self, "pushes_waited", 0) + 1
             if self.pushes_waited == 1 or self.pushes_waited % 10 == 0:
                 self.event("skipped a gateway probe: a firmware push is using the port")
