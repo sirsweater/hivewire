@@ -151,9 +151,27 @@ static void logf(const char *fmt, ...) {
   if (logCount < LOG_LINES) logCount++;
 }
 
+// Where a line goes. LoRa here is a backup someone has to PROMPT: it carries
+// the answer to a command that came over it, and nothing unsolicited. Before
+// this every line went everywhere -- the routine 15-minute digest, every
+// "swarm changed" digest, and the reply to every command the USB host sent,
+// a soak test's hourly probes included -- all on a shared public frequency,
+// for a link nobody was listening to. Build with -DLORA_UNSOLICITED=1 to
+// broadcast digests on every link as before.
+#ifndef LORA_UNSOLICITED
+#define LORA_UNSOLICITED 0
+#endif
+static const uint8_t LINK_LORA = 0, LINK_USB = 1;      // links.add() order, below
+static const uint8_t TO_USB = 1 << LINK_USB;
+static const uint8_t UNSOLICITED = LORA_UNSOLICITED ? 0xFF : TO_USB;
+static uint8_t  replyMask = UNSOLICITED;   // destination of the line being sent
+static uint8_t  logReplyMask = TO_USB;     // whoever asked for the node log in flight
+static uint32_t logReplyUntil = 0;
+static const uint32_t LOG_REPLY_MS = 30000;
+
 static void uplink(const char *line) {
   Serial.printf("[uplink ch%u] %s\n", SWARM_CHANNEL, line);
-  links.send(line);   // replicated to every transport that is currently up
+  links.sendWhere(replyMask, line);
 }
 
 // Dump the ring oldest-first, packed into as few messages as will hold it.
@@ -269,7 +287,18 @@ static void checkTriggers() {
 //   log                                    replay the diagnostic ring
 //   push <len> <crc32> [node]              arm a firmware transfer; the bytes
 //                                          come over USB -- see below
+static void handleCommandFrom(const char *line);
+
+// Every command's replies go back to the transport it came from -- plus USB,
+// where a copy costs nothing and the host keeps its record.
 static void handleCommand(const char *line) {
+  int8_t src = links.source();
+  replyMask = TO_USB | (src >= 0 ? (uint8_t)(1 << src) : 0);
+  handleCommandFrom(line);
+  replyMask = UNSOLICITED;
+}
+
+static void handleCommandFrom(const char *line) {
   // Sized to Meshtastic's own ceiling (see MAX_LINE above), comfortably wider
   // than any command here actually needs -- so nothing this receives over
   // LoRa could have arrived any longer anyway.
@@ -321,6 +350,9 @@ static void handleCommand(const char *line) {
     if (sscanf(buf + 3, "%d", &who) == 1 && who > 0) {
       coord.requestLog((uint8_t)who);
       logf("log req node %d", who);
+      // The node's lines arrive later, one at a time: send them to whoever asked.
+      logReplyMask = replyMask;
+      logReplyUntil = millis() + LOG_REPLY_MS;
     } else {
       sendLog();
     }
@@ -385,8 +417,8 @@ void setup() {
   // whatever protects the URL it polls (network reachability, an unguessable
   // path, HTTP auth if the host in front of it adds one -- Hivewire does not
   // impose a scheme here).
-  links.add(&gwUplink);
-  links.add(&netUplink);
+  links.add(&gwUplink);     // index LINK_LORA
+  links.add(&netUplink);    // index LINK_USB
   links.onCommand(handleCommand);
   gwUplink.onLog([](const char *m) { logf("%s", m); });
 
@@ -394,7 +426,10 @@ void setup() {
   coord.onNodeLog([](uint8_t nodeId, const char *line) {
     char out[96];
     snprintf(out, sizeof(out), "N%u | %s", nodeId, line);
+    uint8_t saved = replyMask;
+    replyMask = (int32_t)(millis() - logReplyUntil) < 0 ? logReplyMask : UNSOLICITED;
     uplink(out);
+    replyMask = saved;
   });
   // Firmware bytes for the swarm arrive on message types the core does not
   // define; onRaw() is exactly the escape hatch built for that.

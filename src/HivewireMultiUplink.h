@@ -46,7 +46,7 @@ class HivewireMultiUplink : public HivewireUplink {
       // configured, must not stop the others from starting -- that is the
       // entire reason to have more than one.
       if (_links[i]->begin()) any = true;
-      _links[i]->onCommand(dispatch);
+      _links[i]->onCommand(DISPATCH[i]);
     }
     return any;
   }
@@ -70,6 +70,18 @@ class HivewireMultiUplink : public HivewireUplink {
 
   void onCommand(CommandCallback cb) override { _cb = cb; }
 
+  // Which transport delivered the command now being handled (its add()
+  // order), or -1 outside a command. Lets a reply go back the way the
+  // question came instead of to everyone: a backup LoRa link that someone
+  // has to prompt should not also carry every answer meant for the USB host.
+  int8_t source() const { return _source; }
+
+  // Send to the transports whose bits are set in `mask` (bit i = add() order).
+  void sendWhere(uint8_t mask, const char *line) {
+    for (uint8_t i = 0; i < _count; i++)
+      if ((mask & (1 << i)) && _links[i]->ready()) _links[i]->send(line);
+  }
+
   // Which transports are actually up right now, for a status line -- "we have
   // a LoRa command channel but the internet one dropped" is worth being able
   // to say, and cannot be answered from ready() alone.
@@ -81,13 +93,21 @@ class HivewireMultiUplink : public HivewireUplink {
   uint8_t linkCount() const { return _count; }
 
  private:
-  static void dispatch(const char *line) {
-    if (g_self && g_self->_cb) g_self->_cb(line);
+  // One trampoline per slot: the transports' callbacks carry no context, so
+  // this is how a command remembers which transport it came from.
+  template <uint8_t I> static void dispatchFrom(const char *line) {
+    if (!g_self || !g_self->_cb) return;
+    g_self->_source = I;
+    g_self->_cb(line);
+    g_self->_source = -1;
   }
+  static constexpr CommandCallback DISPATCH[MAX_UPLINKS] = {
+      dispatchFrom<0>, dispatchFrom<1>, dispatchFrom<2>, dispatchFrom<3>};
 
   inline static HivewireMultiUplink *g_self = nullptr;
 
   HivewireUplink *_links[MAX_UPLINKS] = {};
   uint8_t _count = 0;
   CommandCallback _cb = nullptr;
+  int8_t _source = -1;
 };
