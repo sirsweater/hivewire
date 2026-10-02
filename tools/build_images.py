@@ -35,6 +35,7 @@ FAMILIES = {
     "WaterNode": ("SoilNode", "-DHW_WITH_PUMP=1"),
     "PumpNode":  ("PumpNode", ""),
     "RangeNode": ("RangeNode", ""),
+    "WeatherNode": ("WeatherNode", ""),
 }
 FQBN = "esp32:esp32:esp32c6:CDCOnBoot=cdc"
 
