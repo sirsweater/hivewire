@@ -526,6 +526,7 @@ class Poller(threading.Thread):
         self.pending = {}               # (node, slot) -> {value, sent, tries, first}
         self.pending_lock = threading.Lock()
         self.problems = None            # set by App
+        self.alerts = None              # set by App: HiveAlerts
         self.plausible = None           # set by App: (nid, slot, value) -> bool
         self.fails = 0                  # polls in a row that got no dump
 
@@ -580,6 +581,11 @@ class Poller(threading.Thread):
             except Exception as e:      # never let the poller die
                 self.last_error = "%s: %s" % (type(e).__name__, e)
             self.note_problems()
+            if self.alerts and self.snapshot:
+                try:
+                    self.alerts.check(self.snapshot)
+                except Exception as e:  # an alert bug must never stop polling
+                    print("alerts: %s: %s" % (type(e).__name__, e), flush=True)
             # Say so in the log when polling starts or stops working -- once
             # per change, not once per poll.
             if self.last_error != reported:
@@ -661,6 +667,147 @@ class Poller(threading.Thread):
         if rows:
             self.store.add_readings(rows)
         self.check_writes(d, t)
+
+
+# ---------------------------------------------------------------------------
+# Hive problems -> instant phone alerts (through g4rden)
+# ---------------------------------------------------------------------------
+class HiveAlerts:
+    """Turns hive problems worth acting on into phone notifications.
+
+    g4rden already delivers this head's soil alerts to whoever watches it;
+    POST /api/device/event (same write token as the uploads) sends anything
+    else, instantly unless the user turned that off. This end decides what is
+    worth interrupting someone for and de-duplicates; g4rden only delivers.
+
+      node error   a node's error COUNT went up (or restarted at >0 after a
+                   reboot) with a code in ALERT_CODES or the node's own
+                   application range (WaterNode E1001: dose never arrived)
+      node quiet   not heard from for QUIET_S; once per outage
+      gateway      E601 (gateway not answering) for longer than GW_SILENT_S
+
+    Deliberately NOT alerted: weak link (E104), unexpected restarts (E208),
+    host undervoltage (E605) -- logged on the Problems page, not worth a
+    phone buzz. The first poll after a start is a baseline: nothing that was
+    already wrong re-alerts because the admin restarted. Hidden (retired)
+    nodes never alert. Same key (node+code, node quiet, gateway) at most once
+    per COOLDOWN_S.
+    """
+    ALERT_CODES = {101, 102, 206, 301, 303, 306, 307}
+    QUIET_S = 30 * 60
+    GW_SILENT_S = 10 * 60
+    COOLDOWN_S = 6 * 3600
+
+    def __init__(self, app):
+        self.app = app
+        self.counts = {}                # nid -> error count last seen
+        self.quiet = set()              # nids currently counted as quiet
+        self.gw_alerted = False
+        self.baselined = False
+        self.sent = {}                  # key -> ts of last successful send
+        self.pending = []               # events that failed to send, retried
+        self.lock = threading.Lock()
+        self.sending = False
+
+    def worth(self, code):
+        lo, hi = self.app.problems.app_range
+        return code in self.ALERT_CODES or lo <= code <= hi
+
+    def label(self, nid):
+        meta = self.app.cfg.node(nid) or {}
+        name = (meta.get("name") or "").strip()
+        return "%s (node %d)" % (name, nid) if name else "Node %d" % nid
+
+    def check(self, snap, t=None):
+        """Called after every poll with the latest dump."""
+        t = t or now()
+        events = []
+        stale = self.app.cfg.data.get("stale_seconds", 300)
+        for nid, rec in ((snap or {}).get("nodes") or {}).items():
+            meta = self.app.cfg.node(nid) or {}
+            if meta.get("hidden"):
+                continue
+            age = rec.get("age") or 0
+            if age > self.QUIET_S:
+                if nid not in self.quiet:
+                    self.quiet.add(nid)
+                    if self.baselined:
+                        events.append({"key": "quiet:%d" % nid, "kind": "node_quiet", "node": nid,
+                                       "title": "🐝 %s went quiet" % self.label(nid),
+                                       "body": "Not heard from for %s. Check its power, or whether it "
+                                               "moved out of range of the hive." % fmt_age(age)})
+            elif age <= stale:
+                self.quiet.discard(nid)
+            slots = rec.get("slots") or {}
+            v, count = slots.get(ERR_SLOT_LAST), slots.get(ERR_SLOT_COUNT)
+            if age > stale or count is None:
+                continue
+            prev = self.counts.get(nid)
+            self.counts[nid] = count
+            if prev is None or not v:
+                continue
+            new = count > prev or (count < prev and count > 0)   # < prev: rebooted, count restarted
+            code, subject = v & 0xFFFF, (v >> 16) & 0xFF
+            if new and self.worth(code):
+                e = self.app.problems.explain(code)
+                events.append({"key": "err:%d:%d" % (nid, code), "kind": "node_error", "node": nid,
+                               "code": code,
+                               "title": "🐝 %s: %s" % (self.label(nid), e.get("title") or "E%d" % code),
+                               "body": ("E%d%s. %s" % (code, "/%d" % subject if subject else "",
+                                                       e.get("fix") or e.get("cause") or "")).strip()})
+        p = self.app.problems.active.get(601)
+        if p and t - p["since"] > self.GW_SILENT_S:
+            if not self.gw_alerted:
+                self.gw_alerted = True
+                events.append({"key": "gw:601", "kind": "gateway", "code": 601,
+                               "title": "🐝 Hive gateway not answering",
+                               "body": "The hive admin cannot reach the gateway on USB (%s). Check its "
+                                       "cable and power; readings are not being collected." % p["detail"]})
+        elif not p:
+            self.gw_alerted = False
+        self.baselined = True
+        self.queue(events, t)
+
+    def queue(self, events, t):
+        with self.lock:
+            for e in events:
+                last = self.sent.get(e["key"])
+                if last and t - last < self.COOLDOWN_S:
+                    continue
+                if not any(x["key"] == e["key"] for x in self.pending):
+                    self.pending.append(dict(e, queued=t))
+            # A failed send is retried for an hour, then dropped (the
+            # Problems page still has it).
+            self.pending = [e for e in self.pending if t - e["queued"] < 3600][-20:]
+            if not self.pending or self.sending:
+                return
+            self.sending = True
+            batch = self.pending[:5]
+        threading.Thread(target=self.send, args=(batch,), daemon=True).start()
+
+    def send(self, batch):
+        try:
+            g = self.app.cfg.data.get("g4rden") or {}
+            if not (g.get("token") and g.get("enabled")):
+                return                  # not linked to g4rden: nothing to send through
+            body = {"events": [{k: e[k] for k in ("kind", "node", "code", "title", "body") if k in e}
+                               for e in batch]}
+            r = self.app.uploader.post("/api/device/event", body, g["token"])
+            with self.lock:
+                if r.get("ok"):
+                    keys = {e["key"] for e in batch}
+                    self.pending = [e for e in self.pending if e["key"] not in keys]
+                    for k in keys:
+                        self.sent[k] = now()
+            if r.get("ok"):
+                for e in batch:
+                    self.app.store.event("alert", "sent to phones: %s" % e["title"])
+            else:
+                self.app.store.event("alert", "alert not sent (%s), will retry: %s" % (
+                    r.get("status") or r.get("error"), batch[0]["title"]))
+        finally:
+            with self.lock:
+                self.sending = False
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1196,8 @@ class App:
         if self.poller:
             self.poller.problems = self.problems
             self.poller.plausible = self.plausible
+            self.alerts = HiveAlerts(self)
+            self.poller.alerts = self.alerts
         if shutil.which("vcgencmd") and not args.fake:
             threading.Thread(target=self.watch_power, daemon=True).start()
         # Signed-in sessions survive a restart. They used to live only in
