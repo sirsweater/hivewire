@@ -29,7 +29,8 @@
     "valid": [
      -4000,
      8500
-    ]
+    ],
+    "ok_bit": 1
    },
    "2": {
     "label": "Humidity",
@@ -40,7 +41,8 @@
     "valid": [
      1,
      10000
-    ]
+    ],
+    "ok_bit": 1
    },
    "3": {
     "label": "Soil (raw ADC)",
@@ -65,7 +67,9 @@
     "bits": {
      "1": "air sensor",
      "2": "soil probe",
-     "4": "battery divider"
+     "4": "battery divider",
+     "8": "soil temp probe",
+     "16": "soil temp probe in place of the air sensor"
     }
    },
    "7": {
@@ -86,6 +90,19 @@
     "unit": "%",
     "chart": true,
     "zero_means": "no divider fitted"
+   },
+   "16": {
+    "label": "Soil temperature",
+    "unit": "°C",
+    "scale": 0.01,
+    "decimals": 1,
+    "chart": true,
+    "valid": [
+     -5500,
+     12500
+    ],
+    "note": "DS18B20 probe on pad 6; no reading when none is fitted",
+    "ok_bit": 8
    },
    "22": {
     "label": "Action",
@@ -155,7 +172,10 @@
   "ok_slot": {
    "slot": 6,
    "bits": {
-    "1": "air sensor not reading",
+    "1": {
+     "label": "air sensor not reading",
+     "unless": 16
+    },
     "2": "soil probe not reading"
    }
   },
@@ -363,7 +383,8 @@
     "valid": [
      -4000,
      8500
-    ]
+    ],
+    "ok_bit": 1
    },
    "2": {
     "label": "Humidity",
@@ -374,7 +395,8 @@
     "valid": [
      1,
      10000
-    ]
+    ],
+    "ok_bit": 1
    },
    "3": {
     "label": "Soil (raw ADC)",
@@ -399,7 +421,9 @@
     "bits": {
      "1": "air sensor",
      "2": "soil probe",
-     "4": "battery divider"
+     "4": "battery divider",
+     "8": "soil temp probe",
+     "16": "soil temp probe in place of the air sensor"
     }
    },
    "7": {
@@ -420,6 +444,19 @@
     "unit": "%",
     "chart": true,
     "zero_means": "no divider fitted"
+   },
+   "16": {
+    "label": "Soil temperature",
+    "unit": "°C",
+    "scale": 0.01,
+    "decimals": 1,
+    "chart": true,
+    "valid": [
+     -5500,
+     12500
+    ],
+    "note": "DS18B20 probe on pad 6; no reading when none is fitted",
+    "ok_bit": 8
    },
    "22": {
     "label": "Action",
@@ -453,11 +490,6 @@
    },
    "27": {
     "label": "Errors since boot"
-   },
-   "250": {
-    "label": "Hops to the hive",
-    "chart": true,
-    "note": "0 = heard directly; 1 = its report only reached the hive through a relay"
    },
    "40": {
     "label": "Water now (ml)",
@@ -583,6 +615,11 @@
     "label": "Since last automatic watering",
     "unit": "min",
     "note": "65535 = none yet"
+   },
+   "250": {
+    "label": "Hops to the hive",
+    "chart": true,
+    "note": "0 = heard directly; 1 = its report only reached the hive through a relay"
    }
   },
   "derived": {
@@ -614,7 +651,10 @@
   "ok_slot": {
    "slot": 6,
    "bits": {
-    "1": "air sensor not reading",
+    "1": {
+     "label": "air sensor not reading",
+     "unless": 16
+    },
     "2": "soil probe not reading"
    }
   },
@@ -887,7 +927,8 @@
     "valid": [
      -4000,
      8500
-    ]
+    ],
+    "ok_bit": 1
    },
    "2": {
     "label": "Humidity",
@@ -898,7 +939,8 @@
     "valid": [
      1,
      10000
-    ]
+    ],
+    "ok_bit": 1
    },
    "6": {
     "label": "Sensors ok",
@@ -953,12 +995,15 @@
     "note": "where the wind comes FROM, 0 = north; vector mean of the last 2 minutes",
     "enum": {
      "65535": "calm"
-    }
+    },
+    "rollup": "angle",
+    "ok_bit": 2
    },
    "14": {
     "label": "Rain gauge tips",
     "note": "running count, 0.2794 mm per tip; survives restarts, not power cuts",
-    "chart": false
+    "chart": false,
+    "rollup": "counter"
    },
    "15": {
     "label": "Rain, last hour",
@@ -969,7 +1014,8 @@
     "valid": [
      0,
      20000
-    ]
+    ],
+    "rollup": false
    },
    "17": {
     "label": "Vane voltage (raw)",
@@ -1023,6 +1069,55 @@
     "chart": true,
     "note": "0 = heard directly; 1 = its report only reached the hive through a relay"
    }
+  },
+  "ok_slot": {
+   "slot": 6,
+   "bits": {
+    "1": "air sensor not reading",
+    "2": "wind vane not reading"
+   }
+  },
+  "weather_upload": {
+   "tempAvg": [
+    1,
+    "avg",
+    0.01
+   ],
+   "tempMin": [
+    1,
+    "min",
+    0.01
+   ],
+   "tempMax": [
+    1,
+    "max",
+    0.01
+   ],
+   "humAvg": [
+    2,
+    "avg",
+    0.01
+   ],
+   "windAvg": [
+    11,
+    "avg",
+    0.1
+   ],
+   "gustMax": [
+    12,
+    "max",
+    0.1
+   ],
+   "windDir": [
+    13,
+    "avg",
+    1
+   ],
+   "rainMm": [
+    14,
+    "sum",
+    0.2794
+   ]
   }
  }
 }

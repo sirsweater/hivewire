@@ -46,6 +46,8 @@ import zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 sys.path.insert(0, HERE)
+from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # noqa: E402
+                    slot_modes_from_kind)
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
 # Stored like a slot so it charts and reports like everything else, but it is
@@ -982,8 +984,9 @@ class Uploader(threading.Thread):
     # needs. Only measurements the site stores; anything a node has not reported
     # is left out rather than sent as zero.
     FIELDS = [("airTemp", 1, 0.01, 2), ("airHum", 2, 0.01, 1), ("soilRaw", 3, 1, 0),
-              ("volts", 5, 0.001, 3), ("battery", 10, 1, 0), ("rssi", 9, 1, 0)]
-    MEASURED = ("soil", "soilRaw", "airTemp", "airHum", "battery", "volts")
+              ("volts", 5, 0.001, 3), ("battery", 10, 1, 0), ("rssi", 9, 1, 0),
+              ("soilTemp", 16, 0.01, 2)]
+    MEASURED = ("soil", "soilRaw", "soilTemp", "airTemp", "airHum", "battery", "volts")
 
     def samples_for(self, nid, since, now_ts, min_gap, max_n):
         """Replay stored readings into whole samples.
@@ -995,11 +998,23 @@ class Uploader(threading.Thread):
         and therefore have no row of their own."""
         state = self.app.store.state_at(nid, since)
         rows = self.app.store.rows_since(nid, since, now_ts)
+        # A sensor coming online (its sensors-ok bit set) makes the value left
+        # standing from before stale -- a weather node holds 0.00 C until its
+        # air sensor answers -- so it is dropped until the sensor's own first
+        # reading. Sensors-ok rows go first within a poll for that to work.
+        gates = self.app.slot_gates(nid)
+        ok_slots = {g[0] for g in gates.values()}
+        rows.sort(key=lambda r: (r[0], r[1] not in ok_slots))
         out, last_emit = [], None
         for ts, slot, value in rows:
             if last_emit is not None and ts - last_emit >= min_gap and state:
                 out.append((last_ts, dict(state)))
                 last_emit = last_ts
+            if slot in ok_slots:
+                gained = value & ~state.get(slot, 0)
+                for gs, (o, bit) in gates.items():
+                    if o == slot and gained & bit:
+                        state.pop(gs, None)
             state[slot] = value
             last_ts = ts
             if last_emit is None:
@@ -1013,7 +1028,8 @@ class Uploader(threading.Thread):
     def reading_from(self, nid, ts, slots, now_ts):
         r = {"age": max(0, now_ts - ts)}
         for name, slot, scale, dec in self.FIELDS:
-            if slot in slots and self.app.plausible(nid, slot, slots[slot]):
+            if (slot in slots and self.app.plausible(nid, slot, slots[slot])
+                    and self.app.believed(nid, slot, slots)):
                 v = slots[slot] * scale
                 r[name] = round(v, dec) if dec else int(v)
         if 3 in slots:
@@ -1025,6 +1041,61 @@ class Uploader(threading.Thread):
             if pct is not None:
                 r["soil"] = pct
         return r if any(k in r for k in self.MEASURED) else None
+
+    WX_MAX_HOURS = 48
+
+    def weather_for(self, nid, now_ts):
+        """A weather station's hours for /api/device/ingest (field map: kinds.json
+        "weather_upload"): every finished hour not yet sent, then the hour in
+        progress, which the site replaces on each upload. Returns (hours, next
+        mark) -- the mark only moves once the site has the finished hours.
+
+        The first time, it starts at the current hour: whatever the gauge
+        counted before -- a bench test, carrying it outside -- is not rain."""
+        fmap = self.app.kind_spec(nid).get("weather_upload")
+        ru = self.app.rollup
+        if not fmap or not ru:
+            return [], None
+        key = "wx_next:%d" % nid
+        start = ru.get_mark(key)
+        if start is None:
+            start = hour_floor(now_ts)
+            ru.set_mark(key, start)
+        done = ru.hour_done()
+        finished = ru.hours_by_ts(nid, start, done)
+        hours, nxt = [], start
+        for h in sorted(finished)[: self.WX_MAX_HOURS]:
+            row = self.wx_row(finished[h], fmap, h, now_ts)
+            if row:
+                hours.append(row)
+            nxt = h + 3600
+        if done > nxt and len(finished) < self.WX_MAX_HOURS:
+            nxt = done                       # empty hours (station off) are done too
+        ph, part = ru.partial_hour(nid, now_ts)
+        if ph >= done and ph >= start:
+            row = self.wx_row(part, fmap, ph, now_ts)
+            if row:
+                row["partial"] = True
+                hours.append(row)
+        return hours, nxt
+
+    @staticmethod
+    def wx_row(slots, fmap, h, now_ts):
+        stat = {"avg": 2, "min": 3, "max": 4, "sum": 5}
+        row = {"age": max(0, now_ts - h)}
+        secs = 0
+        for name, (slot, which, scale) in fmap.items():
+            r = slots.get(slot)
+            if not r:
+                continue
+            secs = max(secs, r[0] or 0)
+            v = r[stat[which]]
+            if v is not None:
+                row[name] = round(v * scale, 2)
+        if len(row) == 1:
+            return None
+        row["secs"] = secs
+        return row
 
     def build_nodes(self, now_ts=None):
         """The ingest body's `nodes`, plus the newest timestamp per node so a
@@ -1043,15 +1114,20 @@ class Uploader(threading.Thread):
                 r = self.reading_from(nid, ts, slots, now_ts)
                 if r:
                     readings.append(r)
-            if not readings:
+            weather, wx_next = self.weather_for(nid, now_ts)
+            if not readings and not weather:
                 continue
             meta = self.app.cfg.node(nid)
             node = {"ieee": ieee, "readings": readings}
+            if weather:
+                node["weather"] = weather
+                marks[("wx", nid)] = wx_next
             if meta.get("name"):
                 node["name"] = meta["name"][:60]
             node["model"] = (meta.get("auto_kind") or meta.get("kind") or "Hivewire")[:40]
             nodes.append(node)
-            marks[nid] = samples[-1][0]
+            if samples:
+                marks[nid] = samples[-1][0]
         return nodes, marks
 
     # --- sending -----------------------------------------------------------
@@ -1104,11 +1180,15 @@ class Uploader(threading.Thread):
             self.app.cfg.save()
         body = {"seq": g["retry_seq"], "fw": self.FW, "nodes": nodes}
         res = self.post("/api/device/ingest", body, g["token"])
-        res["sent"] = sum(len(n["readings"]) for n in nodes)
+        res["sent"] = sum(len(n["readings"]) for n in nodes)  # readings only
+        res["weather_hours"] = sum(len(n.get("weather", [])) for n in nodes)
         res["nodes"] = len(nodes)
         if res.get("ok"):
             for nid, ts in marks.items():
-                self.app.store.set_upload_mark(nid, ts)
+                if isinstance(nid, tuple):
+                    self.app.rollup.set_mark("wx_next:%d" % nid[1], ts)
+                else:
+                    self.app.store.set_upload_mark(nid, ts)
             g["retry_seq"] = None
             self.app.cfg.save()
             # The site can retune the interval without anyone reflashing anything.
@@ -1137,8 +1217,9 @@ class Uploader(threading.Thread):
                 extra += ", clock %+.0f s vs site" % res["clock_skew_s"]
         else:
             extra = " -- %s" % (res.get("error") or res.get("status"))
-        self.app.store.event("upload", "%s %d reading(s) across %d node(s)%s" % (
-            "sent" if res.get("ok") else "FAILED sending", res["sent"], res["nodes"], extra))
+        wx = ", %d weather hour(s)" % res["weather_hours"] if res["weather_hours"] else ""
+        self.app.store.event("upload", "%s %d reading(s)%s across %d node(s)%s" % (
+            "sent" if res.get("ok") else "FAILED sending", res["sent"], wx, res["nodes"], extra))
         if res.get("ok"):
             self.app.problems.clear(603)
         else:
@@ -1198,6 +1279,10 @@ class App:
             self.poller.plausible = self.plausible
             self.alerts = HiveAlerts(self)
             self.poller.alerts = self.alerts
+        # Hourly and daily summaries, and the 30-day raw cleanup (rollup.py).
+        self.rollup = None if self.flash_only else Rollup(
+            self.store, self.slot_modes, self.plausible,
+            log=lambda msg: self.store.event("system", msg), slot_gates=self.slot_gates)
         if shutil.which("vcgencmd") and not args.fake:
             threading.Thread(target=self.watch_power, daemon=True).start()
         # Signed-in sessions survive a restart. They used to live only in
@@ -1261,6 +1346,43 @@ class App:
         spec = self.kinds.get(self.kind_of(nid, rec["slots"]), {})
         return not (spec.get("slots", {}).get(str(slot), {}).get("action"))
 
+    def node_kind(self, nid):
+        """The node's kind without needing the page open. kind_of() learns a
+        kind from live slots, but only ran when someone loaded /api/state, so
+        a node nobody had looked at yet -- a new weather station -- had no kind,
+        and with it no summaries, no "valid" ranges and no weather upload."""
+        meta = self.cfg.node(nid)
+        for k in (meta.get("kind"), meta.get("auto_kind")):
+            if k in self.kinds:
+                return k
+        cache = self.__dict__.setdefault("_kind_tries", {})
+        t, k = cache.get(nid, (0, None))
+        if time.time() - t < 300:
+            return k
+        rec = ((self.poller.snapshot or {}).get("nodes") or {}).get(nid) if self.poller else None
+        slots = rec["slots"] if rec else self.store.latest(nid)
+        k = self.kind_of(nid, slots) if slots else None
+        cache[nid] = (time.time(), k)
+        return k
+
+    def slot_modes(self, nid):
+        """{slot: "mean" | "counter" | "angle"} worth summarising for a node,
+        from its kind in kinds.json (rollup.slot_modes_from_kind)."""
+        return slot_modes_from_kind(self.kind_spec(nid))
+
+    def kind_spec(self, nid):
+        k = self.node_kind(nid)
+        return self.kinds.get(k, {}) if k else {}
+
+    def slot_gates(self, nid):
+        return slot_gates_from_kind(self.kind_spec(nid))
+
+    def believed(self, nid, slot, slots):
+        """False when the node's own sensors-ok bit says this slot's sensor is
+        not reading -- a weather node with no air sensor sends 0.00 C."""
+        g = self.slot_gates(nid).get(slot)
+        return g is None or g[0] not in slots or bool(slots[g[0]] & g[1])
+
     def plausible(self, nid, slot, value):
         """Whether a stored value is one the sensor could really have measured.
         kinds.json gives a slot `"valid": [min, max]` in raw units. A failed
@@ -1268,9 +1390,7 @@ class App:
         stored, charted and uploaded as real; the firmware now refuses such a
         read, and this keeps any already stored -- or sent by a node not yet
         updated -- out of charts, reports and uploads without deleting them."""
-        meta = self.cfg.node(nid)
-        kind = meta.get("kind") or meta.get("auto_kind")
-        rng = (self.kinds.get(kind, {}).get("slots", {}).get(str(slot), {}) or {}).get("valid")
+        rng = (self.kind_spec(nid).get("slots", {}).get(str(slot), {}) or {}).get("valid")
         if not rng or value is None:
             return True
         return rng[0] <= value <= rng[1]
@@ -1422,6 +1542,12 @@ class App:
                 if okslot and okslot["slot"] in rec["slots"]:
                     v = rec["slots"][okslot["slot"]]
                     for bit, label in okslot["bits"].items():
+                        # {"label", "unless": bit}: not a fault when that other
+                        # bit says the sensor was deliberately left out.
+                        if isinstance(label, dict):
+                            if v & int(label.get("unless", 0)):
+                                continue
+                            label = label["label"]
                         if not v & int(bit):
                             warnings.append(label)
                 # One rule or several: {slot, value, label, ignore, unit}.
@@ -1712,6 +1838,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             t1 = int(q.get("to") or now())
             t0 = int(q.get("from") or t1 - 86400)
             return self.send_json({"points": self.series(node, slot, t0, t1), "from": t0, "to": t1})
+        if path == "/api/rollup":
+            # Hourly or daily summaries: {ts, secs, n, avg, min, max, sum} in
+            # the slot's raw units (scale with kinds.json).
+            node, slot = int(q["node"]), int(q["slot"])
+            res = "day" if q.get("res") == "day" else "hour"
+            t1 = int(q.get("to") or now())
+            t0 = int(q.get("from") or t1 - (90 if res == "day" else 7) * 86400)
+            keys = ("ts", "secs", "n", "avg", "min", "max", "sum")
+            rows = [dict(zip(keys, r)) for r in app.rollup.series(node, slot, t0, t1, res)]
+            return self.send_json({"rows": rows, "res": res, "from": t0, "to": t1,
+                                   "raw_cutoff": app.rollup.raw_cutoff()})
         if path == "/api/report":
             return self.send_json(self.report(int(q["node"]), q["slot"],
                                               int(q["from"]), int(q["to"])))
@@ -1837,11 +1974,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return [(t, round(v * sc / 1000.0, 2) if v else None) for t, v in raw]
             return []
         s = int(slot)
+        # Raw rows older than the cleanup cutoff are gone; their hourly means
+        # stand in for them, so a long chart still reaches back.
+        cut = app.rollup.raw_cutoff() if app.rollup else 0
+        old = []
+        if t0 < cut:
+            old = [(t, a) for t, _secs, _n, a, _lo, _hi, _sum in
+                   app.rollup.series(node, s, t0, min(cut, t1)) if a is not None]
+            t0 = cut
+        if t0 >= t1:
+            return old
         pts = [(t, v) for t, v in app.store.series(node, s, t0, t1) if app.plausible(node, s, v)]
         before = app.store.last_before(node, s, t0)
         if before and app.plausible(node, s, before[1]):
             pts.insert(0, (t0, before[1]))
-        return pts
+        return old + pts
 
     def known_slots(self, node):
         snap = self.app.poller.snapshot
@@ -1860,6 +2007,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             days.setdefault(day, []).append(v)
         rows = [{"day": d, "min": min(v), "max": max(v), "avg": sum(v) / len(v), "n": len(v)}
                 for d, v in sorted(days.items())]
+        # Days before the raw cutoff only have hourly means in the points;
+        # their real low and high are in the daily summaries.
+        cut = self.app.rollup.raw_cutoff() if self.app.rollup else 0
+        if t0 < cut and not slot.startswith("d:"):
+            daily = {time.strftime("%Y-%m-%d", time.localtime(t)): (a, lo, hi, n)
+                     for t, _secs, n, a, lo, hi, _sum in
+                     self.app.rollup.series(node, int(slot), t0, cut, res="day")}
+            for r in rows:
+                d = daily.get(r["day"])
+                if d and d[0] is not None:
+                    r.update({"avg": d[0], "min": d[1], "max": d[2], "n": d[3]})
         vals = [v for _, v in pts if v is not None]
         summary = ({"min": min(vals), "max": max(vals), "avg": sum(vals) / len(vals), "n": len(vals)}
                    if vals else None)
@@ -2122,6 +2280,7 @@ def main():
     if not app.flash_only:
         app.poller.start()
         app.uploader.start()
+        RollupThread(app.rollup).start()
     srv = Server((args.listen, args.http_port), Handler)
     print("hive admin on http://%s:%d/ (%s)" % (args.listen, args.http_port,
           "flash only" if app.flash_only else "simulated" if args.fake else args.port), flush=True)
