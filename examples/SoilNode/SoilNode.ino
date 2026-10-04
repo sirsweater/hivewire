@@ -14,6 +14,12 @@
  *   Soil probe VCC -> GPIO18 (switched; see SOIL_PWR_PIN), GND -> GND,
  *              AOUT -> GPIO0
  *   Battery    LiPo+ -[1M]-+-[1M]- GND, midpoint -> GPIO1   (optional)
+ *   DS18B20    soil temperature probe (optional): VCC -> 3V3, GND -> GND,
+ *              DATA -> GPIO6, with 4.7k from DATA to 3V3 (most adapter
+ *              boards carry it). Not fitted: slot 16 reports "no reading".
+ *              Replacing the AHT20 instead? Reuse its wires: DATA on its
+ *              SDA wire, GPIO20 or GPIO22 (19/23 unused) -- found there when
+ *              no AHT20 answers.
  *
  * Always on, unlike a Zigbee end device. A swarm node has to hear the hive's
  * beacons to stay converged and to receive firmware, so it cannot deep-sleep
@@ -46,6 +52,7 @@
 #include <HivewireErrors.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <driver/gpio.h>
 
 #ifndef HW_WITH_PUMP
 #define HW_WITH_PUMP 0
@@ -99,6 +106,17 @@ static uint8_t NODE_ID = HW_NODE_ID;
 #ifndef SOIL_MAX_SPREAD
 #define SOIL_MAX_SPREAD 250
 #endif
+// DS18B20 soil temperature probe, one per node, on its own 1-Wire bus. GPIO6
+// is free on both families (WaterNode's pump and float are 4 and 5). -1 to
+// leave the pin alone.
+#ifndef SOIL_TEMP_PIN
+#define SOIL_TEMP_PIN 6
+#endif
+// ...or on the AHT20's old SDA wire, when the probe replaced the air sensor and
+// reuses its wiring: either SDA pad, since boards were built both ways (see
+// I2C_SDA_ALT). Only tried when no AHT20 answered -- the two cannot share a
+// line -- and the AHT20 is never looked for again once the probe is found there.
+static const int SOIL_TEMP_ALT_PINS[] = {I2C_SDA_PIN, I2C_SDA_ALT};
 
 // ---- soil calibration -------------------------------------------------------
 // Placeholders until measured on this probe: note the raw value (slot 3) in
@@ -148,8 +166,15 @@ static uint16_t soilRaw   = 0;       // ADC counts, 0-4095
 static uint8_t  soilPct   = 0;
 static uint16_t battMv    = 0;       // 0 = no divider fitted / not measured
 static uint8_t  battPct   = 0;       // from the LiPo curve, not a linear scale
-static uint8_t  sensorOk  = 0;       // bit0 AHT20, bit1 soil
+// bit0 AHT20, bit1 soil, bit2 battery, bit3 soil temp, bit4 soil temp probe
+// fitted IN PLACE of the AHT20 (so its absence is not a fault)
+static uint8_t  sensorOk  = 0;
 static uint16_t ahtFails  = 0;
+// INT16_MIN until the probe has given a good reading, and again whenever it
+// stops: outside every slot's "valid" range, so it is never charted as 0 C.
+static int16_t  soilTempCenti = INT16_MIN;
+static bool     soilTempSeen  = false;
+static uint16_t soilTempFails = 0;
 static uint16_t soilBadReads = 0;
 static uint32_t bootCount = 0;
 static uint32_t runningCrc = 0;
@@ -205,14 +230,176 @@ static bool aht20Read(float &tC, float &rh) {
   return true;
 }
 
+// Whether it is missing is decided in setup(): a board whose AHT20 was swapped
+// for a soil temperature probe is not missing anything.
 static bool ahtBegin() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   if (aht20Init()) return true;
   Wire.end();
   Wire.begin(I2C_SDA_ALT, I2C_SCL_ALT);
   if (aht20Init()) { node.log("aht20 on alt pins %d/%d", I2C_SDA_ALT, I2C_SCL_ALT); return true; }
-  hwErr(node, HW_E_PERIPHERAL_MISSING, 1, "aht20 not found");   // subject: slot 1, air temp
+  Wire.end();
   return false;
+}
+
+// ---- DS18B20: minimal 1-Wire driver, one probe, no library -----------------
+//
+// The pin is open drain: driving it "high" lets go and the pull-up raises the
+// line. Each time slot is tens of microseconds and must not be stretched by
+// an interrupt (a late sample reads the wrong bit), so the timed part of each
+// slot runs in a critical section -- never longer than ~70 us at a time.
+#if SOIL_TEMP_PIN >= 0
+static portMUX_TYPE owMux = portMUX_INITIALIZER_UNLOCKED;
+static gpio_num_t OW = (gpio_num_t)SOIL_TEMP_PIN;
+
+static void owSetup(int pin) {
+  OW = (gpio_num_t)pin;
+  gpio_config_t c = {};
+  c.pin_bit_mask = 1ULL << pin;
+  c.mode = GPIO_MODE_INPUT_OUTPUT_OD;
+  c.pull_up_en = GPIO_PULLUP_ENABLE;      // weak backup only; the 4.7k is what works
+  gpio_config(&c);
+  gpio_set_level(OW, 1);
+  delayMicroseconds(200);                 // let the line rise before the first reset
+}
+
+// True when a device answered the reset with a presence pulse.
+static bool owReset() {
+  if (!gpio_get_level(OW)) return false;  // line held low: shorted, or no pull-up
+  gpio_set_level(OW, 0);
+  delayMicroseconds(480);
+  portENTER_CRITICAL(&owMux);
+  gpio_set_level(OW, 1);
+  delayMicroseconds(70);
+  bool present = !gpio_get_level(OW);
+  portEXIT_CRITICAL(&owMux);
+  delayMicroseconds(410);
+  return present;
+}
+
+static void owWriteBit(bool b) {
+  portENTER_CRITICAL(&owMux);
+  gpio_set_level(OW, 0);
+  delayMicroseconds(b ? 6 : 60);
+  gpio_set_level(OW, 1);
+  portEXIT_CRITICAL(&owMux);
+  delayMicroseconds(b ? 64 : 10);
+}
+
+static bool owReadBit() {
+  portENTER_CRITICAL(&owMux);
+  gpio_set_level(OW, 0);
+  delayMicroseconds(3);
+  gpio_set_level(OW, 1);
+  delayMicroseconds(10);
+  bool b = gpio_get_level(OW);
+  portEXIT_CRITICAL(&owMux);
+  delayMicroseconds(53);
+  return b;
+}
+
+static void owWrite(uint8_t v) { for (int i = 0; i < 8; i++) owWriteBit((v >> i) & 1); }
+static uint8_t owRead() {
+  uint8_t v = 0;
+  for (int i = 0; i < 8; i++) if (owReadBit()) v |= 1 << i;
+  return v;
+}
+
+// Dallas/Maxim CRC-8 (x^8 + x^5 + x^4 + 1, reflected), as the scratchpad's
+// ninth byte carries it.
+static uint8_t owCrc(const uint8_t *p, int n) {
+  uint8_t c = 0;
+  while (n--) {
+    uint8_t b = *p++;
+    for (int k = 0; k < 8; k++) {
+      uint8_t mix = (c ^ b) & 1;
+      c >>= 1;
+      if (mix) c ^= 0x8C;
+      b >>= 1;
+    }
+  }
+  return c;
+}
+
+// SKIP ROM (0xCC) addresses whatever is on the bus: fine with one probe.
+static bool dsStartConversion() {
+  if (!owReset()) return false;
+  owWrite(0xCC);
+  owWrite(0x44);
+  return true;
+}
+
+static bool dsReadCenti(int16_t &centi) {
+  if (!owReset()) return false;
+  owWrite(0xCC);
+  owWrite(0xBE);
+  uint8_t s[9];
+  for (int i = 0; i < 9; i++) s[i] = owRead();
+  // A line that never goes low reads all ones; all ones also passes no CRC
+  // check worth having, so reject it outright.
+  bool allOnes = true;
+  for (int i = 0; i < 9; i++) if (s[i] != 0xFF) allOnes = false;
+  if (allOnes || owCrc(s, 8) != s[8]) return false;
+  int16_t raw = (int16_t)((s[1] << 8) | s[0]);       // 1/16 C at 12-bit
+  // 85.0 C is the power-on value, read before any conversion finished: a
+  // probe that browned out mid-read, not soil at 85 C.
+  if (raw == 0x0550) return false;
+  if (raw < -55 * 16 || raw > 125 * 16) return false;
+  centi = (int16_t)((raw * 100) / 16);
+  return true;
+}
+#endif
+
+// Which hole the probe is on: GPIO6, else -- only when no AHT20 answered --
+// the AHT20's old SDA wire. Left on GPIO6 when neither answers, so a probe
+// fitted there later is picked up without a restart.
+static bool soilTempOnAlt = false;
+static int  soilTempPin   = -1;           // where a probe answered at boot, -1 none
+static void soilTempFind() {
+#if SOIL_TEMP_PIN >= 0
+  owSetup(SOIL_TEMP_PIN);
+  if (owReset()) { soilTempPin = SOIL_TEMP_PIN; return; }
+  if (!ahtFound) {
+    for (int pin : SOIL_TEMP_ALT_PINS) {
+      owSetup(pin);
+      if (owReset()) {
+        soilTempPin = pin;
+        soilTempOnAlt = true;
+        return;
+      }
+      gpio_reset_pin((gpio_num_t)pin);
+    }
+  }
+  owSetup(SOIL_TEMP_PIN);
+#endif
+}
+
+// Called every READ_EVERY_MS: collects the conversion the last call started,
+// then starts the next. A conversion takes up to 750 ms, so this never waits
+// for one -- the reading is at most one interval old.
+static void readSoilTemp() {
+#if SOIL_TEMP_PIN >= 0
+  static bool pending = false;
+  int16_t c;
+  bool ok = pending && dsReadCenti(c);
+  pending = dsStartConversion();
+  if (ok) {
+    soilTempCenti = c;
+    sensorOk |= 8;
+    if (!soilTempSeen) node.log("soil temp probe found");
+    soilTempSeen = true;
+  } else if (pending && !soilTempSeen) {
+    // First call after boot, or a probe just plugged in: nothing to collect
+    // yet, and nothing wrong.
+  } else {
+    soilTempCenti = INT16_MIN;
+    sensorOk &= ~8;
+    // A board without a probe is normal and says nothing; one that HAD a
+    // probe and lost it is a fault worth raising.
+    if (soilTempSeen && ++soilTempFails % 10 == 1)
+      hwErr(node, HW_E_PERIPHERAL_READ_FAILED, 16, "soil temp read failed (%u)", soilTempFails);
+  }
+#endif
 }
 
 // --- sampling helpers --------------------------------------------------------
@@ -330,7 +517,7 @@ static void readSensors() {
   float tC, rh;
   // Retry the bus setup now and then: a sensor plugged in, or reseated, after
   // boot should start reporting without a trip to reset the board.
-  if (!ahtFound) {
+  if (!ahtFound && !soilTempOnAlt) {     // the probe owns the AHT20's wire now
     static uint32_t lastProbe = 0;
     if (!lastProbe || millis() - lastProbe > 300000) { lastProbe = millis(); ahtFound = ahtBegin(); }
   }
@@ -367,6 +554,9 @@ static void readSensors() {
   float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilRaw) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
   soilPct = pct < 0 ? 0 : pct > 100 ? 100 : (uint8_t)lroundf(pct);
 
+  readSoilTemp();
+  if (soilTempOnAlt) sensorOk |= 16; else sensorOk &= ~16;
+
   // 0 means "no divider on this board", not "flat" -- see batteryFitted().
   if (battFitted) {
     uint32_t mv = medianMilliVolts(BATT_ADC_PIN) * 2;     // 1M/1M divider halves it
@@ -389,6 +579,7 @@ static void sTemp(void *o)     { memcpy(o, &tempCenti, 2); }
 static void sHum(void *o)      { memcpy(o, &humCenti, 2); }
 static void sSoilRaw(void *o)  { memcpy(o, &soilRaw, 2); }
 static void sSoilPct(void *o)  { memcpy(o, &soilPct, 1); }
+static void sSoilTemp(void *o) { memcpy(o, &soilTempCenti, 2); }
 static void sBatt(void *o)     { memcpy(o, &battMv, 2); }
 static void sBattPct(void *o)  { memcpy(o, &battPct, 1); }
 static void sOk(void *o)       { memcpy(o, &sensorOk, 1); }
@@ -454,6 +645,9 @@ static const HwSlotDef SLOTS[] = {
   {  2, HW_U16, HW_DIR_OUT,     30000, 900000,   200,   0,   0, sHum,       nullptr },  // 2 %RH
   {  3, HW_U16, HW_DIR_OUT,     30000, 900000,    60,   0,   0, sSoilRaw,   nullptr },
   {  4, HW_U8,  HW_DIR_OUT,     30000, 900000,     3,   0,   0, sSoilPct,   nullptr },
+  // 16, not 11: the admin's g4rden upload maps slot numbers to fields for
+  // every kind, and 11-15 are wind on a WeatherNode.
+  { 16, HW_I16, HW_DIR_OUT,     30000, 900000,    25,   0,   0, sSoilTemp,  nullptr },  // 0.25 C
   {  5, HW_U16, HW_DIR_OUT,     60000, 900000,    50,   0,   0, sBatt,      nullptr },
   { 10, HW_U8,  HW_DIR_OUT,     60000, 900000,     5,   0,   0, sBattPct,   nullptr },
   {  6, HW_U8,  HW_DIR_OUT,     30000, 900000,     1,   0,   0, sOk,        nullptr },
@@ -552,6 +746,9 @@ void setup() {
 #endif
 
   ahtFound = ahtBegin();
+  soilTempFind();
+  if (!ahtFound && !soilTempOnAlt)
+    hwErr(node, HW_E_PERIPHERAL_MISSING, 1, "aht20 not found");   // subject: slot 1, air temp
   uint16_t bl = 0, bh = 0, cl = 0, ch = 0;
   bool battLooksDriven = pinDriven(BATT_ADC_PIN, &bl, &bh);
   bool ctrl = pinDriven(BATT_CONTROL_PIN, &cl, &ch);
@@ -575,6 +772,16 @@ void setup() {
   readSensors();
   Serial.printf("SoilNode %u up, boot #%lu, aht20=%d\n", NODE_ID,
                 (unsigned long)bootCount, ahtFound);
+  // readSensors() above only started the first soil temperature conversion;
+  // collect it now rather than a whole interval later.
+  delay(800);
+  readSoilTemp();
+  if (soilTempPin >= 0)
+    Serial.printf("soil temp probe on GPIO%d: %s\n", soilTempPin,
+                  (sensorOk & 8) ? "reading" : "answers but no reading yet");
+  else
+    Serial.printf("soil temp probe: none\n");
+  if (soilTempOnAlt) node.log("soil temp probe on GPIO%d (in place of the aht20)", soilTempPin);
 }
 
 void loop() {
@@ -664,8 +871,11 @@ void loop() {
   if (!fw.active() && !fwTx.active() && millis() - lastRead >= READ_EVERY_MS) {
     lastRead = millis();
     readSensors();
-    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) batt=%s ok=%u nb=%u ep=%lu\n",
-                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct,
+    char st[12];
+    if (soilTempCenti == INT16_MIN) snprintf(st, sizeof(st), "none");
+    else snprintf(st, sizeof(st), "%.2fC", soilTempCenti / 100.0f);
+    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) soilT=%s batt=%s ok=%u nb=%u ep=%lu\n",
+                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct, st,
                   battFitted ? battStr(battMv, battPct) : "none fitted",
                   sensorOk, node.neighbors(), (unsigned long)node.epoch());
   }
