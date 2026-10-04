@@ -182,7 +182,15 @@ static bool airBegin() {
     if (airKind != AIR_NONE) node.log("air sensor on alt pins %d/%d", I2C_SDA_ALT, I2C_SCL_ALT);
   }
   if (airKind == AIR_NONE) {
-    hwErr(node, HW_E_PERIPHERAL_MISSING, 1, "no air sensor (sht4x/sht3x/aht20)");
+    // Once per boot. The bus is re-probed every 5 minutes so a sensor plugged
+    // in later is picked up, but each failed probe raising the error again
+    // would bump the error count -- and every bump is a hive alert to the
+    // owner's phone, for a sensor that simply is not fitted yet.
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      hwErr(node, HW_E_PERIPHERAL_MISSING, 1, "no air sensor (sht4x/sht3x/aht20)");
+    }
     return false;
   }
   node.log("air sensor %s at 0x%02x, i2c %u Hz", AIR_NAMES[airKind], airAddr, (unsigned)I2C_HZ);
