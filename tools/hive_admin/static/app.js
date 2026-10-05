@@ -220,6 +220,8 @@ views.node = async (el, id) => {
           <div id="auto-status" class="muted"></div>
           <form id="auto-form" class="stack">
             <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="au-on"> Water automatically</label>
+            <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="au-plant"> Follow the plant linked on g4rden <span class="muted small" id="au-band"></span></label>
+            <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="au-learn"> Learn the amount from each watering</label>
             <div class="row">
               <label class="f">Water when moisture is below (%)<input id="au-pct" type="number" min="0" max="100" step="1" style="width:110px" required></label>
               <label class="f">Amount each time (ml)<input id="au-ml" type="number" min="1" max="5000" style="width:110px" required></label>
@@ -228,9 +230,13 @@ views.node = async (el, id) => {
               <label class="f">At least this long between (hours)<input id="au-gap" type="number" min="0.2" max="720" step="0.5" style="width:110px" required></label>
               <label class="f">Never more than per 24 h (ml)<input id="au-day" type="number" min="1" max="20000" style="width:110px"></label>
             </div>
+            <div class="row">
+              <label class="f">Fill to (%, learning)<input id="au-fill" type="number" min="1" max="100" step="1" style="width:110px" placeholder="middle of range"></label>
+            </div>
+            <div id="au-learned" class="muted small"></div>
             <div class="row"><button class="primary">Save</button></div>
           </form>
-          <p class="muted small">The node decides on its own, even when the Pi is off. It waters only after two dry readings a minute apart, never sooner than the gap, never past the daily maximum, and switches itself off if a watering does not show up in the soil.</p>
+          <p class="muted small">The node decides on its own, even when the Pi is off. It waters only after two dry readings a minute apart, never sooner than the gap, never past the daily maximum, and switches itself off if a watering does not show up in the soil. Following the plant uses its moisture range on g4rden (wetter for seeds and seedlings): water below the low end, fill towards the middle. Learning adjusts only the amount, after two automatic waterings, by at most 40% at a time and never past the per-dose cap.</p>
           <div id="auto-reply" class="mono muted small"></div></div>` : ""}
         <div class="card"><h2>Actions</h2><div class="row" id="actions"></div>
           <form id="setform" class="row" style="margin-top:14px">
@@ -260,13 +266,30 @@ views.node = async (el, id) => {
       (cal ? "" : `<div class="warn-line">⚠ Calibrate this probe first (Settings: Use as dry, Use as wet). Automatic watering needs it.</div>`);
     $("#au-on").checked = !!s[49];
     if (cal && s[50]) $("#au-pct").value = toPct(s[50]);
+    try {
+      const wl = await api(`/api/waterlearn?node=${nid}`);
+      const a = wl.adaptive || {}, band = wl.plant_band, rec = wl.recommendation || {}, an = rec.analysis || {};
+      $("#au-plant").checked = a.from_plant !== false;
+      $("#au-learn").checked = a.on !== false;
+      if (a.fill_pct != null) $("#au-fill").value = a.fill_pct;
+      $("#au-band").textContent = band ? `(${band[0]}-${band[1]}%: water below ${band[0]}%)` : "(no plant linked yet)";
+      const usePlant = () => { $("#au-pct").disabled = $("#au-plant").checked && !!band; };
+      $("#au-plant").onchange = usePlant; usePlant();
+      const bits = [];
+      if (an.gain) bits.push(`soil rises ~${(an.gain * 100).toFixed(1)}% per 100 ml`);
+      if (an.dry_per_h) bits.push(`dries ~${an.dry_per_h.toFixed(1)}% an hour`);
+      if (rec.hours_between) bits.push(`about ${rec.hours_between} h between waterings`);
+      $("#au-learned").textContent = (bits.length ? "Learned: " + bits.join(" · ") + ". " : "") + (rec.why ? rec.why[0].toUpperCase() + rec.why.slice(1) + "." : "");
+    } catch (err) { $("#au-learned").textContent = ""; }
     if (s[51]) $("#au-ml").value = s[51];
     $("#au-gap").value = s[52] ? +(s[52] / 60).toFixed(1) : 12;
     if (s[44]) $("#au-day").value = s[44];
     $("#auto-form").onsubmit = async (e) => {
       e.preventDefault();
-      const body = { node: nid, enable: $("#au-on").checked, below_pct: +$("#au-pct").value,
-                     ml: +$("#au-ml").value, gap_hours: +$("#au-gap").value, day_ml: $("#au-day").value };
+      const fromPlant = $("#au-plant").checked && $("#au-pct").disabled;
+      const body = { node: nid, enable: $("#au-on").checked, below_pct: fromPlant ? "" : +$("#au-pct").value,
+                     ml: +$("#au-ml").value, gap_hours: +$("#au-gap").value, day_ml: $("#au-day").value,
+                     from_plant: $("#au-plant").checked, adaptive: $("#au-learn").checked, fill_pct: $("#au-fill").value };
       try {
         const r = await api("/api/autowater", body);
         $("#auto-reply").textContent = (r.ok ? "Sent; the node confirms each setting within a minute or two. " : "Some settings were not acknowledged: ") + r.replies.join(" · ");

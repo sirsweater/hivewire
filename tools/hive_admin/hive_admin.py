@@ -48,6 +48,7 @@ STATIC = os.path.join(HERE, "static")
 sys.path.insert(0, HERE)
 from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # noqa: E402
                     slot_modes_from_kind)
+from waterlearn import LearnThread, WaterLearner  # noqa: E402
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
 # Stored like a slot so it charts and reports like everything else, but it is
@@ -1199,6 +1200,10 @@ class Uploader(threading.Thread):
                 self.app.cfg.save()
                 res["interval_changed"] = int(iv)
             self.last_success = res
+            try:
+                self.app.note_plant_bands(((res.get("json") or {}).get("nodes")) or [])
+            except Exception as e:          # a range is a nicety; never fail the upload over it
+                print("plant ranges: %s" % e, flush=True)
         elif res.get("status") == 401:
             res["error"] = ("g4rden rejected the token (401). The gateway was probably "
                             "removed on the site; pair again with a fresh claim code.")
@@ -1283,6 +1288,11 @@ class App:
         self.rollup = None if self.flash_only else Rollup(
             self.store, self.slot_modes, self.plausible,
             log=lambda msg: self.store.event("system", msg), slot_gates=self.slot_gates)
+        # Automatic watering that follows the linked plant and learns the amount
+        # (waterlearn.py). On by default for every water node; see adaptive().
+        self.learner = None if self.flash_only else WaterLearner(
+            self.store, self.calibration, self.adaptive_node,
+            log=lambda msg: self.store.event("command", msg))
         if shutil.which("vcgencmd") and not args.fake:
             threading.Thread(target=self.watch_power, daemon=True).start()
         # Signed-in sessions survive a restart. They used to live only in
@@ -1364,6 +1374,63 @@ class App:
         k = self.kind_of(nid, slots) if slots else None
         cache[nid] = (time.time(), k)
         return k
+
+    # Defaults for a water node nobody has configured: follow the linked
+    # plant's range and learn the amount. "user_off" is set when the owner
+    # saves automatic watering switched OFF, and is never overridden.
+    ADAPTIVE_DEFAULT = {"on": True, "from_plant": True}
+
+    def adaptive_node(self, nid):
+        """The node's config with its adaptive-watering settings filled in."""
+        n = dict(self.cfg.node(nid))
+        a = dict(self.ADAPTIVE_DEFAULT)
+        a.update(n.get("adaptive") or {})
+        n["adaptive"] = a
+        return n
+
+    def note_plant_bands(self, nodes):
+        """g4rden's ingest reply says which plant range each node is linked to
+        (functions/lib/devices.js plantBand). Keep it in the node's config, where
+        waterlearn.py reads it; only a real change is written."""
+        devices = self.cfg.data.get("g4rden", {}).get("devices", {})
+        by_ieee = {str(v).lower(): int(k) for k, v in devices.items() if str(k).isdigit()}
+        for n in nodes or []:
+            nid = by_ieee.get(str(n.get("ieee", "")).lower())
+            if nid is None or "plantLinked" not in n:
+                continue
+            lo, hi = n.get("moistMin"), n.get("moistMax")
+            band = [lo, hi] if n.get("plantLinked") and lo is not None and hi is not None else None
+            if self.cfg.node(nid).get("plant_band") != band:
+                self.cfg.set_node(nid, {"plant_band": band})
+                self.store.event("config", "node %d plant range from g4rden: %s" % (
+                    nid, "%s-%s%%" % (lo, hi) if band else "none (no plant linked)"))
+
+    def auto_defaults(self, nid, slots):
+        """Switch automatic watering on for a water node that is ready for it
+        and nobody switched off: soil probe calibrated, pump flow measured.
+        Water below the plant's low end (or 40%), 100 ml, 6 h apart, at most
+        600 ml a day. Returns the writes made, for the log."""
+        conf = self.adaptive_node(nid)["adaptive"]
+        if conf.get("user_off") or slots.get(49) or not slots.get(42):
+            return []
+        dry, wet, calibrated = self.calibration(nid)
+        if not calibrated:
+            return []
+        band = self.cfg.node(nid).get("plant_band") if conf.get("from_plant") else None
+        below_pct = band[0] if band else 40
+        below_raw = max(1, min(4095, int(round(dry - below_pct / 100.0 * (dry - wet)))))
+        writes = [(51, slots.get(51) or 100), (52, slots.get(52) if slots.get(52) and slots.get(52) != 720 else 360),
+                  (50, below_raw), (44, min(slots.get(44) or 600, 1500)), (49, 1)]
+        done = []
+        for slot, value in writes:
+            ack = self.gw.command("set %d %d %d" % (nid, slot, value), r"ACK set|ERR")
+            if not (ack and ack.startswith("ACK")):
+                return done
+            self.poller.track_write(nid, slot, value)
+            done.append((slot, value))
+        self.store.event("command", "node %d automatic watering switched on by default: below %s%% (raw %d)%s" % (
+            nid, below_pct, below_raw, " from its plant" if band else ""))
+        return done
 
     def slot_modes(self, nid):
         """{slot: "mean" | "counter" | "angle"} worth summarising for a node,
@@ -1849,6 +1916,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             rows = [dict(zip(keys, r)) for r in app.rollup.series(node, slot, t0, t1, res)]
             return self.send_json({"rows": rows, "res": res, "from": t0, "to": t1,
                                    "raw_cutoff": app.rollup.raw_cutoff()})
+        if path == "/api/waterlearn":
+            # What adaptive watering has learned about a node, and what it would do.
+            nid = int(q["node"])
+            snap = (app.poller.snapshot or {}).get("nodes", {}).get(nid, {})
+            rec = app.learner.recommend(nid, snap.get("slots") or {})
+            node = app.adaptive_node(nid)
+            return self.send_json({"adaptive": node["adaptive"], "plant_band": node.get("plant_band"),
+                                   "recommendation": rec})
         if path == "/api/report":
             return self.send_json(self.report(int(q["node"]), q["slot"],
                                               int(q["from"]), int(q["to"])))
@@ -1914,6 +1989,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         app = self.app
         nid = int(b["node"])
         enable = 1 if b.get("enable") else 0
+        conf = dict((app.cfg.node(nid).get("adaptive") or {}))
+        if "from_plant" in b:
+            conf["from_plant"] = bool(b["from_plant"])
+        if "adaptive" in b:
+            conf["on"] = bool(b["adaptive"])
+        if b.get("fill_pct") not in (None, ""):
+            conf["fill_pct"] = float(b["fill_pct"])
+        elif "fill_pct" in b:
+            conf.pop("fill_pct", None)
+        # Off on purpose stays off: auto_defaults() never switches it back on.
+        conf["user_off"] = not enable
+        app.cfg.set_node(nid, {"adaptive": conf})
+        band = app.cfg.node(nid).get("plant_band")
+        if conf.get("from_plant", True) and band and b.get("below_pct") in (None, ""):
+            b["below_pct"] = band[0]
         pct = float(b["below_pct"])
         ml = int(b["ml"])
         gap_min = int(round(float(b["gap_hours"]) * 60))
@@ -2281,6 +2371,29 @@ def main():
         app.poller.start()
         app.uploader.start()
         RollupThread(app.rollup).start()
+
+        def pump_nodes():
+            snap = (app.poller.snapshot or {}).get("nodes", {})
+            out = {}
+            for nid, rec in snap.items():
+                slots = rec.get("slots") or {}
+                if 49 in slots and 3 in slots:          # a pump with a soil probe
+                    try:
+                        if app.auto_defaults(nid, slots):
+                            slots = {**slots, 49: 1}
+                    except Exception as e:
+                        app.store.event("system", "auto default for node %s failed: %s" % (nid, e))
+                    out[nid] = slots
+            return out
+
+        def command(nid, slot, value):
+            ack = app.gw.command("set %d %d %d" % (nid, slot, value), r"ACK set|ERR")
+            ok = bool(ack and ack.startswith("ACK"))
+            if ok:
+                app.poller.track_write(nid, slot, value)
+            return ok
+
+        LearnThread(app.learner, pump_nodes, command).start()
     srv = Server((args.listen, args.http_port), Handler)
     print("hive admin on http://%s:%d/ (%s)" % (args.listen, args.http_port,
           "flash only" if app.flash_only else "simulated" if args.fake else args.port), flush=True)
