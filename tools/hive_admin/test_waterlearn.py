@@ -127,5 +127,55 @@ L2 = W.WaterLearner(store2, lambda n: (DRY, WET, True), lambda n: cfg.get(n, {})
 rec2 = L2.recommend(NODE, slots, now_ts=t0 + 20 * 3600)
 check(rec2["ml"] is None and "learning" in (rec2["why"] or ""), "one watering seen: still learning", rec2["why"])
 
+# The probe is pulled out, wiped and pushed in somewhere wetter; two minutes in
+# the air read bone dry and the node waters (as node 7 did on 5 Oct 2026). That
+# watering, and the jump between spots, must teach it nothing.
+store3 = H.Store(os.path.join(tmp, "t3.db"))
+moved_at = t0 + 36 * 3600
+rows3 = [r for r in rows if r[0] < moved_at - 600]
+last3 = {}
+for r in rows3:
+    last3[r[2]] = r[3]
+
+
+def report3(ts, slot, value):
+    if last3.get(slot) != value:
+        rows3.append((ts, NODE, slot, value))
+        last3[slot] = value
+
+
+p3 = 45.0 - 36 + 20 + 15          # where the simulation's soil is by hour 36, +15 in the new spot
+for step in range(0, 4 * 12):
+    ts = moved_at - 600 + step * 60 * 5
+    if ts < moved_at:
+        report3(ts, 3, 2650)        # in the air
+        continue
+    if ts == moved_at:
+        report3(ts, 45, 300)        # the 24 h total: the doses at hours 16 and 32, and this one
+        report3(ts, 54, 0)
+        p3 += 10
+    p3 -= 1.0 / 12
+    report3(ts, 3, raw(p3))
+store3.add_readings(rows3)
+L3 = W.WaterLearner(store3, lambda n: (DRY, WET, True), lambda n: cfg.get(n, {}))
+a3 = L3.analyse(NODE, now_ts=moved_at + 4 * 3600)
+mv = [e for e in a3["events"] if e.get("moved")]
+check(len(mv) == 1 and abs(mv[0]["ts"] - moved_at) <= 300, "the watering after the probe move is marked moved", a3["events"])
+check(a3["seen"] == 0 and a3["gain"] is None, "and learning starts over: the old spot's waterings no longer count", (a3["seen"], a3["gain"]))
+check(a3["learn_from"] == moved_at - 600 - W.PRE_S - W.DISTURB_BEFORE_S, "learning restarts at the pull (an hour and the before-window ahead of it)", a3["learn_from"])
+
+# The node says so itself (state 6, "probe just moved"), with no dry jump seen:
+# everything before it is forgotten too.
+store4 = H.Store(os.path.join(tmp, "t4.db"))
+store4.add_readings(rows + [(t0 + 34 * 3600, NODE, 53, 6)])
+a4 = W.WaterLearner(store4, lambda n: (DRY, WET, True), lambda n: cfg.get(n, {})).analyse(NODE, now_ts=now)
+check(a4["seen"] == 0, "the node's own probe-moved state restarts learning", a4["seen"])
+
+# Or by hand: "learn_from" in the node's adaptive config.
+cfg5 = {NODE: {"adaptive": {"on": True, "learn_from": t0 + 20 * 3600}}}
+a5 = W.WaterLearner(store, lambda n: (DRY, WET, True), lambda n: cfg5.get(n, {})).analyse(NODE, now_ts=now)
+check(a5["seen"] == 1 and len(a5["events"]) == 1, "learn_from drops the waterings before it", a5["events"])
+check(W.disturbances([(0, 50.0), (300, 49.9), (600, 49.8)]) == [], "ordinary drying is not a move")
+
 print("\n%d failed" % failed if failed else "\nall passed")
 sys.exit(1 if failed else 0)

@@ -608,7 +608,8 @@
      "2": "waiting out the gap",
      "3": "LOCKED: watering not seen",
      "4": "paused: no soil reading",
-     "5": "watering"
+     "5": "watering",
+     "6": "waiting: probe just moved"
     }
    },
    "54": {

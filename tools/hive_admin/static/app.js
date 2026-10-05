@@ -259,7 +259,8 @@ views.node = async (el, id) => {
     const toPct = (raw) => Math.round(100 * (c.soil_dry - raw) / (c.soil_dry - c.soil_wet));
     const s = n.slots;
     const stateText = { 0: "off", 1: "on, watching the soil", 2: "on, waiting out the gap", 3: "LOCKED OFF: a watering did not show up in the soil. Check the tube and probe, then save with it switched on again",
-                        4: "paused: no soil reading", 5: "watering now" };
+                        4: "paused: no soil reading", 5: "watering now",
+                        6: "on, waiting an hour: the probe was just moved or unplugged" };
     const since = s[54] == null || s[54] === 65535 ? "none yet" : fmtAge(s[54] * 60);
     $("#auto-status").innerHTML = `${esc(stateText[s[53]] ?? "unknown")} · last automatic watering: ${esc(since)}` +
       (s[45] != null ? ` · pumped in the last 24 h: ${s[45]} ml` : "") +

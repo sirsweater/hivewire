@@ -91,6 +91,7 @@ enum HwAutoState : uint8_t {
   HW_AUTO_LOCKED = 3,        // a watering was not seen in the soil: off until re-enabled
   HW_AUTO_NO_PROBE = 4,      // no soil reading to judge by: not watering
   HW_AUTO_WATERING = 5,
+  HW_AUTO_SETTLING = 6,      // the probe was just moved or unplugged: waiting before judging
 };
 
 enum HwPumpState : uint8_t {
@@ -213,8 +214,15 @@ class HivewirePump {
   }
 
   // Call from loop() with the latest soil reading. Judges once a minute, and
-  // only waters after two dry judgements in a row: one noisy read is not a
-  // dry pot.
+  // only waters after AUTO_DRY_CONFIRM dry judgements in a row: soil dries
+  // over hours, so a quarter of an hour's wait costs the plant nothing.
+  //
+  // A probe being moved is not a dry pot. Pulled out, it reads bone dry within
+  // seconds -- a jump soil never makes by drying -- and two minutes of that once
+  // watered the hole it had been pulled from. A dry jump of AUTO_JUMP_RAW
+  // inside the last AUTO_JUMP_WINDOW judgements, or the probe dropping out,
+  // starts AUTO_SETTLE_MS of not watering; a probe put back in the soil reads
+  // wet again long before that runs out.
   void autoLoop(bool soilOk, uint16_t raw) {
     uint32_t now = millis();
     if (_autoCheckAt && (int32_t)(now - _autoCheckAt) < 0) return;
@@ -223,14 +231,35 @@ class HivewirePump {
     if (!_autoOn || !_belowRaw || !_autoMl) { _autoState = HW_AUTO_OFF; _dryCount = 0; return; }
     if (_autoLocked) { _autoState = HW_AUTO_LOCKED; return; }
     if (_running) { _autoState = HW_AUTO_WATERING; return; }
-    if (!soilOk || !raw) { _autoState = HW_AUTO_NO_PROBE; _dryCount = 0; return; }
+    if (!soilOk || !raw) {
+      _autoState = HW_AUTO_NO_PROBE;
+      _dryCount = 0;
+      _histN = 0;
+      _settleUntil = now + AUTO_SETTLE_MS;
+      if (!_settleUntil) _settleUntil = 1;
+      return;
+    }
+    uint16_t lowest = raw;
+    for (uint8_t i = 0; i < _histN; i++) if (_hist[i] < lowest) lowest = _hist[i];
+    _hist[_histAt] = raw;
+    _histAt = (_histAt + 1) % AUTO_JUMP_WINDOW;
+    if (_histN < AUTO_JUMP_WINDOW) _histN++;
+    if (raw >= lowest + AUTO_JUMP_RAW) {
+      if (!_settleUntil) _node.log("auto: soil jumped %u -> %u, probe disturbed: waiting", lowest, raw);
+      _settleUntil = now + AUTO_SETTLE_MS;
+      if (!_settleUntil) _settleUntil = 1;
+    }
+    if (_settleUntil) {
+      if ((int32_t)(now - _settleUntil) < 0) { _autoState = HW_AUTO_SETTLING; _dryCount = 0; return; }
+      _settleUntil = 0;
+    }
     if (_gapPending && now - _lastAutoAt < (uint32_t)_gapMin * 60000UL) {
       _autoState = HW_AUTO_GAP;
       _dryCount = 0;
       return;
     }
     if (raw < _belowRaw) { _autoState = HW_AUTO_WATCHING; _dryCount = 0; return; }
-    if (++_dryCount < 2) { _autoState = HW_AUTO_WATCHING; return; }
+    if (++_dryCount < AUTO_DRY_CONFIRM) { _autoState = HW_AUTO_WATCHING; return; }
     _dryCount = 0;
     _lastAutoAt = now;           // the gap starts now, even if the dose is refused
     _gapPending = true;
@@ -299,6 +328,10 @@ class HivewirePump {
   static const uint32_t MAX_RUN_MS = 10UL * 60 * 1000;
   static const uint32_t RTC_MAGIC = 0x504d5032;           // "PMP2" (layout 2)
   static const uint32_t AUTO_CHECK_MS = 60000;
+  static const uint8_t  AUTO_DRY_CONFIRM = 15;            // judgements (minutes)
+  static const uint8_t  AUTO_JUMP_WINDOW = 10;            // judgements looked back over
+  static const uint16_t AUTO_JUMP_RAW = 150;              // drying never moves this fast
+  static const uint32_t AUTO_SETTLE_MS = 60UL * 60 * 1000;
   enum { REQ_NONE, REQ_DOSE, REQ_RUN, REQ_STOP };
 
   struct RtcState { uint32_t magic, dayMl, elapsedMs, autoElapsedMs, autoValid; };
@@ -396,6 +429,9 @@ class HivewirePump {
   volatile uint16_t _pendVal[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   // automatic watering
   uint8_t  _autoOn = 0, _autoLocked = 0, _autoState = HW_AUTO_OFF, _dryCount = 0;
+  uint16_t _hist[AUTO_JUMP_WINDOW] = {0};
+  uint8_t  _histN = 0, _histAt = 0;
+  uint32_t _settleUntil = 0;
   uint16_t _belowRaw = 0, _autoMl = 0, _gapMin = 720;
   uint32_t _lastAutoAt = 0, _autoCheckAt = 0;
   bool     _gapPending = false, _lastDoseAuto = false;

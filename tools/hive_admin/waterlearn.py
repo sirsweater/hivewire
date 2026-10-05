@@ -42,6 +42,8 @@ AUTO_BELOW = 50      # raw threshold
 DOSE_CAP = 43
 DAY_CAP = 44
 SOIL_RAW = 3
+AUTO_STATE = 53
+AUTO_SETTLING = 6    # the node's own "probe just moved" state (firmware from 2026-10-05)
 
 GROUP_S = 180        # increases this close together are one watering
 PRE_S = 600          # the soil level "before" is taken this long before it was seen
@@ -52,6 +54,12 @@ MIN_EVENTS = 2
 MAX_STEP = 0.4       # never change the amount by more than 40% at once
 MIN_CHANGE = 0.1     # ...and not for less than 10%
 MIN_RISE_PCT = 2.0   # a smaller rise was not really seen in the soil
+# A probe pulled out or moved reads far drier within minutes - soil never dries
+# that fast. Waterings near one say nothing about the pot: the "before" and
+# "after" readings come from different spots (or from the air).
+JUMP_PCT = 10.0
+JUMP_S = 600
+DISTURB_BEFORE_S = 3600
 
 
 def median(xs):
@@ -74,6 +82,20 @@ def slope_per_hour(points):
         return None
     sxy = sum((t - mx) * (v - my) for t, v in points)
     return sxy / sxx * 3600.0
+
+
+def disturbances(soil):
+    """Times the probe was moved: a reading JUMP_PCT drier than any in the
+    JUMP_S before it. soil is [(ts, pct)] oldest first."""
+    out = []
+    for i, (t, v) in enumerate(soil):
+        j = i - 1
+        while j >= 0 and t - soil[j][0] <= JUMP_S:
+            if soil[j][1] - v >= JUMP_PCT:
+                out.append(t)
+                break
+            j -= 1
+    return out
 
 
 def waterings(series45, series54):
@@ -110,9 +132,18 @@ class WaterLearner:
         self.log = log or (lambda msg: None)
 
     def analyse(self, nid, now_ts=None, days=30):
-        """What the history says about this pot. Never writes anything."""
+        """What the history says about this pot. Never writes anything.
+
+        Learning starts over whenever the probe is moved: what a watering did
+        to the old spot says little about the new one (a probe sitting in its
+        own puddle once read 50% from 49 ml). A move is the node reporting
+        AUTO_SETTLING, a dry jump in the readings, or "learn_from" in the
+        node's adaptive config, set by hand."""
         now_ts = int(now_ts or time.time())
         t0 = now_ts - days * 86400
+        conf = self.cfg_node(nid).get("adaptive") or {}
+        settled = [t for t, v in self.store.series(nid, AUTO_STATE, t0, now_ts) if v == AUTO_SETTLING]
+        starts = [t0, int(conf.get("learn_from") or 0)] + settled
         dry_raw, wet_raw, calibrated = self.calibration(nid)
         out = {"node": nid, "calibrated": calibrated, "events": [], "gain": None, "dry_per_h": None}
         if not calibrated:
@@ -126,7 +157,11 @@ class WaterLearner:
         s54 = self.store.series(nid, AUTO_SINCE, t0, now_ts)
         soil = [(t, pct(v)) for t, v in self.store.series(nid, SOIL_RAW, t0 - 6 * 3600, now_ts)
                 if 200 < v < 4000]
-        ev = waterings(s45, s54)
+        moved = disturbances(soil)
+        # Start after the latest move; a watering it caused is still marked below.
+        t0 = max(starts + [m - PRE_S - DISTURB_BEFORE_S for m in moved])
+        out["learn_from"] = t0
+        ev = [e for e in waterings(s45, s54) if e[0] >= t0]
         gains, drys = [], []
         for i, (ts, ml, auto) in enumerate(ev):
             nxt = ev[i + 1][0] if i + 1 < len(ev) else now_ts
@@ -137,12 +172,18 @@ class WaterLearner:
             pre = before[-1] if before else None
             after = [(t, v) for t, v in soil if ts - PRE_S < t <= min(ts + PEAK_WINDOW_S, nxt)]
             e = {"ts": ts, "ml": ml, "auto": auto, "pre": pre, "peak": None, "rise": None, "dry_per_h": None}
+            end = min(ts + PEAK_WINDOW_S, nxt)
+            if any(ts - PRE_S - DISTURB_BEFORE_S <= m <= end for m in moved):
+                e["moved"] = True                  # the probe was moved: learn nothing from it
+                out["events"].append(e)
+                continue
             if pre is not None and after:
                 tp, peak = max(after, key=lambda p: p[1])
                 e["peak"], e["rise"] = round(peak, 1), round(peak - pre, 1)
                 if auto and peak - pre >= MIN_RISE_PCT:
                     gains.append((peak - pre) / ml)
-                tail = [(t, v) for t, v in soil if tp + DRY_SKIP_S <= t < nxt]
+                stop = min([m for m in moved if m > tp] + [nxt])
+                tail = [(t, v) for t, v in soil if tp + DRY_SKIP_S <= t < stop]
                 if tail and tail[-1][0] - tail[0][0] >= DRY_MIN_SPAN_S:
                     sl = slope_per_hour(tail)
                     if sl is not None and sl < 0:
