@@ -52,6 +52,12 @@
 //   53  auto state       out      see HwAutoState
 //   54  minutes since    out      since the last automatic watering
 //                                 (65535 = none yet)
+//   55  auto pulses      setting  each automatic watering is given in this many
+//                                 pulses, AUTO_PULSE_GAP_MS apart (1 = all at
+//                                 once; default 4, never under AUTO_PULSE_MIN_ML
+//                                 each). Dry potting mix sheds a single splash
+//                                 down the nearest channel -- often the probe's
+//                                 own face -- where a few smaller ones soak in.
 //
 // It keeps going when the hive is unreachable -- a plant in a heatwave should
 // not go thirsty because the Pi is off -- and every limit above still applies.
@@ -83,6 +89,7 @@
 #define HW_PUMP_SLOT_AUTO_GAP 52
 #define HW_PUMP_SLOT_AUTO_STATE 53
 #define HW_PUMP_SLOT_AUTO_SINCE 54
+#define HW_PUMP_SLOT_AUTO_PULSES 55
 
 enum HwAutoState : uint8_t {
   HW_AUTO_OFF = 0,
@@ -133,6 +140,8 @@ class HivewirePump {
     _belowRaw = p.getUShort("abelow", 0);
     _autoMl = p.getUShort("aml", 0);
     _gapMin = p.getUShort("agap", 720);
+    _pulses = p.getUChar("apulse", 4);
+    if (_pulses < 1 || _pulses > 10) _pulses = 4;
     p.end();
     // Carry the rolling 24 h total across a restart (see the header note).
     if (_rtc.magic == RTC_MAGIC && _rtc.elapsedMs < DAY_MS) {
@@ -153,9 +162,15 @@ class HivewirePump {
 
   // ---- commands (from slot appliers; they run in the radio callback, so they
   // only record the request -- loop() does the work) -------------------------
-  void requestDose(uint16_t ml) { _reqAuto = false; _reqDose = ml; _reqKind = ml ? REQ_DOSE : REQ_STOP; }
-  void requestRunSeconds(uint16_t s) { _reqRunS = s; _reqKind = s ? REQ_RUN : REQ_STOP; }
+  // A person's dose, run or stop also ends an automatic watering still in pulses.
+  void requestDose(uint16_t ml) { _cancelPulses = true; _reqAuto = false; _reqDose = ml; _reqKind = ml ? REQ_DOSE : REQ_STOP; }
+  void requestRunSeconds(uint16_t s) { _cancelPulses = true; _reqRunS = s; _reqKind = s ? REQ_RUN : REQ_STOP; }
   void stop(HwPumpState why = HW_PUMP_STOPPED_SAFE) {
+    if (_pulsesLeft || _pulseOut) {
+      _node.log("auto: watering cut short (%u), %u of %u ml given", why, _autoGiven, _autoMlNow);
+      _pulsesLeft = 0;
+      _pulseOut = false;
+    }
     if (_running) {
       off();
       _running = false;
@@ -172,7 +187,8 @@ class HivewirePump {
     uint8_t i = slot - HW_PUMP_SLOT_FLOW;
     if (slot == HW_PUMP_SLOT_FLOAT) i = 3;
     else if (slot >= HW_PUMP_SLOT_AUTO_ON && slot <= HW_PUMP_SLOT_AUTO_GAP) i = 4 + (slot - HW_PUMP_SLOT_AUTO_ON);
-    if (i > 7) return;
+    else if (slot == HW_PUMP_SLOT_AUTO_PULSES) i = 8;
+    if (i > 8) return;
     _pendVal[i] = v;
     _pendMask |= (1 << i);
   }
@@ -192,6 +208,11 @@ class HivewirePump {
   bool     running() const  { return _running; }
   uint16_t lastDoseMl() const { return _deliveredMl; }
   bool     lastDoseWasAuto() const { return _lastDoseAuto; }
+  // An automatic watering is still under way between its pulses.
+  bool     pulsing() const { return _pulsesLeft || _pulseOut; }
+  // What the last watering gave in all: every pulse of an automatic one.
+  uint16_t lastWateringMl() const { return _lastDoseAuto ? _autoGiven : _deliveredMl; }
+  uint8_t  autoPulses() const { return _pulses; }
   uint8_t  autoOn() const { return _autoOn; }
   uint16_t autoBelowRaw() const { return _belowRaw; }
   uint16_t autoMl() const { return _autoMl; }
@@ -230,7 +251,7 @@ class HivewirePump {
     if (!_autoCheckAt) _autoCheckAt = 1;
     if (!_autoOn || !_belowRaw || !_autoMl) { _autoState = HW_AUTO_OFF; _dryCount = 0; return; }
     if (_autoLocked) { _autoState = HW_AUTO_LOCKED; return; }
-    if (_running) { _autoState = HW_AUTO_WATERING; return; }
+    if (_running || pulsing()) { _autoState = HW_AUTO_WATERING; return; }
     if (!soilOk || !raw) {
       _autoState = HW_AUTO_NO_PROBE;
       _dryCount = 0;
@@ -264,10 +285,18 @@ class HivewirePump {
     _lastAutoAt = now;           // the gap starts now, even if the dose is refused
     _gapPending = true;
     saveRtc();
-    _node.log("auto: soil %u >= %u, watering %u ml", raw, _belowRaw, _autoMl);
-    _reqAuto = true;
-    _reqDose = _autoMl;
-    _reqKind = REQ_DOSE;
+    // The caps judge the whole watering before the first pulse: stopping
+    // half way through would read as "watered" to everyone above.
+    if (refused(_autoMl, true)) return;
+    uint8_t n = _pulses;
+    if (_autoMl / n < AUTO_PULSE_MIN_ML) n = max<uint16_t>(1, _autoMl / AUTO_PULSE_MIN_ML);
+    _node.log("auto: soil %u >= %u, watering %u ml in %u pulse(s)", raw, _belowRaw, _autoMl, n);
+    _autoMlNow = _autoMl;
+    _autoLeftMl = _autoMl;
+    _autoGiven = 0;
+    _pulsesLeft = n;
+    _nextPulseAt = now;
+    _cancelPulses = false;
     _autoState = HW_AUTO_WATERING;
   }
   uint32_t lastDoseEndedAt() const { return _endedAt; }
@@ -286,7 +315,7 @@ class HivewirePump {
       _winStart = now;
       _dayMl = 0;
     }
-    uint8_t m = _pendMask;
+    uint16_t m = _pendMask;
     if (m) {
       _pendMask = 0;
       if (m & 1) { setFlow(_pendVal[0]);    _node.log("pump flow %u ml/min", _flow); }
@@ -303,6 +332,12 @@ class HivewirePump {
       if (m & 32)  { _belowRaw = _pendVal[5]; saveU16("abelow", _belowRaw); _node.log("auto below raw %u", _belowRaw); }
       if (m & 64)  { _autoMl = _pendVal[6];   saveU16("aml", _autoMl);      _node.log("auto amount %u ml", _autoMl); }
       if (m & 128) { _gapMin = _pendVal[7];   saveU16("agap", _gapMin);     _node.log("auto gap %u min", _gapMin); }
+      if (m & 256) {
+        uint16_t v = _pendVal[8];
+        _pulses = v < 1 ? 1 : v > 10 ? 10 : (uint8_t)v;
+        Preferences p; p.begin(NVS_NS, false); p.putUChar("apulse", _pulses); p.end();
+        _node.log("auto pulses %u", _pulses);
+      }
     }
     handleRequest(now);
     if (_running) {
@@ -317,10 +352,61 @@ class HivewirePump {
         _node.log("pump %s, %u ml", _hitCeiling ? "cut at time limit" : "done", _deliveredMl);
       }
     }
+    pulseLoop(now);
     if (now - _rtcSavedAt >= 1000) saveRtc();
   }
 
  private:
+  // Gives an automatic watering pulse by pulse. Each pulse is an ordinary dose
+  // (every rule in handleRequest applies); one that does not finish as asked
+  // -- refused, supply empty, stopped -- ends the watering there.
+  void pulseLoop(uint32_t now) {
+    if (_cancelPulses) {
+      _cancelPulses = false;
+      if (pulsing()) {
+        _node.log("auto: watering cancelled by a command, %u of %u ml given", _autoGiven, _autoMlNow);
+        _pulsesLeft = 0;
+        _pulseOut = false;
+      }
+    }
+    if (_pulseOut) {
+      if (_running || _reqKind != REQ_NONE) return;       // still pumping, or not taken yet
+      _pulseOut = false;
+      if (_state != HW_PUMP_DONE) {
+        if (_pulsesLeft) _node.log("auto: pulse ended (%u), %u of %u ml given", _state, _autoGiven, _autoMlNow);
+        _pulsesLeft = 0;
+        return;
+      }
+      _autoGiven += _deliveredMl;
+      _nextPulseAt = now + AUTO_PULSE_GAP_MS;
+      if (!_pulsesLeft) _node.log("auto: watering done, %u ml", _autoGiven);
+    }
+    if (!_pulsesLeft || _running || _reqKind != REQ_NONE) return;
+    if ((int32_t)(now - _nextPulseAt) < 0) return;
+    uint16_t ml = _pulsesLeft == 1 ? _autoLeftMl : _autoLeftMl / _pulsesLeft;
+    _pulsesLeft--;
+    _autoLeftMl -= ml;
+    _pulseOut = true;
+    _reqAuto = true;
+    _reqDose = ml;
+    _reqKind = REQ_DOSE;
+  }
+
+  // E306 and true when ml would break the per-dose cap (if asked) or the 24 h cap.
+  bool refused(uint16_t ml, bool doseCap) {
+    if (doseCap && ml > _maxDose) {
+      _state = HW_PUMP_REFUSED_LIMIT;
+      hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DOSE, "pump: %u ml > dose cap %u", ml, _maxDose);
+      return true;
+    }
+    if (_flow && (uint32_t)_dayMl + ml > _maxDay) {
+      _state = HW_PUMP_REFUSED_LIMIT;
+      hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DAY, "pump: day cap %u (at %u)", _maxDay, _dayMl);
+      return true;
+    }
+    return false;
+  }
+
   static constexpr const char *NVS_NS = "hwpump";
   static const uint32_t DAY_MS = 24UL * 3600 * 1000;
   // Nothing runs longer than this, whatever the calibration says: a flow rate
@@ -332,6 +418,8 @@ class HivewirePump {
   static const uint8_t  AUTO_JUMP_WINDOW = 10;            // judgements looked back over
   static const uint16_t AUTO_JUMP_RAW = 150;              // drying never moves this fast
   static const uint32_t AUTO_SETTLE_MS = 60UL * 60 * 1000;
+  static const uint32_t AUTO_PULSE_GAP_MS = 3UL * 60 * 1000;
+  static const uint16_t AUTO_PULSE_MIN_ML = 10;
   enum { REQ_NONE, REQ_DOSE, REQ_RUN, REQ_STOP };
 
   struct RtcState { uint32_t magic, dayMl, elapsedMs, autoElapsedMs, autoValid; };
@@ -356,18 +444,10 @@ class HivewirePump {
         hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_FLOW, "pump: not calibrated");
         return;
       }
-      if (ml > _maxDose) {
-        _state = HW_PUMP_REFUSED_LIMIT;
-        hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DOSE, "pump: %u ml > dose cap %u", ml, _maxDose);
-        return;
-      }
+      if (refused(ml, true)) return;
       runMs = (uint32_t)ml * 60000UL / _flow;
     }
-    if (_flow && (uint32_t)_dayMl + ml > _maxDay) {
-      _state = HW_PUMP_REFUSED_LIMIT;
-      hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DAY, "pump: day cap %u (at %u)", _maxDay, _dayMl);
-      return;
-    }
+    if (refused(ml, false)) return;
     if (reservoir() == 0) {
       _state = HW_PUMP_STOPPED_EMPTY;
       hwErr(_node, HW_E_SUPPLY_EMPTY, HW_PUMP_SLOT_RESERVOIR, "pump: supply empty, not started");
@@ -425,8 +505,8 @@ class HivewirePump {
   bool _running = false, _hitCeiling = false;
   uint8_t _state = HW_PUMP_IDLE;
   volatile uint8_t _reqKind = REQ_NONE;
-  volatile uint8_t _pendMask = 0;
-  volatile uint16_t _pendVal[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  volatile uint16_t _pendMask = 0;
+  volatile uint16_t _pendVal[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
   // automatic watering
   uint8_t  _autoOn = 0, _autoLocked = 0, _autoState = HW_AUTO_OFF, _dryCount = 0;
   uint16_t _hist[AUTO_JUMP_WINDOW] = {0};
@@ -435,7 +515,11 @@ class HivewirePump {
   uint16_t _belowRaw = 0, _autoMl = 0, _gapMin = 720;
   uint32_t _lastAutoAt = 0, _autoCheckAt = 0;
   bool     _gapPending = false, _lastDoseAuto = false;
-  volatile bool _reqAuto = false;
+  volatile bool _reqAuto = false, _cancelPulses = false;
+  uint8_t  _pulses = 4, _pulsesLeft = 0;
+  bool     _pulseOut = false;
+  uint16_t _autoMlNow = 0, _autoLeftMl = 0, _autoGiven = 0;
+  uint32_t _nextPulseAt = 0;
   volatile uint16_t _reqDose = 0, _reqRunS = 0;
 };
 

@@ -45,7 +45,9 @@ SOIL_RAW = 3
 AUTO_STATE = 53
 AUTO_SETTLING = 6    # the node's own "probe just moved" state (firmware from 2026-10-05)
 
-GROUP_S = 180        # increases this close together are one watering
+# Increases this close together are one watering: an automatic one comes in
+# pulses 3 min apart (HivewirePump.h, slot 55), seen as several steps.
+GROUP_S = 20 * 60
 PRE_S = 600          # the soil level "before" is taken this long before it was seen
 PEAK_WINDOW_S = 3 * 3600
 DRY_SKIP_S = 30 * 60 # let the water settle before measuring the drying slope
@@ -99,19 +101,19 @@ def disturbances(soil):
 
 
 def waterings(series45, series54):
-    """[(ts, ml, auto)] from the 24 h total going up. series are [(ts, value)]
-    oldest first; the value before the first row is unknown, so the first row
-    is only a baseline."""
+    """[(ts, ml, auto, start)] from the 24 h total going up: ts the last step
+    seen, start the first. series are [(ts, value)] oldest first; the value
+    before the first row is unknown, so the first row is only a baseline."""
     out = []
     prev = None
     for ts, v in series45:
         if prev is not None and v > prev:
             ml = v - prev
             if out and ts - out[-1][0] <= GROUP_S:
-                t0, m0, _ = out[-1]
-                out[-1] = (ts, m0 + ml, False)
+                _, m0, _, start = out[-1]
+                out[-1] = (ts, m0 + ml, False, start)
             else:
-                out.append((ts, ml, False))
+                out.append((ts, ml, False, ts))
         prev = v
     # Automatic when slot 54 restarted near it (a small value, after a larger one).
     resets = []
@@ -120,7 +122,8 @@ def waterings(series45, series54):
         if v != 65535 and (last is None or last == 65535 or v < last) and v <= 5:
             resets.append(ts)
         last = v
-    return [(ts, ml, any(abs(r - ts) <= GROUP_S + 120 for r in resets)) for ts, ml, _ in out]
+    return [(ts, ml, any(start - GROUP_S <= r <= ts + 120 for r in resets), start)
+            for ts, ml, _, start in out]
 
 
 class WaterLearner:
@@ -161,19 +164,20 @@ class WaterLearner:
         # Start after the latest move; a watering it caused is still marked below.
         t0 = max(starts + [m - PRE_S - DISTURB_BEFORE_S for m in moved])
         out["learn_from"] = t0
-        ev = [e for e in waterings(s45, s54) if e[0] >= t0]
+        ev = [e for e in waterings(s45, s54) if e[3] >= t0]
         gains, drys = [], []
-        for i, (ts, ml, auto) in enumerate(ev):
-            nxt = ev[i + 1][0] if i + 1 < len(ev) else now_ts
-            # ts is the poll that SAW the total go up, after the dose ended; the
-            # dose itself (a few minutes at most) began up to PRE_S earlier. The
-            # level before is the value in force then, however old its row.
-            before = [v for t, v in soil if t <= ts - PRE_S]
+        for i, (ts, ml, auto, start) in enumerate(ev):
+            nxt = ev[i + 1][3] if i + 1 < len(ev) else now_ts
+            # start is the poll that SAW the total first go up, after the first
+            # pulse ended; that pulse began up to PRE_S earlier. The level
+            # before is the value in force then, however old its row.
+            before = [v for t, v in soil if t <= start - PRE_S]
             pre = before[-1] if before else None
-            after = [(t, v) for t, v in soil if ts - PRE_S < t <= min(ts + PEAK_WINDOW_S, nxt)]
-            e = {"ts": ts, "ml": ml, "auto": auto, "pre": pre, "peak": None, "rise": None, "dry_per_h": None}
             end = min(ts + PEAK_WINDOW_S, nxt)
-            if any(ts - PRE_S - DISTURB_BEFORE_S <= m <= end for m in moved):
+            after = [(t, v) for t, v in soil if start - PRE_S < t <= end]
+            e = {"ts": ts, "start": start, "ml": ml, "auto": auto, "pre": pre, "peak": None, "rise": None,
+                 "dry_per_h": None}
+            if any(start - PRE_S - DISTURB_BEFORE_S <= m <= end for m in moved):
                 e["moved"] = True                  # the probe was moved: learn nothing from it
                 out["events"].append(e)
                 continue

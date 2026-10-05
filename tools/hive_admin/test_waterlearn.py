@@ -177,5 +177,38 @@ a5 = W.WaterLearner(store, lambda n: (DRY, WET, True), lambda n: cfg5.get(n, {})
 check(a5["seen"] == 1 and len(a5["events"]) == 1, "learn_from drops the waterings before it", a5["events"])
 check(W.disturbances([(0, 50.0), (300, 49.9), (600, 49.8)]) == [], "ordinary drying is not a move")
 
+# Pulses: each automatic 100 ml comes as 4 x 25 ml, 3 min apart, polled every
+# minute -- four steps in the 24 h total, one watering to the learner.
+store6 = H.Store(os.path.join(tmp, "t6.db"))
+rows6, last6 = [], {}
+
+
+def report6(ts, slot, value):
+    if last6.get(slot) != value:
+        rows6.append((ts, NODE, slot, value))
+        last6[slot] = value
+
+
+p6, doses6, auto6 = 45.0, [], None
+for step in range(0, 40 * 60):
+    ts = t0 + step * 60
+    p6 -= 1.0 / 60
+    minute = step % 60
+    hour = step // 60
+    if hour in (16, 32) and minute in (0, 3, 6, 9):
+        if minute == 0:
+            auto6 = ts
+        p6 += 2.5
+        doses6.append((ts, 25))
+    report6(ts, 45, sum(m for t, m in doses6 if t > ts - 86400))
+    report6(ts, 54, 65535 if auto6 is None else (ts - auto6) // 60 // 30 * 30)
+    report6(ts, 3, raw(p6))
+store6.add_readings(rows6)
+a6 = W.WaterLearner(store6, lambda n: (DRY, WET, True), lambda n: cfg.get(n, {})).analyse(NODE, now_ts=now)
+ev6 = a6["events"]
+check(len(ev6) == 2 and all(e["ml"] == 100 and e["auto"] for e in ev6),
+      "four pulses are one automatic 100 ml watering", ev6)
+check(a6["gain"] is not None and abs(a6["gain"] - 0.1) < 0.02, "and the gain is learned from the whole watering", a6["gain"])
+
 print("\n%d failed" % failed if failed else "\nall passed")
 sys.exit(1 if failed else 0)

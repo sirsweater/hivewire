@@ -635,6 +635,8 @@ static void sAutoGap(void *o)  { uint16_t v = pump.autoGapMin(); memcpy(o, &v, 2
 static void aAutoGap(const void *in) { uint16_t v; memcpy(&v, in, 2); pump.requestSetting(HW_PUMP_SLOT_AUTO_GAP, v); }
 static void sAutoState(void *o){ uint8_t v = pump.autoState(); memcpy(o, &v, 1); }
 static void sAutoSince(void *o){ uint16_t v = pump.minutesSinceAuto(); memcpy(o, &v, 2); }
+static void sAutoPulses(void *o){ uint8_t v = pump.autoPulses(); memcpy(o, &v, 1); }
+static void aAutoPulses(const void *in) { pump.requestSetting(HW_PUMP_SLOT_AUTO_PULSES, *(const uint8_t *)in); }
 #endif
 
 // Slot ids 22, 23 and 25 match RangeNode, so the same maintenance commands
@@ -677,6 +679,7 @@ static const HwSlotDef SLOTS[] = {
   { HW_PUMP_SLOT_AUTO_GAP,  HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 10, 43200, sAutoGap, aAutoGap   },
   { HW_PUMP_SLOT_AUTO_STATE,HW_U8,  HW_DIR_OUT,    5000, 900000, 1, 0,    0, sAutoState, nullptr    },
   { HW_PUMP_SLOT_AUTO_SINCE,HW_U16, HW_DIR_OUT,   60000, 900000, 30, 0,   0, sAutoSince, nullptr    },
+  { HW_PUMP_SLOT_AUTO_PULSES,HW_U8, HW_DIR_INOUT, 60000, 900000, 1, 1,   10, sAutoPulses, aAutoPulses },
 #endif
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
@@ -796,19 +799,21 @@ void loop() {
   // sensorOk says the probe is really there (a floating pin is not "dry").
   pump.autoLoop((sensorOk & 2) != 0, soilRaw);
   // Did the water arrive? Soil raw at the start of a dose, compared 15 min
-  // after it ends. A capacitive probe reads LOWER when wetter.
+  // after it ends. A capacitive probe reads LOWER when wetter. An automatic
+  // watering given in pulses is one dose here: from before the first pulse to
+  // 15 min after the last, judged on everything it gave.
   {
     static bool was = false;
     static uint16_t rawBefore = 0;
     static uint32_t checkAt = 0;
     static uint16_t doseMl = 0;
     static bool wasAuto = false;
-    bool on = pump.running();
+    bool on = pump.running() || pump.pulsing();
     if (on && !was) rawBefore = soilRaw;
-    if (!on && was && pump.state() == HW_PUMP_DONE && pump.lastDoseMl() >= DOSE_CHECK_MIN_ML &&
+    if (!on && was && pump.state() == HW_PUMP_DONE && pump.lastWateringMl() >= DOSE_CHECK_MIN_ML &&
         (sensorOk & 2)) {
       checkAt = millis() + DOSE_CHECK_MS;
-      doseMl = pump.lastDoseMl();
+      doseMl = pump.lastWateringMl();
       wasAuto = pump.lastDoseWasAuto();
       if (!checkAt) checkAt = 1;
     }

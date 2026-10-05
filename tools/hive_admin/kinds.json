@@ -617,6 +617,13 @@
     "unit": "min",
     "note": "65535 = none yet"
    },
+   "55": {
+    "label": "Automatic pulses",
+    "writable": true,
+    "min": 1,
+    "max": 10,
+    "note": "each automatic watering is given in this many pulses, 3 min apart, so it soaks in instead of running down the probe (1 = all at once)"
+   },
    "250": {
     "label": "Hops to the hive",
     "chart": true,
