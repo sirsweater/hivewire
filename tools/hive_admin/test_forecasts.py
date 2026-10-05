@@ -50,11 +50,11 @@ check(not any(r[0] == "gfs_hrrr" for r in rows), "a model absent from the reply 
 tmp = tempfile.mkdtemp()
 store = H.Store(os.path.join(tmp, "t.db"))
 R.Rollup(store, lambda n: {}, lambda *a: True)          # creates rollup_hour
-cfg = {"lat": 33.2, "lon": -97.1}
+cfg = {"lat": 51.5, "lon": -0.1}
 calls = []
 fc = F.Forecasts(store, lambda: cfg, fetch=lambda url: (calls.append(url), body_for({"gfs_global": 2, "ecmwf_ifs025": -1}))[1])
 n = fc.collect(now=now)
-check(n > 0 and calls and "latitude=33.200" in calls[0] and "gfs_global" in calls[0], "collects from the configured place and models", (n, calls[:1]))
+check(n > 0 and calls and "latitude=51.500" in calls[0] and "gfs_global" in calls[0], "collects from the configured place and models", (n, calls[:1]))
 with store.db() as c:
     cnt = c.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
     old = c.execute("SELECT COUNT(*) FROM forecasts WHERE valid < ?", (issued,)).fetchone()[0]
