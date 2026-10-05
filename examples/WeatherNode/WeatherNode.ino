@@ -267,7 +267,9 @@ static void maybeHeat(float rh) {
 }
 
 // ---- state published by the samplers ---------------------------------------------
-static int16_t  tempCenti = 0;
+// INT16_MIN / 0 while there is no air reading: outside the slots' "valid"
+// ranges, so a missing sensor is a gap everywhere, never a 0 C night.
+static int16_t  tempCenti = INT16_MIN;
 static uint16_t humCenti = 0;
 static uint16_t windAvg10 = 0, windGust10 = 0, windDir = 0xFFFF;
 static uint32_t rainTips = 0;
@@ -283,10 +285,12 @@ static wx::Rain rain;
 
 static void readAir() {
   if (airKind == AIR_NONE) {
-    static uint32_t lastProbe = 0;          // plugged in after boot: pick it up
-    if (lastProbe && millis() - lastProbe < 300000) { sensorOk &= ~1; return; }
+    // Plugged in (or rewired) after boot: look again every 30 s, so it shows
+    // up within half a minute instead of five.
+    static uint32_t lastProbe = 0;
+    if (lastProbe && millis() - lastProbe < 30000) { sensorOk &= ~1; tempCenti = INT16_MIN; humCenti = 0; return; }
     lastProbe = millis();
-    if (!airBegin()) { sensorOk &= ~1; return; }
+    if (!airBegin()) { sensorOk &= ~1; tempCenti = INT16_MIN; humCenti = 0; return; }
   }
   float tC, rh;
   if (airRead(tC, rh)) {
@@ -297,6 +301,7 @@ static void readAir() {
     maybeHeat(rh);
   } else {
     sensorOk &= ~1;
+    tempCenti = INT16_MIN; humCenti = 0;
     if (++airFails % 10 == 1) hwErr(node, HW_E_PERIPHERAL_READ_FAILED, 1, "%s read failed (%u)",
                                     AIR_NAMES[airKind], airFails);
   }
