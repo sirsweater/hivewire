@@ -49,6 +49,7 @@ sys.path.insert(0, HERE)
 from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # noqa: E402
                     slot_modes_from_kind)
 from waterlearn import LearnThread, WaterLearner  # noqa: E402
+from forecasts import Forecasts, ForecastThread  # noqa: E402
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
 # Stored like a slot so it charts and reports like everything else, but it is
@@ -1293,6 +1294,11 @@ class App:
         self.learner = None if self.flash_only else WaterLearner(
             self.store, self.calibration, self.adaptive_node,
             log=lambda msg: self.store.event("command", msg))
+        # Public model forecasts saved next to what the station measures, and
+        # scored against it (forecasts.py). Off until the config has a place.
+        self.forecasts = None if self.flash_only else Forecasts(
+            self.store, lambda: self.cfg.data.get("forecast"),
+            log=lambda msg: self.store.event("system", msg))
         if shutil.which("vcgencmd") and not args.fake:
             threading.Thread(target=self.watch_power, daemon=True).start()
         # Signed-in sessions survive a restart. They used to live only in
@@ -1355,6 +1361,15 @@ class App:
             return False
         spec = self.kinds.get(self.kind_of(nid, rec["slots"]), {})
         return not (spec.get("slots", {}).get(str(slot), {}).get("action"))
+
+    def station_node(self):
+        """The weather station forecasts are scored against: the config's
+        forecast.station_node, else the first WeatherNode heard."""
+        n = (self.cfg.data.get("forecast") or {}).get("station_node")
+        if n is not None:
+            return int(n)
+        nodes = ((self.poller.snapshot or {}).get("nodes") or {}) if self.poller else {}
+        return next((nid for nid in sorted(nodes) if self.node_kind(nid) == "WeatherNode"), None)
 
     def node_kind(self, nid):
         """The node's kind without needing the page open. kind_of() learns a
@@ -1924,6 +1939,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             node = app.adaptive_node(nid)
             return self.send_json({"adaptive": node["adaptive"], "plant_band": node.get("plant_band"),
                                    "recommendation": rec})
+        if path == "/api/forecast/score":
+            # How each public model has done against the station: mean error and
+            # bias per variable and lead time (forecast - measured).
+            nid = int(q["node"]) if q.get("node") else app.station_node()
+            days = max(1, min(35, int(q.get("days") or 14)))
+            score = app.forecasts.score(nid, days) if nid is not None else {}
+            return self.send_json({"node": nid, "days": days, "score": score})
         if path == "/api/report":
             return self.send_json(self.report(int(q["node"]), q["slot"],
                                               int(q["from"]), int(q["to"])))
@@ -2371,6 +2393,7 @@ def main():
         app.poller.start()
         app.uploader.start()
         RollupThread(app.rollup).start()
+        ForecastThread(app.forecasts).start()
 
         def pump_nodes():
             snap = (app.poller.snapshot or {}).get("nodes", {})
