@@ -693,7 +693,10 @@ static void aClock(const void *in) { uint16_t v; memcpy(&v, in, 2); light.reques
 static const HwSlotDef SLOTS[] = {
   {  1, HW_I16, HW_DIR_OUT,     30000, 900000,    50,   0,   0, sTemp,      nullptr },  // 0.5 C
   {  2, HW_U16, HW_DIR_OUT,     30000, 900000,   200,   0,   0, sHum,       nullptr },  // 2 %RH
-  {  3, HW_U16, HW_DIR_OUT,     30000, 900000,    60,   0,   0, sSoilRaw,   nullptr },
+  // 15 counts (~1% moisture): at 60 the hive saw 3.4% stairs -- a night's
+  // drying never crossed one -- and charts and the learner's drying slope
+  // were built from them. The median-of-9 read moves a few counts at most.
+  {  3, HW_U16, HW_DIR_OUT,     30000, 900000,    15,   0,   0, sSoilRaw,   nullptr },
   {  4, HW_U8,  HW_DIR_OUT,     30000, 900000,     3,   0,   0, sSoilPct,   nullptr },
   // 16, not 11: the admin's g4rden upload maps slot numbers to fields for
   // every kind, and 11-15 are wind on a WeatherNode.
