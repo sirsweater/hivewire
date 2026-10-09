@@ -185,6 +185,10 @@ class Hive:
             return s["zero_means"]
         if s.get("valid") and not s["valid"][0] <= raw <= s["valid"][1]:
             return "invalid reading (raw %s)" % raw
+        if "direction" in s.get("label", "").lower() and s.get("unit") == "°":
+            # The compass point, worked out here: a small model calls 177° "southwest".
+            pts = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+            return "%d° (from the %s)" % (raw, pts[int((raw % 360) / 22.5 + 0.5) % 16])
         v = raw * s.get("scale", 1)
         d = s.get("decimals")
         v = round(v, d) if d is not None else v
