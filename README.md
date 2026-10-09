@@ -531,6 +531,23 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
 - **Reports** — any reading over any range, daily low/average/high, CSV export.
 - **Firmware** — upload an app image (its size, CRC and family are read from
   the file), see which nodes would install it, push it with live progress.
+- **Chat** — ask about the swarm in plain words ("what needs attention?",
+  "how much rain this week?", "water the basil 100 ml") through **your own
+  model server**: anything that speaks the OpenAI chat-completions API with
+  tool calls (Ollama at `http://host:11434/v1`, llama.cpp's `llama-server`,
+  LM Studio, vLLM, or a hosted API with a key), or Ollama's native API. Set the
+  address and model on the Chat page; nothing is sent anywhere until you do. The
+  bot reads freely, but every change it proposes appears as a card with
+  **Confirm** and **Decline**, and goes through the same routes as the page's
+  own buttons. The safety doesn't rest on the model: changes only go to a node
+  you named and a setting you named, questions get read-only tools, firmware,
+  automatic watering, calibration and swarm-wide modes are refused outright,
+  and a claim that something was done when nothing was sent is caught. Notes
+  about your own equipment, and faults the hive can't see, go in two optional
+  files next to the data (`chat_knowledge.md`, `known_issues.json`), not in
+  this repo. The same module runs in a terminal from any machine:
+  `python3 tools/hive_admin/hive_chat.py --hive http://<hive-host>:8080 --llm http://localhost:11434/v1 --model qwen2.5:7b`.
+  A 7B-class model is the smallest that has done well.
 - **Settings** — node names and locations, and soil calibration done in the
   page (record the probe dry, then wet); moisture is computed from the raw
   reading, so recalibrating applies to the whole history and never needs a

@@ -50,6 +50,7 @@ from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # n
                     slot_modes_from_kind)
 from waterlearn import LearnThread, WaterLearner  # noqa: E402
 from forecasts import Forecasts, ForecastThread  # noqa: E402
+import hive_chat  # noqa: E402
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
 # Stored like a slot so it charts and reports like everything else, but it is
@@ -1253,6 +1254,8 @@ class App:
         os.makedirs(args.data, exist_ok=True)
         self.cfg = Config(os.path.join(args.data, "config.json"))
         self.store = Store(os.path.join(args.data, "hive.db"))
+        self.chats = {}                  # session hash -> hive_chat.Conversation
+        self.configure_chat()
         csv_path = os.path.join(args.data, "readings.csv")
         if os.path.exists(csv_path) and not self.cfg.data.get("csv_imported"):
             n = self.store.import_csv(csv_path)
@@ -1719,6 +1722,48 @@ def fmt_age(s):
     return "%dd" % (s // 86400)
 
 
+# --- chat ---------------------------------------------------------------------
+CHAT_DEFAULTS = {"url": "", "model": "", "api": "openai", "api_key": ""}
+
+
+def chat_cfg(app):
+    c = dict(CHAT_DEFAULTS)
+    c.update(app.cfg.data.get("chat") or {})
+    return c
+
+
+def _configure_chat(app):
+    c = chat_cfg(app)
+    d = app.args.data
+    hive_chat.configure(url=c["url"] or "http://localhost:11434/v1", model=c["model"] or "", api=c["api"],
+                        api_key=c["api_key"], knowledge_file=os.path.join(d, "chat_knowledge.md"),
+                        known_issues_file=os.path.join(d, "known_issues.json"))
+
+
+class LocalHive(hive_chat.Hive):
+    """The chat's view of the hive, served by this admin's own routes in-process:
+    same handlers, same checks, no HTTP round trip and no second login."""
+
+    def __init__(self, app):
+        self.app = app
+        self._kinds = None
+
+    def call(self, method, path, query=None, body=None, _retry=True):
+        h = _Capture(self.app, body)
+        q = {k: str(v) for k, v in (query or {}).items()}
+        try:
+            if method == "GET":
+                h.route_get(path, q)
+            else:
+                h.route_post(path, q)
+        except (ValueError, RuntimeError, KeyError) as e:
+            raise RuntimeError("hive admin %s %s: %s" % (method, path, e))
+        obj, code = h.out or (None, 500)
+        if code >= 400:
+            raise RuntimeError("hive admin %s %s: HTTP %d %s" % (method, path, code, (obj or {}).get("error", "")))
+        return obj
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     app = None
     server_version = "HiveAdmin/1"
@@ -1775,6 +1820,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.app.sessions[h] = max(exp, fresh - 86400)
         return True
+
+    def chat_key(self):
+        """Each signed-in browser session has its own conversation."""
+        t = self.token()
+        return self.app.session_hash(t) if t else "local"
 
     def csrf_ok(self):
         # Every state-changing call comes from our own page with this header;
@@ -1989,6 +2039,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             t1 = int(q.get("to") or now())
             t0 = int(q.get("from") or t1 - 86400)
             return self.send_json(app.store.notes(t0, t1))
+        if path == "/api/chat/config":
+            c = chat_cfg(app)
+            d = app.args.data
+            return self.send_json({"url": c["url"], "model": c["model"], "api": c["api"],
+                                   "key_set": bool(c["api_key"]), "enabled": bool(c["url"] and c["model"]),
+                                   "knowledge_file": os.path.join(d, "chat_knowledge.md"),
+                                   "knowledge_present": os.path.exists(os.path.join(d, "chat_knowledge.md")),
+                                   "known_issues_file": os.path.join(d, "known_issues.json"),
+                                   "known_issues_present": os.path.exists(os.path.join(d, "known_issues.json"))})
+        if path == "/api/chat/history":
+            conv = app.chats.get(self.chat_key())
+            if not conv:
+                return self.send_json({"messages": [], "pending": []})
+            msgs = [{"role": m["role"], "text": m["content"]} for m in conv.messages[1:]
+                    if m["role"] in ("user", "assistant") and m.get("content")
+                    and not m["content"].startswith("[")]
+            for m in msgs:          # the facts the bot adds beside a question aren't the person's words
+                if m["role"] == "user":
+                    m["text"] = m["text"].split("\n\n[Hive facts")[0]
+            return self.send_json({"messages": msgs, "pending": [{"id": k, "summary": v["summary"]}
+                                                                 for k, v in conv.pending.items()]})
         if path == "/api/events":
             return self.send_json(app.store.events(int(q.get("limit", 200))))
         if path == "/api/firmware":
@@ -2290,6 +2361,69 @@ class Handler(http.server.BaseHTTPRequestHandler):
             app.store.event("config", "node %d: %s" % (nid, ", ".join(
                 "%s=%s" % kv for kv in patch.items())))
             return self.send_json({"ok": True})
+        if path == "/api/chat":
+            c = chat_cfg(app)
+            if not (c["url"] and c["model"]):
+                raise ValueError("chat isn't set up: give it a model server on the Chat page")
+            q = str(self.jbody().get("q", "")).strip()[:2000]
+            if not q:
+                raise ValueError("empty message")
+            key = self.chat_key()
+            conv = app.chats.get(key)
+            if conv is None:
+                if len(app.chats) > 50:
+                    app.chats.clear()
+                conv = app.chats[key] = hive_chat.Conversation()
+            try:
+                out = conv.ask(LocalHive(app), q)
+            except hive_chat.LLMError as e:
+                return self.fail(str(e), 502)
+            for p in out["pending"]:
+                app.store.event("command", "chat proposed (awaiting confirm): %s" % p["summary"].split("\n")[0])
+            return self.send_json(out)
+        if path in ("/api/chat/confirm", "/api/chat/decline"):
+            conv = app.chats.get(self.chat_key())
+            pid = str(self.jbody().get("id", ""))
+            if not conv:
+                raise ValueError("no chat in progress")
+            if path.endswith("decline"):
+                return self.send_json(conv.decline(pid))
+            out = conv.approve(LocalHive(app), pid)
+            app.store.event("command", "chat: confirmed by the person: %s" % out["summary"].split("\n")[0])
+            return self.send_json(out)
+        if path == "/api/chat/reset":
+            app.chats.pop(self.chat_key(), None)
+            return self.send_json({"ok": True})
+        if path == "/api/chat/config":
+            b = self.jbody()
+            c = chat_cfg(app)
+            url = str(b.get("url", c["url"])).strip().rstrip("/")
+            if url and not re.match(r"^https?://[^\s/]+", url):
+                raise ValueError("the model server must be an http(s):// address")
+            api = str(b.get("api", c["api"]))
+            if api not in ("openai", "ollama"):
+                raise ValueError("api must be openai or ollama")
+            c.update(url=url, model=str(b.get("model", c["model"])).strip()[:100], api=api)
+            if b.get("clear_key"):
+                c["api_key"] = ""
+            elif b.get("api_key"):
+                c["api_key"] = str(b["api_key"]).strip()[:400]
+            app.cfg.data["chat"] = c
+            app.cfg.save()
+            app.configure_chat()
+            app.store.event("config", "chat model server set to %s (%s, %s)" % (url or "none", c["model"], api))
+            return self.send_json({"ok": True})
+        if path == "/api/chat/test":
+            c = chat_cfg(app)
+            if not (c["url"] and c["model"]):
+                raise ValueError("set the model server and model first")
+            t = time.time()
+            try:
+                m = hive_chat.llm_chat([{"role": "user", "content": "Reply with the single word: ready"}],
+                                       no_tools=True, wait=0)
+            except hive_chat.LLMError as e:
+                return self.fail(str(e), 502)
+            return self.send_json({"ok": True, "reply": (m.get("content") or "")[:80], "secs": round(time.time() - t, 1)})
         if path == "/api/settings":
             b = self.jbody()
             for k in ("poll_seconds", "full_every_seconds", "stale_seconds"):
@@ -2421,6 +2555,29 @@ def main():
     print("hive admin on http://%s:%d/ (%s)" % (args.listen, args.http_port,
           "flash only" if app.flash_only else "simulated" if args.fake else args.port), flush=True)
     srv.serve_forever()
+
+
+class _Capture(Handler):
+    """A request handler with no socket: route_get/route_post write here."""
+
+    def __init__(self, app, body):
+        self.app_ = app
+        self._body = body
+        self.out = None
+        self.headers = {}
+        self.client_address = ("127.0.0.1", 0)
+
+    def send_json(self, obj, code=200):
+        self.out = (obj, code)
+
+    def jbody(self):
+        return dict(self._body or {})
+
+    def body(self, limit=4 << 20):
+        return json.dumps(self._body or {}).encode()
+
+
+App.configure_chat = _configure_chat
 
 
 if __name__ == "__main__":

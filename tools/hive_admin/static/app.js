@@ -755,6 +755,100 @@ views.g4rden = async (el) => {
   };
 };
 
+// Chat: talk to the hive through your own model server (anything OpenAI-compatible,
+// or Ollama). The bot reads freely; every change it proposes waits here for a
+// Confirm click and goes through the same /api routes as the buttons elsewhere.
+function chatText(t) {
+  // Model output is untrusted text: escape everything, keep line breaks and **bold**.
+  return esc(t).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/\n/g, "<br>");
+}
+views.chat = async (el) => {
+  const cfg = await api("/api/chat/config");
+  const setup = `
+    <details class="card stack" ${cfg.enabled ? "" : "open"}><summary><b>Model server</b>
+      <span class="muted small">${cfg.enabled ? esc(cfg.model) + " at " + esc(cfg.url) : "not set up"}</span></summary>
+      <p class="muted small">Any server that speaks the OpenAI chat-completions API with tool calls: Ollama
+        (<span class="mono">http://host:11434/v1</span>), llama.cpp's llama-server, LM Studio, vLLM, or a hosted API with a key.
+        Choose <b>Ollama native</b> for <span class="mono">http://host:11434</span> without <span class="mono">/v1</span>.
+        A 7B-class model with tool calling (e.g. qwen2.5:7b) is the smallest that works well.</p>
+      <form id="chatcfg" class="row" style="align-items:flex-end;flex-wrap:wrap">
+        <label class="f">Server URL<input id="c-url" value="${esc(cfg.url)}" placeholder="http://192.168.1.20:11434/v1" style="width:260px"></label>
+        <label class="f">Model<input id="c-model" value="${esc(cfg.model)}" placeholder="qwen2.5:7b" style="width:150px"></label>
+        <label class="f">API<select id="c-api"><option value="openai">OpenAI-compatible</option><option value="ollama">Ollama native</option></select></label>
+        <label class="f">API key (optional)<input id="c-key" type="password" autocomplete="off" placeholder="${cfg.key_set ? "set - leave blank to keep" : "none"}" style="width:170px"></label>
+        <button class="primary">Save</button><button type="button" id="c-test">Test</button>
+        ${cfg.key_set ? '<button type="button" id="c-clear">Remove key</button>' : ""}</form>
+      <p class="muted small">Optional, on this machine: <span class="mono">${esc(cfg.knowledge_file)}</span>
+        (${cfg.knowledge_present ? "present" : "not present"}) - notes about your equipment, added to the bot's instructions;
+        <span class="mono">${esc(cfg.known_issues_file)}</span> (${cfg.known_issues_present ? "present" : "not present"}) -
+        faults the hive can't see, as JSON <span class="mono">{"5": "pump sticks on"}</span>.</p>
+    </details>`;
+  el.innerHTML = `<div class="head"><h1>Chat</h1><div class="muted small">Ask about the swarm in plain words. Changes it proposes wait for your Confirm.</div></div>
+    ${cfg.enabled ? `<div class="card stack">
+      <div id="chatlog" class="chatlog"></div>
+      <form id="chatform" class="row"><input id="chatq" autocomplete="off" placeholder="e.g. what needs attention?" style="flex:1" maxlength="2000">
+        <button class="primary" id="chatsend">Send</button><button type="button" id="chatreset" title="Start a new conversation">New chat</button></form>
+      <p class="muted small">Answers come from a language model reading the hive: check anything important. It can't
+        change firmware, automatic watering or calibration, or broadcast swarm modes.</p></div>` : ""}
+    <div style="margin-top:16px">${setup}</div>`;
+  $("#c-api").value = cfg.api;
+  $("#chatcfg").onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { url: $("#c-url").value.trim(), model: $("#c-model").value.trim(), api: $("#c-api").value };
+    if ($("#c-key").value) body.api_key = $("#c-key").value;
+    try { await api("/api/chat/config", body); toast("Saved"); render(); } catch (err) { toast(err.message, 6000); }
+  };
+  $("#c-test").onclick = async () => {
+    const b = $("#c-test"); b.disabled = true; b.textContent = "Testing...";
+    try { const r = await api("/api/chat/test", {}); toast(`Model answered in ${r.secs}s: "${r.reply}"`, 6000); }
+    catch (err) { toast(err.message, 8000); }
+    b.disabled = false; b.textContent = "Test";
+  };
+  if ($("#c-clear")) $("#c-clear").onclick = async () => { await api("/api/chat/config", { clear_key: true }); toast("Key removed"); render(); };
+  if (!cfg.enabled) return;
+
+  const log = $("#chatlog");
+  const add = (role, html) => {
+    const d = document.createElement("div");
+    d.className = "msg " + role; d.innerHTML = html; log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+  };
+  const pendingCard = (p) => {
+    const d = add("pending", `<div class="small muted">The bot wants to:</div><div>${chatText(p.summary)}</div>
+      <div class="row" style="margin-top:8px"><button class="primary">Confirm</button><button>Decline</button></div>`);
+    const [ok, no] = d.querySelectorAll("button");
+    ok.onclick = async () => {
+      ok.disabled = no.disabled = true;
+      try { const r = await api("/api/chat/confirm", { id: p.id });
+        d.innerHTML = `<div class="small">Sent: ${chatText(r.summary)}</div><div class="small muted mono">${esc(JSON.stringify(r.reply))}</div>`;
+        d.className = "msg done"; }
+      catch (err) { toast(err.message, 6000); ok.disabled = no.disabled = false; }
+    };
+    no.onclick = async () => {
+      await api("/api/chat/decline", { id: p.id }).catch(() => {});
+      d.innerHTML = `<div class="small muted">Declined - not sent: ${chatText(p.summary)}</div>`; d.className = "msg done";
+    };
+  };
+  const hist = await api("/api/chat/history");
+  if (!hist.messages.length) add("bot", "Hi - ask me about the hive: readings, problems, history, or a change you want made.");
+  hist.messages.forEach((m) => add(m.role === "user" ? "you" : "bot", chatText(m.text)));
+  hist.pending.forEach(pendingCard);
+  $("#chatform").onsubmit = async (e) => {
+    e.preventDefault();
+    const q = $("#chatq").value.trim();
+    if (!q) return;
+    $("#chatq").value = ""; add("you", chatText(q));
+    const wait = add("bot thinking", "Thinking...");
+    $("#chatsend").disabled = true;
+    try {
+      const r = await api("/api/chat", { q });
+      wait.remove(); add("bot", chatText(r.answer)); r.pending.forEach(pendingCard);
+    } catch (err) { wait.remove(); add("bot err", esc(err.message)); }
+    $("#chatsend").disabled = false; $("#chatq").focus();
+  };
+  $("#chatreset").onclick = async () => { await api("/api/chat/reset", {}); render(); };
+  $("#chatq").focus();
+};
+
 views.events = async (el) => {
   const ev = await api("/api/events?limit=300");
   el.innerHTML = `<div class="head"><h1>Activity</h1><div class="muted small">Commands, configuration changes, firmware and system events.</div></div>
