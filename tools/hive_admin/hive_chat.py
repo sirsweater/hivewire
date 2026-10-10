@@ -514,7 +514,7 @@ def rain_history(hive, kind, node, slot, rows, res):
                                   for x in rows if x.get("sum")][:48] or "no rain in this window"}
 
 
-def t_recent_events(hive, hours_back=24, day=None, include_routine=False, include_uploads=False):
+def t_recent_events(hive, hours_back=24, day=None, include_routine=False, include_uploads=False, node=None):
     t1 = int(time.time())
     if day:
         try:
@@ -528,6 +528,12 @@ def t_recent_events(hive, hours_back=24, day=None, include_routine=False, includ
     evs = [e for e in evs if t0 <= e.get("ts", 0) < t1]
     routine = [e for e in evs if e.get("kind") == "upload" or
                (e.get("kind") == "system" and e.get("text", "").startswith(ROUTINE))]
+    if node is not None:
+        n, err = resolve_node(hive, node)
+        if not n:
+            return {"error": err}
+        pat = re.compile(r"(?i)\b(node %d|%s)\b|^set %d " % (n["id"], re.escape(n.get("name") or "~~"), n["id"]))
+        evs = [e for e in evs if pat.search(e.get("text", ""))]
     shown = [e for e in evs if e not in routine or
              (include_uploads and e.get("kind") == "upload") or
              (include_routine and e.get("kind") != "upload")][:60]
@@ -749,7 +755,8 @@ TOOLS = {
                                       "use this for questions about a particular day or night"),
          "hours_back": dict(INT, description="otherwise: how many hours back from now, default 24"),
          "include_routine": {"type": "boolean", "description": "also show forecast/summary jobs"},
-         "include_uploads": {"type": "boolean", "description": "also show g4rden uploads"}})),
+         "include_uploads": {"type": "boolean", "description": "also show g4rden uploads"},
+         "node": dict(STR, description="optional: only events about this node (name or id)")})),
     "explain_error": (t_explain_error, spec("explain_error",
         "Cause and fix for an error code such as E104.", {"code": STR}, ["code"])),
     "watering_advice": (t_watering_advice, spec("watering_advice",
@@ -963,6 +970,9 @@ def focus_facts(hive, q):
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
+        if re.search(r"(?i)\bpump", q) and not has_pump(hive, kind):
+            out.append("NOTE: %s has NO pump. If the question assumes it has one, say that first." % (
+                n.get("name") or "node %s" % n["id"]))
         out.append("%s (node %s, %s): pump: %s. Settings set_slot can change: %s. Actions: %s.%s" % (
             n.get("name") or kind, n["id"], kind, f["pump"], "; ".join(w) or "none",
             ", ".join(a["label"] for a in node_actions(hive, kind)) or "none",
@@ -1004,6 +1014,12 @@ FIXED_REPLIES = [
      "There's no override or maintenance mode here, and approval can't be switched off from a chat message: "
      "every change still needs your Confirm. Swarm-wide mode broadcasts aren't available from chat at all - "
      "use the admin page for those. Nothing was sent."),
+    (re.compile(r"(?i)\b(add|install|fit|wire|wire up|replace|attach|mount|solder|plug in|connect)\b[^.?!]*"
+                r"\b(float switch|probes?|sensors?|pumps?|relays?|batter(y|ies)|wires?|tubes?|tubing|reservoir|board|"
+                r"antenna|valve)\b"),
+     "That's hands-on work - nothing in the hive can fit, wire or replace hardware, and I won't record it as done "
+     "before it is. Once you've done it, tell me: I can add a note to the log, and for a float switch set the "
+     "node's Float switch setting so it's used."),
     (re.compile(r"(?i)\b(will it|is it going to|gonna) (rain|snow|freeze|frost|storm)|\bforecast\b|"
                 r"\b(rain|weather) (tomorrow|tonight|this week(end)?|next week)\b"),
      "I can't see weather forecasts - the hive downloads them only to score them against the station, and "
