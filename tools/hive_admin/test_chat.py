@@ -267,6 +267,20 @@ check(re.search(r"soil now (\d|not calibrated)", f), "a named plant's soil readi
 check(hive.fmt("WaterNode", 52, 162) == "162 min (2.7 hours)", "long minute settings are also given in hours",
       hive.fmt("WaterNode", 52, 162))
 
+# --- a reservoir with no float switch is never called empty or full ---------------
+sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
+sl[47] = 2
+said = "Node %d's reservoir is currently empty. Consider a float switch." % pump["id"]
+t = C.scrub_reservoir(hive, "is node %d's reservoir empty?" % pump["id"], said)
+check("currently empty" not in t and "can't tell" in t and "Consider a float switch." in t,
+      "'the reservoir is empty' with no float switch is replaced, the rest kept", t)
+check(C.scrub_reservoir(hive, "is the reservoir empty?", "I can't tell whether the reservoir is empty.") ==
+      "I can't tell whether the reservoir is empty.", "...an honest answer is left alone")
+check("RESERVOIRS:" in C.focus_facts(hive, "is the reservoir empty?"), "...and the readings sit beside the question")
+sl[47] = 0
+check(C.scrub_reservoir(hive, "is the reservoir empty?", said) == said, "a float switch that says EMPTY can be believed")
+sl.pop(47, None)
+
 # --- the 24-hour allowance is worked out in code ---------------------------------
 sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
 sl.update({44: 400, 45: 100, 43: 250})

@@ -1088,8 +1088,58 @@ def dew_point(hive):
     return "No node has a working air temperature and humidity sensor, so the dew point can't be worked out."
 
 
+RESERVOIR_Q = re.compile(r"(?i)\b(reservoir|tank|bucket|water level|float switch)\b|\brun(ning)? (out|dry)\b")
+
+
+def reservoirs(hive):
+    """{name: what its Reservoir reading says} for every node with a pump."""
+    out = {}
+    for n in hive.call("GET", "/api/state").get("nodes", []):
+        kind = n.get("kind")
+        if n.get("hidden") or not has_pump(hive, kind):
+            continue
+        sid = next((sid for sid, sp in ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
+                    if sp.get("label") == "Reservoir"), None)
+        v = (n.get("slots") or {}).get(sid) if sid else None
+        out[n.get("name") or "node %s" % n["id"]] = hive.fmt(kind, sid, v) if v is not None else "no reading"
+    return out
+
+
+def reservoir_hint(hive):
+    r = reservoirs(hive)
+    if not r:
+        return None
+    return ("RESERVOIRS: %s. \"no float switch\" means the hive CANNOT tell whether that reservoir is empty or "
+            "full - say exactly that, and never call it empty, full or low. \"EMPTY\" means its float switch "
+            "reports no water." % "; ".join("%s: %s" % kv for kv in r.items()))
+
+
+def scrub_reservoir(hive, q, answer):
+    """A sentence calling a reservoir with no float switch empty or full is replaced:
+    the hive has no way to know (the model said "is currently empty")."""
+    if not RESERVOIR_Q.search(q):
+        return answer
+    r = reservoirs(hive)
+    blind = [nm for nm, v in r.items() if v == "no float switch"]
+    named = [nm for nm in r if nm.lower() in q.lower()]
+    if not blind or (named and not set(named) <= set(blind)) or (not named and len(blind) < len(r)):
+        return answer
+    fix = "The hive can't tell whether %s reservoir is empty or full: it has no float switch." % (
+        "the %s" % named[0] if len(named) == 1 else "this")
+
+    def one(m):
+        t = m.group(0)
+        if re.search(r"(?i)\b(can't|cannot|can not|no way|unknown|not (possible|able|known)|don't know|"
+                     r"doesn't know|whether|if it)\b", t):
+            return t
+        return (" " if t[:1].isspace() else "") + fix
+    return re.sub(r"(?i)\s*[^.!?\n]*\b(reservoir|tank)\b[^.!?\n]*\b(is|appears|seems|looks|it's|probably)\b"
+                  r"[^.!?\n]*\b(empty|full|low|dry)\b[^.!?\n]*[.!?]?", one, answer)
+
+
 # Hints keyed on what the question is about, placed beside it like focus_facts.
 TOPIC_HINTS = [
+    (RESERVOIR_Q, reservoir_hint),
     (re.compile(r"(?i)\bdew ?point"), dew_point),
     (re.compile(r"(?i)\brain"), lambda hive: next(
         ("Rain amounts: call slot_history with node %s, slot 14 and the hours asked about (a week = 168); it "
@@ -1351,7 +1401,7 @@ def ask(hive, messages, q, on_tool=None):
         tail = messages[-30:]
         first_q = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
         messages[:] = messages[:1] + tail[first_q:]
-    answer = scrub_offers((msg.get("content") or "").strip())
+    answer = scrub_reservoir(hive, q, scrub_offers((msg.get("content") or "").strip()))
     if not answer:
         # Out of tool rounds, or it simply said nothing: one plain-words try, no tools.
         messages.append({"role": "user", "content": "[From the hive, not the person: answer the person now "
