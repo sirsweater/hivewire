@@ -989,9 +989,11 @@ CLAIM = re.compile(r"(?i)(?<!can )(?<!could )(?<!shall )(?<!should )(?<!may )(?<
 # A request for a change, as opposed to a question: an imperative verb at the start
 # of a sentence, or after "can you / please / go ahead and ...".
 REQUEST = re.compile(r"(?i)(^|[.!?]\s+|\b(can|could|would|will) you\s+|\bplease\s+|\bgo ahead and\s+|"
-                     r"\bi (want|need) you to\s+|\bok(ay)?,?\s+|\bjust\s+|\bnow\s+)"
+                     r"\bi (want|need) you to\s+|\bok(ay)?,?\s+|\bjust\s+|\bnow\s+|\bactually,?\s+|\bthen\s+)"
                      r"(water|pump|stop|reboot|restart|reset|set|rename|turn|run|change|add|note|log|mark|give|"
-                     r"enable|disable|switch|update)\b")
+                     r"enable|disable|switch|update|make|redo|try|use|do)\b"
+                     # an amendment to the last request: "make it 50 ml instead", "change that to 50"
+                     r"|\b(make|change) (it|that|this)\b.*\b(ml|instead|to \d)|\binstead\b.*\b\d+ ?ml\b")
 CALIBRATE = re.compile(r"(?i)(calibrat|measur\w* (the |its )?flow|\bfor \d+ ?(s|sec|secs|seconds)\b)")
 # Questions with one right answer, given without the model: it gets these
 # wrong often enough (going along with a fake "override", answering a forecast
