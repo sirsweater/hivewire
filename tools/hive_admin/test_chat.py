@@ -189,6 +189,39 @@ check("recalibrate" not in t and "admin page" in t, "an offer to recalibrate is 
 t = C.scrub_offers("Automatic watering is on, and calibration was done on Oct 4.")
 check(t == "Automatic watering is on, and calibration was done on Oct 4.", "plain statements are left alone", t)
 
+# --- a node the gateway has forgotten ------------------------------------------
+# The gateway drops a node some hours after it stops reporting. It must still be
+# findable, as "not reporting since ...", not "there is no node 99".
+t0 = int(H.now())
+app.cfg.set_node(99, {"name": "Old relay", "auto_kind": "RangeNode"})
+app.cfg.set_node(98, {"auto_kind": "RangeNode"})
+app.cfg.set_node(97, {"auto_kind": "RangeNode", "hidden": True})
+app.store.add_readings([(t0 - 3 * 3600, 99, 1, 5), (t0 - 10 * 86400, 98, 1, 5), (t0 - 3600, 97, 1, 5)])
+app._silent_cache = (0, {})
+st = hive.call("GET", "/api/state")
+gone = {x["id"]: x for x in st.get("silent", [])}
+check(99 in gone and 98 in gone and 97 not in gone, "state lists known nodes the gateway dropped, not hidden ones",
+      sorted(gone))
+check(not any(n["id"] in (97, 98, 99) for n in st["nodes"]), "...apart from the live cards")
+check(3 * 3600 - 5 <= (gone[99]["age"] or 0) <= 3 * 3600 + 60, "...with when each was last heard", gone[99])
+n, err = C.resolve_node(hive, "node 99")
+check(n is None and "NOT reporting" in err and "3h ago" in err, "asking for it says it went quiet, and when", err)
+n, err = C.resolve_node(hive, "old relay")
+check(n is None and "NOT reporting" in err, "...by name too", err)
+s = C.t_hive_status(hive)
+check(any("node 99" in x for x in s.get("not_reporting", [])) and
+      not any("node 98" in x for x in s.get("not_reporting", [])), "the status lists what went quiet this week", s.get("not_reporting"))
+check("98" in json.dumps({k: v for k, v in s.items() if k.startswith("silent_over")}),
+      "...and names the long-silent ones apart, as probably retired")
+f = C.focus_facts(hive, "how's node 99 doing?")
+check("NOT reporting" in f, "a question naming it gets the fact beside it", f)
+conv = C.Conversation()
+out = conv.ask(hive, "reset the counters on node 99")
+check(not out["pending"] and "NOT reporting" in out["answer"] and "Which one" not in out["answer"],
+      "a command for it says it went quiet, and proposes nothing", out)
+for k in (97, 98, 99):
+    app.cfg.data["nodes"].pop(str(k), None)
+
 # --- the long-prompt check behind the Test button -------------------------------
 def keeps(messages, **kw):
     m = re.search(r"code word is (\S+)\.", messages[0]["content"])

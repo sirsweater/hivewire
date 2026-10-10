@@ -152,6 +152,11 @@ class Store:
             r = c.execute("SELECT MAX(ts) FROM readings").fetchone()
         return r[0] or 0
 
+    def last_heard(self, node):
+        """When a node's last reading was stored, or None if it never sent one."""
+        with self.db() as c:
+            return c.execute("SELECT MAX(ts) FROM readings WHERE node=?", (node,)).fetchone()[0]
+
     def latest(self, node):
         """{slot: value} as last stored for a node. (SQLite returns the row
         holding MAX(ts) for bare columns in an aggregate query.)"""
@@ -1255,6 +1260,7 @@ class App:
         self.cfg = Config(os.path.join(args.data, "config.json"))
         self.store = Store(os.path.join(args.data, "hive.db"))
         self.chats = {}                  # session hash -> hive_chat.Conversation
+        self._silent_cache = (0, {})     # (since, {node: last reading ts}) for silent_nodes
         self.configure_chat()
         csv_path = os.path.join(args.data, "readings.csv")
         if os.path.exists(csv_path) and not self.cfg.data.get("csv_imported"):
@@ -1681,9 +1687,33 @@ class App:
                               "warnings": warnings, "hidden": bool(meta.get("hidden"))})
         return {"time": now(), "snapshot_time": snap["time"] if snap else None,
                 "health": snap["health"] if snap else None, "nodes": nodes,
+                "silent": self.silent_nodes({n["id"] for n in nodes}) if snap else [],
                 "error": self.poller.last_error, "pushing": self.gw.pushing,
                 "problems": self.problems.active_list(),
                 "fake": bool(self.args.fake)}
+
+    def silent_nodes(self, live):
+        """Nodes the hive knows but the gateway no longer lists. The gateway forgets
+        a node some hours after it stops reporting, so without this a node that
+        went quiet (and raised an alert saying so) would drop off the page and out
+        of the chat as if it had never existed. Kept apart from "nodes" so the
+        cards don't fill up with retired boards; hide one to drop it here too."""
+        if now() - self._silent_cache[0] > 300:
+            self._silent_cache = (now(), {})
+        heard = self._silent_cache[1]
+        out = []
+        for key, meta in sorted((self.cfg.data.get("nodes") or {}).items(), key=lambda kv: int(kv[0])):
+            nid = int(key)
+            if nid in live or meta.get("hidden"):
+                continue
+            if nid not in heard:
+                heard[nid] = self.store.last_heard(nid)
+            ts = heard[nid]
+            out.append({"id": nid, "name": meta.get("name") or "",
+                        "kind": meta.get("kind") or meta.get("auto_kind") or "",
+                        "location": meta.get("location") or "",
+                        "last_heard": ts, "age": now() - ts if ts else None})
+        return out
 
 
 # The same LiPo discharge curve the node uses, so the calibrated percentage and

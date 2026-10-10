@@ -205,6 +205,21 @@ def ago(secs):
             "%dh" % (secs // 3600) if secs < 172800 else "%d days" % (secs // 86400))
 
 
+RETIRED_S = 7 * 86400     # silent this long: probably retired, not news
+
+
+def silent_line(n):
+    """One sentence on a node the hive knows but no longer hears (state["silent"])."""
+    who = "%s (node %s%s)" % (n.get("name") or "Node %s" % n["id"], n["id"],
+                              ", " + n["kind"] if n.get("kind") else "")
+    if not n.get("last_heard"):
+        return "%s is known to the hive but has never sent a reading." % who
+    when = time.strftime("%b %d %H:%M", time.localtime(n["last_heard"]))
+    return ("%s is NOT reporting: last heard %s ago (%s). The gateway has dropped it, so there are "
+            "no current readings and nothing sent to it would arrive. Check its power, or whether it "
+            "moved out of range of the hive." % (who, ago(n.get("age")), when))
+
+
 def readings(hive, n, only=None):
     """{label (slot N): value in units}; `only` limits to those slot ids."""
     kind, out = n.get("kind") or "?", {}
@@ -346,6 +361,10 @@ def resolve_node(hive, ref, st=None):
           [x for x in nodes if ref.lower() in (x.get("name") or "").lower()]
     if len(hit) == 1:
         return hit[0], st
+    gone = [x for x in st.get("silent") or []
+            if (str(x["id"]) == ref if ref.isdigit() else x.get("name") and ref.lower() in x["name"].lower())]
+    if not hit and len(gone) == 1:
+        return None, silent_line(gone[0])
     known = ", ".join("%s %s" % (x["id"], x.get("name") or "(%s)" % x.get("kind")) for x in nodes)
     return None, ("%s node matching %r. The hive's nodes are: %s" % (
         "More than one" if hit else "There is no", ref, known))
@@ -389,8 +408,15 @@ def t_hive_status(hive):
                                                 {sid for sid, v in (n.get("slots") or {}).items() if v is not None and
                                                  "temperature" in hive.slot_spec(kind, sid).get("label", "").lower()})},
                           **facts(hive, meta, n)))
-    return {"nodes": nodes, "gateway_error": st.get("error"), "active_problems": st.get("problems"),
-            "simulated": st.get("fake")}
+    silent = [x for x in st.get("silent") or [] if x.get("last_heard")]
+    recent = [silent_line(x) for x in silent if (x.get("age") or 0) < RETIRED_S]
+    old = ["node %s%s" % (x["id"], " " + x["name"] if x.get("name") else "") for x in silent
+           if (x.get("age") or 0) >= RETIRED_S]
+    return dict({"nodes": nodes, "gateway_error": st.get("error"), "active_problems": st.get("problems"),
+                 "simulated": st.get("fake")},
+                **({"not_reporting": recent} if recent else {}),
+                **({"silent_over_a_week (probably retired - hide them on the admin page)": ", ".join(old)}
+                   if old else {}))
 
 
 def t_node_detail(hive, node):
@@ -962,8 +988,10 @@ def focus_facts(hive, q):
     SAID[:] = [q]
     try:
         named = [n for n in st.get("nodes", []) if not n.get("hidden") and named_by_person(n)]
+        quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
     finally:
         SAID[:] = keep
+    out += [silent_line(x) for x in quiet]
     for n in named:
         kind = n.get("kind")
         f = facts(hive, cfg.get(str(n["id"])) or {}, n)
@@ -1066,9 +1094,10 @@ def ask(hive, messages, q, on_tool=None):
     SAID.append(q)
     # "water it" with no plant named anywhere: a small model picks one. Don't let it.
     try:
-        nodes = [n for n in hive.call("GET", "/api/state").get("nodes", []) if not n.get("hidden")]
+        st = hive.call("GET", "/api/state")
     except RuntimeError:
-        nodes = []
+        st = {}
+    nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
     fixed = next((a for pat, a in FIXED_REPLIES if pat.search(q)), None)
     if fixed:
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": fixed}]
@@ -1095,6 +1124,11 @@ def ask(hive, messages, q, on_tool=None):
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
     if COMMAND.search(q) and nodes and not any(named_by_person(n) for n in nodes):
+        quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
+        if quiet:       # a node the gateway dropped: nothing sent would arrive
+            a = " ".join(silent_line(x) for x in quiet) + " Nothing was sent."
+            messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+            return a
         # Water/pump/stop only make sense for a node with a pump: offer just those.
         pick = pumps if re.search(r"(?i)^\s*(please\s+)?(water|pump|stop)\b", q) and pumps else nodes
         a = "Which one do you mean? %s: %s." % (
