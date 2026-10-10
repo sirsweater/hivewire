@@ -279,8 +279,11 @@ def plant(meta, n):
     if band:
         out["target_soil"] = "%s-%s %%" % tuple(band)
         if soil is not None:
+            pos = (soil - band[0]) / float(band[1] - band[0]) if band[1] > band[0] else 0.5
             out["soil_vs_target"] = ("TOO WET (above target)" if soil > band[1] else
-                                     "TOO DRY (below target)" if soil < band[0] else "within target")
+                                     "TOO DRY (below target)" if soil < band[0] else
+                                     "within target, near the wet end" if pos >= 0.8 else
+                                     "within target, near the dry end" if pos <= 0.2 else "within target")
     if "adaptive" in meta:
         out["automatic_watering"] = "on" if (meta["adaptive"].get("on") and
                                              not meta["adaptive"].get("user_off")) else "off"
@@ -592,6 +595,25 @@ def rain_history(hive, kind, node, slot, rows, res):
                                   for x in rows if x.get("sum")][:48] or "no rain in this window"}
 
 
+SET_EVENT = re.compile(r"^set (\d+) (\d+) (-?\d+)\s*(?:->\s*(.*))?$")
+
+
+def explain_event(hive, text, who):
+    """"set 7 24 5 -> ACK set 24=5" in words: it was read as a watering setting, and slot
+    24 seeds firmware to another node. `who` maps node id -> (kind, name)."""
+    m = SET_EVENT.match(text or "")
+    if not m or int(m.group(1)) not in who:
+        return text
+    nid, sid, v, res = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4)
+    kind, name = who[nid]
+    label = hive.slot_spec(kind, sid).get("label")
+    if not label:
+        return text
+    return "%s (node %d): %s (slot %s) set to %s%s" % (
+        name or kind, nid, label, sid, hive.fmt(kind, sid, v),
+        " - the node acknowledged it" if res and res.startswith("ACK") else " - %s" % res if res else "")
+
+
 def t_recent_events(hive, hours_back=24, day=None, include_routine=False, include_uploads=False, node=None):
     t1 = int(time.time())
     if day:
@@ -615,10 +637,12 @@ def t_recent_events(hive, hours_back=24, day=None, include_routine=False, includ
     shown = [e for e in evs if e not in routine or
              (include_uploads and e.get("kind") == "upload") or
              (include_routine and e.get("kind") != "upload")][:60]
+    st = hive.call("GET", "/api/state")
+    who = {x["id"]: (x.get("kind"), x.get("name")) for x in (st.get("nodes") or []) + (st.get("silent") or [])}
     return {"window": "%s (%s to %s)" % (label, time.strftime("%a %d %b %H:%M", time.localtime(t0)),
                                           time.strftime("%a %d %b %H:%M", time.localtime(t1))),
             "events": [{"at": time.strftime("%a %d %b %H:%M", time.localtime(e.get("ts", 0))),
-                        "kind": e.get("kind"), "text": e.get("text")} for e in shown] or
+                        "kind": e.get("kind"), "text": explain_event(hive, e.get("text"), who)} for e in shown] or
                       "nothing happened in this window apart from routine background jobs",
             "routine_jobs_hidden": len(routine) - sum(e in shown for e in routine)}
 
@@ -1058,7 +1082,7 @@ def system_with_snapshot(hive):
         pumps = [label(n) for n in st["nodes"] if n.get("pump", "").startswith("yes")]
         dry = [label(n) for n in st["nodes"] if not n.get("pump", "").startswith("yes")]
         off = [label(n) + ": " + n["soil_vs_target"] for n in st["nodes"]
-               if n.get("soil_vs_target", "within target") != "within target"]
+               if not n.get("soil_vs_target", "within target").startswith("within target")]
         issues = [label(n) + ": " + n["KNOWN_ISSUE"][:90] for n in st["nodes"] if n.get("KNOWN_ISSUE")]
         snap = ("In short:\n- Have a pump: %s\n- NO pump (cannot be watered): %s\n- Soil outside target: %s\n"
                 "- Known faults: %s\n\nFull status:\n%s" % (", ".join(pumps) or "none", ", ".join(dry) or "none",
@@ -1202,6 +1226,8 @@ def water_budget(hive, n):
                                             ", at most %d ml in any one watering" % one if one else ""))
 
 
+SYMPTOM = re.compile(r"(?i)\b(droop\w*|wilt\w*|limp|sagg\w*|floppy|yellow\w*|brown\w*|crisp\w*|dying|sad|"
+                     r"unhealthy|curl\w*)\b")
 # "You watered it earlier, right?", "how much did you give it?", "when was it last watered?"
 PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered|gave|pumped|ran|sent)\b|"
                            r"\bdid (you|it|the hive)\b[^.?!]{0,30}\b(water|give|pump|run|send)\b|"
@@ -1234,6 +1260,14 @@ def focus_facts(hive, q):
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
+        if SYMPTOM.search(q) and (n.get("derived") or {}).get("soil") is not None:
+            sv = f.get("soil_vs_target", "")
+            thirsty = sv.startswith("TOO DRY") or sv.endswith("near the dry end")
+            out.append("LOOKS UNWELL - start the answer with the soil reading (%s, %s). %s" % (
+                derived(hive, n).get("Soil moisture"), sv or "no target set",
+                "Dry soil: thirst is likely; a watering is the first thing to try." if thirsty else
+                "The soil is moist, so this is NOT thirst - don't suggest more water or more frequent watering. "
+                "Think heat or strong sun, root rot from overwatering, poor drainage, or transplant shock."))
         if has_pump(hive, kind) and BUDGET.search(q):
             b = water_budget(hive, n)
             if b:

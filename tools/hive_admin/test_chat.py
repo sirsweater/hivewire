@@ -292,6 +292,25 @@ check("link-quality probe" in err, "a silent node says what kind of board it is"
 app.cfg.data["nodes"].pop("96", None)
 app._silent_cache = (0, {})
 
+# --- a plant that looks unwell: the soil decides whether it's thirst --------------
+check(C.plant({"plant_band": [45, 75]}, {"derived": {"soil": 72}})["soil_vs_target"] == "within target, near the wet end"
+      and C.plant({"plant_band": [45, 75]}, {"derived": {"soil": 47}})["soil_vs_target"] == "within target, near the dry end"
+      and C.plant({"plant_band": [45, 75]}, {"derived": {"soil": 60}})["soil_vs_target"] == "within target",
+      "the band position says near which end")
+app.cfg.set_node(pump["id"], {"plant_band": [5, 10], "soil_dry": 4000, "soil_wet": 1000})
+f = C.focus_facts(hive, "node %d looks droopy, what should I do?" % pump["id"])
+check("LOOKS UNWELL" in f and "NOT thirst" in f, "a droopy plant in moist soil: not thirst, said beside it", f)
+app.cfg.set_node(pump["id"], {"plant_band": [90, 100]})
+check("thirst is likely" in C.focus_facts(hive, "node %d is wilting" % pump["id"]), "...in dry soil: thirst")
+app.cfg.set_node(pump["id"], {"plant_band": None, "soil_dry": None, "soil_wet": None})
+
+# --- set commands in the log are spelled out ---------------------------------------
+who = {pump["id"]: (pump["kind"], "Seedling")}
+t = C.explain_event(hive, "set %d 24 5 -> ACK set 24=5" % pump["id"], who)
+check(t.startswith("Seedling (node %d): Seed firmware to node (slot 24) set to 5" % pump["id"]) and "acknowledged" in t,
+      "'set N 24 5' reads as seeding firmware, by name", t)
+check(C.explain_event(hive, "flash started X", who) == "flash started X", "...other events are left as they are")
+
 # --- a reservoir with no float switch is never called empty or full ---------------
 sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
 sl[47] = 2
