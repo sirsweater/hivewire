@@ -2601,7 +2601,9 @@ class _Capture(Handler):
         self.client_address = ("127.0.0.1", 0)
 
     def send_json(self, obj, code=200):
-        self.out = (obj, code)
+        # Through JSON, exactly as over HTTP: slot ids become strings, which is
+        # what hive_chat (written against the HTTP API) looks them up by.
+        self.out = (json.loads(json.dumps(obj)), code)
 
     def jbody(self):
         return dict(self._body or {})

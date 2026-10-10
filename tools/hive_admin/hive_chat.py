@@ -297,6 +297,51 @@ def has_pump(hive, kind):
     return bool(hive.slot_spec(kind, 40).get("writable"))
 
 
+# An amount asked for in other units is worked out here: a small model passes ml=1
+# for "1 cup", or takes "30 seconds" for 30 ml.
+UNITS = [(r"fl\.? ?oz|fluid ounces?|ounces?|oz", 29.57, "US fl oz"), (r"cups?", 236.6, "US cup"),
+         (r"litres?|liters?|l", 1000.0, "litre"), (r"gallons?|gal", 3785.0, "US gallon"),
+         (r"tablespoons?|tbsp", 14.79, "tablespoon"), (r"teaspoons?|tsp", 4.93, "teaspoon"),
+         (r"seconds?|secs?|s", 1 / 60.0, "s"), (r"minutes?|mins?", 1.0, "min")]
+WORD_NUM = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "half": 0.5, "a half": 0.5,
+            "half a": 0.5, "half an": 0.5, "quarter": 0.25, "a quarter": 0.25, "quarter of a": 0.25}
+AMOUNT = re.compile(r"(?i)(?<![\w.])(\d+(?:\.\d+)?|\d+/\d+|half an?|a half|a quarter|quarter of a|half|quarter|"
+                    r"an?|one|two|three|four|five)\s*(?:of\s+)?(?:an?\s+)?(%s)\b" % "|".join(u for u, _, _ in UNITS))
+
+
+def pump_flow(hive, n):
+    """The node's calibrated pump flow in ml/min, or None."""
+    for sid, sp in ((hive.kinds().get(n.get("kind")) or {}).get("slots") or {}).items():
+        if sp.get("label", "").startswith("Pump flow") and sp.get("unit") == "ml/min":
+            v = (n.get("slots") or {}).get(sid)
+            return v if v else None
+    return None
+
+
+def stated_ml(q, flow=None):
+    """(ml, "how") for one amount the person gave in cups, litres, ounces or pump time;
+    None for ml, no amount, or two different amounts (one per plant: the model's job)."""
+    if re.search(r"(?i)\d\s*(ml|millilit)", q):
+        return None                     # said in ml: nothing to work out
+    found = set()
+    for m in AMOUNT.finditer(q):
+        num, unit = m.group(1).lower(), m.group(2)
+        n = (float(num.split("/")[0]) / float(num.split("/")[1]) if "/" in num else
+             WORD_NUM[num] if num in WORD_NUM else float(num))
+        for pat, per, name in UNITS:
+            if not re.fullmatch(pat, unit, re.I):
+                continue
+            if per <= 1.0:              # a time: only as how long to pump, with a calibrated flow
+                if (not flow or re.match(r"\s+(ago|later|from now|before|after)\b", q[m.end():], re.I) or
+                        re.search(r"(?i)\b(wait|in|within|every|after|each)\s+$", q[:m.start()])):
+                    break
+                found.add((int(round(n * per * flow)), "%g %s at %s ml/min" % (n, name, flow)))
+            else:
+                found.add((int(round(n * per)), "%g %s%s" % (n, name, "s" if n > 1 and not name.endswith("oz") else "")))
+            break
+    return found.pop() if len(found) == 1 else None
+
+
 def facts(hive, meta, n):
     """What a small model would otherwise guess at: pump or not, battery or not, known faults."""
     kind = n.get("kind")
@@ -665,6 +710,9 @@ def t_water_now(hive, node, ml):
     if not has_pump(hive, kind):
         return {"sent": False, "reason": "%s (node %s) is a %s: it has no pump, so it can't be watered "
                 "from the hive." % (name, n["id"], kind)}
+    asked = stated_ml(SAID[-1] if SAID else "", pump_flow(hive, n))
+    if asked:
+        ml = asked[0]
     spec = hive.slot_spec(kind, 40)
     cap = (n.get("slots") or {}).get("43")
     if not 1 <= ml <= spec.get("max", 0):
@@ -681,8 +729,9 @@ def t_water_now(hive, node, ml):
     if p.get("soil_vs_target", "").startswith("TOO WET"):
         notes.append("soil is already %s against a %s target" % (derived(hive, n).get("Soil moisture"),
                                                                   p["target_soil"]))
-    summary = "pump %s ml on %s%s%s" % (ml, name, "" if name.startswith("node ") else " (node %s)" % n["id"],
-                                          "".join("\n    ! " + x for x in notes))
+    summary = "pump %s ml%s on %s%s%s" % (ml, " (%s)" % asked[1] if asked else "", name,
+                                            "" if name.startswith("node ") else " (node %s)" % n["id"],
+                                            "".join("\n    ! " + x for x in notes))
     r = write(hive, summary, "/api/set", {"target": str(n["id"]), "slot": 40, "value": ml})
     if notes:
         r["warnings_shown"] = notes
@@ -994,6 +1043,10 @@ def focus_facts(hive, q):
     out += [silent_line(x) for x in quiet]
     for n in named:
         kind = n.get("kind")
+        asked = stated_ml(q, pump_flow(hive, n)) if has_pump(hive, kind) else None
+        if asked:
+            out.append("AMOUNT for %s: %s = %d ml. Use ml=%d." % (n.get("name") or "node %s" % n["id"],
+                                                                asked[1], asked[0], asked[0]))
         f = facts(hive, cfg.get(str(n["id"])) or {}, n)
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()

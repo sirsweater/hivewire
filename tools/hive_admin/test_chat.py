@@ -43,6 +43,8 @@ hive = H.LocalHive(app)
 # --- the in-process hive client ------------------------------------------------
 st = hive.call("GET", "/api/state")
 check(len(st.get("nodes", [])) >= 3, "LocalHive serves /api/state from the admin's own routes")
+check(all(isinstance(k, str) for n in st["nodes"] for k in n["slots"]),
+      "slot ids arrive as strings, the same as over HTTP")
 pump = next(n for n in st["nodes"] if C.has_pump(hive, n["kind"]))
 nopump = next(n for n in st["nodes"] if not C.has_pump(hive, n["kind"]))
 try:
@@ -188,6 +190,42 @@ t = C.scrub_offers("Shall I recalibrate the probe?")
 check("recalibrate" not in t and "admin page" in t, "an offer to recalibrate is replaced", t)
 t = C.scrub_offers("Automatic watering is on, and calibration was done on Oct 4.")
 check(t == "Automatic watering is on, and calibration was done on Oct 4.", "plain statements are left alone", t)
+
+# --- amounts in other units are worked out in code -----------------------------
+check(C.stated_ml("water it 1 cup") == (237, "1 US cup"), "1 cup = 237 ml", C.stated_ml("water it 1 cup"))
+check(C.stated_ml("water it half a cup")[0] == 118 and C.stated_ml("water it 1.5 litres")[0] == 1500,
+      "half a cup, 1.5 litres")
+check(C.stated_ml("water it for 30 seconds", 95)[0] == 48, "30 s at 95 ml/min = 48 ml")
+check(C.stated_ml("water it for 30 seconds") is None, "...but not without a calibrated flow")
+check(C.stated_ml("water it 50 ml, it was dry 2 minutes ago", 95) is None and
+      C.stated_ml("what happened 2 minutes ago", 95) is None, "times that aren't pumping, and ml, are left alone")
+check(C.stated_ml("water the rhubarb 1 cup and the larkspur 2 cups") is None, "two amounts are left to the model")
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=1), say("Press Confirm.")]
+out = conv.ask(hive, "water node %d 1 cup" % pump["id"])
+check(out["pending"] and "pump 237 ml (1 US cup)" in out["pending"][0]["summary"],
+      "the model's ml=1 for '1 cup' becomes 237 ml on the card", out["pending"])
+conv.decline(out["pending"][0]["id"])
+app.poller.snapshot["nodes"][pump["id"]]["slots"][42] = 120
+script[:] = [tool("water_now", node=str(pump["id"]), ml=30), say("Press Confirm.")]
+out = conv.ask(hive, "water node %d for 30 seconds" % pump["id"])
+check(out["pending"] and "pump 60 ml (30 s at 120 ml/min)" in out["pending"][0]["summary"],
+      "'30 seconds' is pumping time at the node's flow, not 30 ml", out["pending"])
+conv.decline(out["pending"][0]["id"])
+app.poller.snapshot["nodes"][pump["id"]]["slots"].pop(42, None)
+# These read slots by id the way the HTTP API spells them; in-process they used to see
+# int ids, find nothing, and quietly skip the check.
+app.poller.snapshot["nodes"][pump["id"]]["slots"][43] = 100
+script[:] = [tool("water_now", node=str(pump["id"]), ml=150), say("That's over its limit.")]
+out = conv.ask(hive, "water node %d 150 ml" % pump["id"])
+check(not out["pending"] and "per-watering limit" in last_tool_result(conv)["reason"],
+      "the per-watering cap is checked in the web chat too", out)
+app.poller.snapshot["nodes"][pump["id"]]["slots"].pop(43, None)
+s = C.t_hive_status(hive)
+head = [h for h in (hive.kinds().get(pump["kind"]) or {}).get("headline", []) if not h.startswith("d:")]
+mine = next(x for x in s["nodes"] if x["id"] == pump["id"])
+check(head and any("(slot %s)" % h in k for h in head for k in mine["readings"]),
+      "the status carries each node's headline readings", mine["readings"])
 
 # --- a node the gateway has forgotten ------------------------------------------
 # The gateway drops a node some hours after it stops reporting. It must still be
