@@ -227,6 +227,15 @@ mine = next(x for x in s["nodes"] if x["id"] == pump["id"])
 check(head and any("(slot %s)" % h in k for h in head for k in mine["readings"]),
       "the status carries each node's headline readings", mine["readings"])
 
+# --- the dew point is worked out in code ----------------------------------------
+d = C.dew_point(hive)
+m = re.search(r"at (.+?) now: (-?[\d.]+) °C .* air temperature (-?[\d.]+) °C and humidity (\d+)%", d)
+if m:
+    t, rh = float(m.group(3)), float(m.group(4))
+    g = __import__("math").log(rh / 100) + 17.62 * t / (243.12 + t)
+check(m and abs(float(m.group(2)) - 243.12 * g / (17.62 - g)) < 0.6, "the dew point follows the Magnus formula", d)
+check("Dew point" in C.focus_facts(hive, "what's the dew point outside?"), "...and sits beside a dew point question")
+
 # --- a node the gateway has forgotten ------------------------------------------
 # The gateway drops a node some hours after it stops reporting. It must still be
 # findable, as "not reporting since ...", not "there is no node 99".

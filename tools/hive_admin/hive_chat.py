@@ -37,6 +37,7 @@ import difflib
 import getpass
 import http.cookiejar
 import json
+import math
 import os
 import re
 import sys
@@ -1011,8 +1012,31 @@ def system_with_snapshot(hive):
         time.strftime("%a %d %b %H:%M"), snap)}
 
 
+def dew_point(hive):
+    """Worked out here (Magnus formula): a small model can't do the logarithm. From the
+    weather station if there is one, else the first node with a real air reading."""
+    nodes = sorted(hive.call("GET", "/api/state").get("nodes", []), key=lambda n: n.get("kind") != "WeatherNode")
+    for n in nodes:
+        t = rh = None
+        for sid, sp in ((hive.kinds().get(n.get("kind")) or {}).get("slots") or {}).items():
+            v = (n.get("slots") or {}).get(sid)
+            if v is not None and sp.get("label") == "Air temperature" and sp.get("unit") == "°C":
+                t = v * sp.get("scale", 1)
+            if v is not None and sp.get("label") == "Humidity" and sp.get("unit") == "%RH":
+                rh = v * sp.get("scale", 1)
+        if t is None or not rh or not 0 < rh <= 100:   # 0 %RH: no air sensor fitted
+            continue
+        g = math.log(rh / 100.0) + 17.62 * t / (243.12 + t)
+        td = 243.12 * g / (17.62 - g)
+        return ("Dew point at %s now: %.1f °C (%.0f °F), worked out from its air temperature %.1f °C and "
+                "humidity %.0f%%. Give this number; don't work it out again." % (
+                    n.get("name") or "node %s" % n["id"], td, td * 9 / 5 + 32, t, rh))
+    return "No node has a working air temperature and humidity sensor, so the dew point can't be worked out."
+
+
 # Hints keyed on what the question is about, placed beside it like focus_facts.
 TOPIC_HINTS = [
+    (re.compile(r"(?i)\bdew ?point"), dew_point),
     (re.compile(r"(?i)\brain"), lambda hive: next(
         ("Rain amounts: call slot_history with node %s, slot 14 and the hours asked about (a week = 168); it "
          "returns mm per hour/day and a total. Forecasts are not available.%s" % (n["id"], (" KNOWN ISSUE: " +
