@@ -862,6 +862,29 @@ def llm_chat(messages, read_only=False, no_tools=False, wait=180):
 
 ollama_chat = llm_chat          # the name the eval harness and older callers use
 
+# The chat's prompt (rules, site notes, live status) runs to ~5000 tokens. A server
+# whose context is smaller doesn't refuse: it silently cuts the front off - Ollama's
+# OpenAI-compatible API used a 4096 default and kept only the last 2050 tokens, and
+# the bot answered a wind question with a summary of an unrelated plant.
+CONTEXT_NEEDED_CHARS = 20000
+
+
+def context_check():
+    """Does the server keep the START of a long prompt? Hide a code word at the
+    front of a ~5000-token prompt and ask for it back. Returns (ok, note)."""
+    import random
+    word = "%s-%04d" % (random.choice(["MARIGOLD", "BASIL", "TOMATILLO", "LARKSPUR", "YARROW"]),
+                        random.randint(1000, 9999))
+    filler = " ".join("Note %d: nothing to see here, keep reading." % i for i in range(1, 600))[:CONTEXT_NEEDED_CHARS]
+    msgs = [{"role": "system", "content": "The code word is %s. Remember it. %s" % (word, filler)},
+            {"role": "user", "content": "What is the code word? Reply with the code word only."}]
+    reply = (llm_chat(msgs, no_tools=True, wait=0).get("content") or "").strip()
+    if word.lower() in reply.lower():
+        return True, "the server keeps a %d-character prompt whole" % CONTEXT_NEEDED_CHARS
+    return False, ("the server cut the start off a ~5000-token prompt, so the chat would lose its "
+                   "instructions. Raise the model's context to 8192 or more (Ollama: set "
+                   "OLLAMA_CONTEXT_LENGTH=8192 for `ollama serve`; llama.cpp: -c 8192).")
+
 
 def run_tool(hive, call):
     fn = call.get("function", {})

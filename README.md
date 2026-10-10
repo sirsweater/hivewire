@@ -547,7 +547,12 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
   files next to the data (`chat_knowledge.md`, `known_issues.json`), not in
   this repo. The same module runs in a terminal from any machine:
   `python3 tools/hive_admin/hive_chat.py --hive http://<hive-host>:8080 --llm http://localhost:11434/v1 --model qwen2.5:7b`.
-  A 7B-class model is the smallest that has done well.
+  A 7B-class model is the smallest that has done well. The chat's prompt runs to
+  about 5000 tokens, and a server with a smaller context silently drops the front
+  of it (the bot's own rules) rather than refusing: for Ollama, start it with
+  `OLLAMA_CONTEXT_LENGTH=8192`, since its OpenAI-compatible API can't ask for more.
+  The page's **Test** button checks this by hiding a code word at the start of a
+  long prompt and asking for it back.
 - **Settings** — node names and locations, and soil calibration done in the
   page (record the probe dry, then wet); moisture is computed from the raw
   reading, so recalibrating applies to the whole history and never needs a

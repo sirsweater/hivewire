@@ -770,7 +770,9 @@ views.chat = async (el) => {
       <p class="muted small">Any server that speaks the OpenAI chat-completions API with tool calls: Ollama
         (<span class="mono">http://host:11434/v1</span>), llama.cpp's llama-server, LM Studio, vLLM, or a hosted API with a key.
         Choose <b>Ollama native</b> for <span class="mono">http://host:11434</span> without <span class="mono">/v1</span>.
-        A 7B-class model with tool calling (e.g. qwen2.5:7b) is the smallest that works well.</p>
+        A 7B-class model with tool calling (e.g. qwen2.5:7b) is the smallest that works well. The server needs a
+        context of 8192 tokens or more - for Ollama, start it with <span class="mono">OLLAMA_CONTEXT_LENGTH=8192</span>.
+        <b>Test</b> checks this.</p>
       <form id="chatcfg" class="row" style="align-items:flex-end;flex-wrap:wrap">
         <label class="f">Server URL<input id="c-url" value="${esc(cfg.url)}" placeholder="http://192.168.1.20:11434/v1" style="width:260px"></label>
         <label class="f">Model<input id="c-model" value="${esc(cfg.model)}" placeholder="qwen2.5:7b" style="width:150px"></label>
@@ -800,7 +802,11 @@ views.chat = async (el) => {
   };
   $("#c-test").onclick = async () => {
     const b = $("#c-test"); b.disabled = true; b.textContent = "Testing...";
-    try { const r = await api("/api/chat/test", {}); toast(`Model answered in ${r.secs}s: "${r.reply}"`, 6000); }
+    try {
+      const r = await api("/api/chat/test", {});
+      toast(r.context_ok ? `Model answered in ${r.secs}s: "${r.reply}" - and keeps a long prompt whole.`
+                         : `Model answered in ${r.secs}s, but ${r.context_note}`, r.context_ok ? 6000 : 15000);
+    }
     catch (err) { toast(err.message, 8000); }
     b.disabled = false; b.textContent = "Test";
   };

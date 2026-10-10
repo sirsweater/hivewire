@@ -12,6 +12,7 @@ The guards must hold whatever the model says. The hive is the simulated swarm
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -178,6 +179,27 @@ check(o[2]["tool_calls"][0]["function"]["arguments"] == "{}" and o[3]["tool_call
 back = C._from_openai({"content": None, "tool_calls": [{"id": "x2", "type": "function",
                                                         "function": {"name": "node_detail", "arguments": '{"node": "3"}'}}]})
 check(back["tool_calls"][0]["function"]["arguments"] == {"node": "3"}, "and back")
+
+# --- the long-prompt check behind the Test button -------------------------------
+def keeps(messages, **kw):
+    m = re.search(r"code word is (\S+)\.", messages[0]["content"])
+    return {"role": "assistant", "content": m.group(1) if m else "ready"}
+
+
+def cuts(messages, **kw):        # a server that dropped the front of the prompt
+    return {"role": "assistant", "content": "ready" if len(messages) == 1 else "I don't know the code word."}
+
+
+C.llm_chat = keeps
+ok, note = C.context_check()
+check(ok, "a server that keeps a long prompt passes the context check", note)
+C.llm_chat = cuts
+ok, note = C.context_check()
+check(not ok and "OLLAMA_CONTEXT_LENGTH" in note, "a server that cuts it fails, and says how to fix it", note)
+h = H._Capture(app, {})
+h.route_post("/api/chat/test", {})
+check(h.out[0].get("context_ok") is False and "8192" in h.out[0].get("context_note", ""),
+      "the Test button reports a truncating server", h.out[0])
 
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

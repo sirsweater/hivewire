@@ -2421,9 +2421,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 m = hive_chat.llm_chat([{"role": "user", "content": "Reply with the single word: ready"}],
                                        no_tools=True, wait=0)
+                secs = round(time.time() - t, 1)
+                context_ok, context_note = hive_chat.context_check()
             except hive_chat.LLMError as e:
                 return self.fail(str(e), 502)
-            return self.send_json({"ok": True, "reply": (m.get("content") or "")[:80], "secs": round(time.time() - t, 1)})
+            return self.send_json({"ok": True, "reply": (m.get("content") or "")[:80], "secs": secs,
+                                   "context_ok": context_ok, "context_note": context_note})
         if path == "/api/settings":
             b = self.jbody()
             for k in ("poll_seconds", "full_every_seconds", "stale_seconds"):
