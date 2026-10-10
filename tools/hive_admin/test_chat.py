@@ -227,6 +227,21 @@ mine = next(x for x in s["nodes"] if x["id"] == pump["id"])
 check(head and any("(slot %s)" % h in k for h in head for k in mine["readings"]),
       "the status carries each node's headline readings", mine["readings"])
 
+# --- watering facts go out labelled ----------------------------------------------
+adv = C.t_watering_advice(hive, str(pump["id"]))
+check("current" not in adv and "soil moisture now" in adv and
+      all(not isinstance(v, (int, float)) or k == "hours between waterings" for k, v in adv.items()),
+      "watering advice is labelled words, with the soil as it is now", adv)
+t0 = int(H.now())
+app.store.add_readings([(t0 - 7200, pump["id"], 45, 0), (t0 - 3600, pump["id"], 45, 0),
+                        (t0 - 1800, pump["id"], 45, 60), (t0 - 600, pump["id"], 45, 60)])
+rec = C.watering_record(hive, pump)
+check("Pump last ran (automatic or sent): %s, 60 ml" % __import__("time").strftime(
+      "%b %d %H:%M", __import__("time").localtime(t0 - 1800)) in rec, "the record dates the last pump run", rec)
+f = C.focus_facts(hive, "you watered node %d earlier, right?" % pump["id"])
+check("WATERING RECORD" in f and "didn't happen" in f, "a claimed past watering gets the record beside it", f)
+check("WATERING RECORD" not in C.focus_facts(hive, "water node %d 50 ml" % pump["id"]), "...a new request doesn't")
+
 # --- the dew point is worked out in code ----------------------------------------
 d = C.dew_point(hive)
 m = re.search(r"at (.+?) now: (-?[\d.]+) °C .* air temperature (-?[\d.]+) °C and humidity (\d+)%", d)

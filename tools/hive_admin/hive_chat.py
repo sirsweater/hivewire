@@ -621,8 +621,59 @@ def t_watering_advice(hive, node):
     n, err = resolve_node(hive, node)
     if not n:
         return {"error": err}
-    node = n["id"]
-    return hive.call("GET", "/api/waterlearn", {"node": int(node)})
+    r = hive.call("GET", "/api/waterlearn", {"node": int(n["id"])}) or {}
+    # The API's bare numbers ("current": 150 is the automatic AMOUNT in ml) were read as
+    # the soil reading. Every value goes out labelled, with the soil as it is now.
+    rec = r.get("recommendation") or {}
+    a = rec.get("analysis") or {}
+    band = r.get("plant_band")
+    out = {"node": "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]),
+           "soil moisture now": derived(hive, n).get("Soil moisture"),
+           "plant's target band": "%s-%s %%" % tuple(band) if band else None,
+           "adaptive watering (adjusts the amount itself)": "on" if (r.get("adaptive") or {}).get("on") else "off",
+           "automatic amount now": "%s ml per watering" % rec["current"] if rec.get("current") else None,
+           "automatic watering starts when soil falls below": "%s %%" % rec["below_pct"] if "below_pct" in rec else None,
+           "aims to bring the soil up to": "%s %%" % rec["fill_pct"] if "fill_pct" in rec else None,
+           "soil rise per 10 ml": "%.1f %%" % (a["gain"] * 10) if a.get("gain") else None,
+           "drying rate": "%.1f %% per hour" % a["dry_per_h"] if a.get("dry_per_h") else None,
+           "hours between waterings": rec.get("hours_between"),
+           "recommended change": "%s ml per watering" % rec["ml"] if rec.get("ml") else "none",
+           "why": rec.get("why") or r.get("error")}
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def last_pump_run(hive, n, sid, days=7):
+    """(ts, ml) of the last rise in the node's pumped-in-24-h count: the last time its pump
+    ran, automatic or sent, to within the admin's polling interval. None if it didn't run."""
+    t1 = int(time.time())
+    pts = (hive.call("GET", "/api/series", {"node": n["id"], "slot": sid, "from": t1 - days * 86400, "to": t1})
+           or {}).get("points") or []
+    last = None
+    for (_, a), (t, b) in zip(pts, pts[1:]):
+        if a is not None and b is not None and b > a:
+            last = (t, b - a)
+    return last
+
+
+def watering_record(hive, n):
+    """What the hive itself shows was pumped: for "you watered it earlier, right?"."""
+    kind, slots = n.get("kind"), n.get("slots") or {}
+    sid = next((sid for sid, sp in ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
+                if sp.get("label", "").startswith("Pumped, last 24")), None)
+    pumped = slots.get(sid) if sid else None
+    run = last_pump_run(hive, n, sid) if sid else None
+    sent = None
+    for e in hive.call("GET", "/api/events", {"limit": 3000}) or []:
+        m = re.match(r"set %d 40 (\d+)\b" % n["id"], e.get("text", ""))
+        if m and int(m.group(1)) > 0:
+            sent = (e["ts"], int(m.group(1)))
+            break                       # newest first
+    when = lambda t: time.strftime("%b %d %H:%M", time.localtime(t))
+    return ("WATERING RECORD for %s (node %s): pumped in the last 24 h: %s. Pump last ran (automatic or sent): %s. "
+            "Last watering sent from the hive or this chat: %s." % (
+                n.get("name") or kind, n["id"], "unknown" if pumped is None else "%s ml" % pumped,
+                "%s, %s ml" % (when(run[0]), run[1]) if run else "not in the last 7 days" if sid else "unknown",
+                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log"))
 
 
 def confirm(summary, path=None, body=None):
@@ -1049,6 +1100,12 @@ TOPIC_HINTS = [
 ]
 
 
+# "You watered it earlier, right?", "how much did you give it?", "when was it last watered?"
+PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered|gave|pumped|ran|sent)\b|"
+                           r"\bdid (you|it|the hive)\b[^.?!]{0,30}\b(water|give|pump|run|send)\b|"
+                           r"\b(when|how much)\b[^.?!]{0,40}\b(watered|watering)\b")
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -1075,6 +1132,9 @@ def focus_facts(hive, q):
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
+        if has_pump(hive, kind) and PAST_WATERING.search(q):
+            out.append(watering_record(hive, n) + " If the message assumes a watering this record doesn't show, "
+                       "say plainly that it didn't happen.")
         if re.search(r"(?i)\bpump", q) and not has_pump(hive, kind):
             out.append("NOTE: %s has NO pump. If the question assumes it has one, say that first." % (
                 n.get("name") or "node %s" % n["id"]))
