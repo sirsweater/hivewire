@@ -242,6 +242,43 @@ f = C.focus_facts(hive, "you watered node %d earlier, right?" % pump["id"])
 check("WATERING RECORD" in f and "didn't happen" in f, "a claimed past watering gets the record beside it", f)
 check("WATERING RECORD" not in C.focus_facts(hive, "water node %d 50 ml" % pump["id"]), "...a new request doesn't")
 
+# --- "let's check..." and then nothing: held to it once --------------------------
+conv = C.Conversation()
+fake_llm.calls.clear()
+script[:] = [say("Let's check its current settings."), tool("hive_status"), say("Everything is reporting.")]
+out = conv.ask(hive, "is everything ok?")
+check(out["answer"] == "Everything is reporting." and len(fake_llm.calls) == 3,
+      "an answer that only promises to check is sent back to check", out["answer"])
+fake_llm.calls.clear()
+script[:] = [say("Let me check."), say("Let me check.")]
+out = conv.ask(hive, "is everything ok?")
+check(len(fake_llm.calls) == 2, "...once, not forever", len(fake_llm.calls))
+
+# --- things the chat can't do get a straight answer, and no card -----------------
+for q, want in (("water node %d 50 ml in 2 hours" % pump["id"], "can't schedule"),
+                ("turn the node %d pump on and leave it running" % pump["id"], "can't be left running")):
+    fake_llm.calls.clear()
+    out = conv.ask(hive, q)
+    check(want in out["answer"] and not out["pending"] and not fake_llm.calls, "'%s': %s, nothing proposed" % (q, want))
+check(not any(p.search("should I water node 14 tomorrow?") or p.search("why did the pump run all night?")
+              for p, _ in C.FIXED_REPLIES[1:3]), "...but questions about those still reach the model")
+f = C.focus_facts(hive, "how's node %d?" % pump["id"])
+check(re.search(r"soil now (\d|not calibrated)", f), "a named plant's soil reading sits beside the question", f)
+check(hive.fmt("WaterNode", 52, 162) == "162 min (2.7 hours)", "long minute settings are also given in hours",
+      hive.fmt("WaterNode", 52, 162))
+
+# --- the 24-hour allowance is worked out in code ---------------------------------
+sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
+sl.update({44: 400, 45: 100, 43: 250})
+n, _ = C.resolve_node(hive, str(pump["id"]))
+b = C.water_budget(hive, n)
+check(b and "300 ml more is allowed" in b and "at most 250 ml in any one watering" in b,
+      "the water budget is the 24 h limit minus what was pumped", b)
+check("WATER BUDGET" in C.focus_facts(hive, "how much more water can node %d get today?" % pump["id"]),
+      "...and sits beside a how-much-more question")
+for k in (44, 45, 43):
+    sl.pop(k, None)
+
 # --- the dew point is worked out in code ----------------------------------------
 d = C.dew_point(hive)
 m = re.search(r"at (.+?) now: (-?[\d.]+) °C .* air temperature (-?[\d.]+) °C and humidity (\d+)%", d)

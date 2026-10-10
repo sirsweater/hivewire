@@ -194,6 +194,8 @@ class Hive:
         d = s.get("decimals")
         v = round(v, d) if d is not None else v
         out = "%s%s" % (v, " " + s["unit"] if s.get("unit") else "")
+        if s.get("unit") == "min" and v >= 90:      # 162 min was read as "every 3 minutes"
+            out += " (%.1f hours)" % (v / 60.0)
         if s.get("note") and str(raw) in s["note"]:  # e.g. "65535 = none yet"
             out += " (%s)" % s["note"]
         return out
@@ -211,8 +213,9 @@ RETIRED_S = 7 * 86400     # silent this long: probably retired, not news
 
 def silent_line(n):
     """One sentence on a node the hive knows but no longer hears (state["silent"])."""
-    who = "%s (node %s%s)" % (n.get("name") or "Node %s" % n["id"], n["id"],
-                              ", " + n["kind"] if n.get("kind") else "")
+    kind = ", " + n["kind"] if n.get("kind") else ""
+    who = "%s (node %s%s)" % (n["name"], n["id"], kind) if n.get("name") else "Node %s (%s)" % (
+        n["id"], n["kind"]) if n.get("kind") else "Node %s" % n["id"]
     if not n.get("last_heard"):
         return "%s is known to the hive but has never sent a reading." % who
     when = time.strftime("%b %d %H:%M", time.localtime(n["last_heard"]))
@@ -1100,6 +1103,26 @@ TOPIC_HINTS = [
 ]
 
 
+PROMISE = re.compile(r"(?i)\b(let's|let me|I'll|I will|I'm going to|I need to|we need to)\s+(first\s+)?"
+                     r"(check|look|find|see|get|fetch|pull|review|query|retrieve|determine)\b[^.?!]*[.:!]?\s*$")
+# "How much more can it have today?", "what's its limit?"
+BUDGET = re.compile(r"(?i)how much (more )?(water )?(can|could|may)\b|\bmore water\b|"
+                    r"\b(limits?|max(imum)?|allowed|allowance|budget)\b")
+
+
+def water_budget(hive, n):
+    """The 24-hour allowance left, worked out here rather than by the model."""
+    kind, slots = n.get("kind"), n.get("slots") or {}
+    by = {sp.get("label", ""): slots.get(sid) for sid, sp in
+          ((hive.kinds().get(kind) or {}).get("slots") or {}).items()}
+    day, done, one = by.get("Max per 24 h"), by.get("Pumped, last 24 h"), by.get("Max per watering")
+    if day is None or done is None:
+        return None
+    return ("WATER BUDGET for %s (node %s): %d ml more is allowed in the next 24 h (limit %d ml per 24 h, %d ml "
+            "pumped in the last 24 h)%s." % (n.get("name") or kind, n["id"], max(0, day - done), day, done,
+                                            ", at most %d ml in any one watering" % one if one else ""))
+
+
 # "You watered it earlier, right?", "how much did you give it?", "when was it last watered?"
 PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered|gave|pumped|ran|sent)\b|"
                            r"\bdid (you|it|the hive)\b[^.?!]{0,30}\b(water|give|pump|run|send)\b|"
@@ -1132,14 +1155,22 @@ def focus_facts(hive, q):
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
+        if has_pump(hive, kind) and BUDGET.search(q):
+            b = water_budget(hive, n)
+            if b:
+                out.append(b)
         if has_pump(hive, kind) and PAST_WATERING.search(q):
             out.append(watering_record(hive, n) + " If the message assumes a watering this record doesn't show, "
                        "say plainly that it didn't happen.")
         if re.search(r"(?i)\bpump", q) and not has_pump(hive, kind):
             out.append("NOTE: %s has NO pump. If the question assumes it has one, say that first." % (
                 n.get("name") or "node %s" % n["id"]))
-        out.append("%s (node %s, %s): pump: %s. Settings set_slot can change: %s. Actions: %s.%s" % (
-            n.get("name") or kind, n["id"], kind, f["pump"], "; ".join(w) or "none",
+        soil = derived(hive, n).get("Soil moisture")
+        out.append("%s (node %s, %s): %spump: %s. Settings set_slot can change: %s. Actions: %s.%s" % (
+            n.get("name") or kind, n["id"], kind,
+            "soil now %s%s; " % (soil, " (target %s, %s)" % (f["target_soil"], f.get("soil_vs_target"))
+                                 if f.get("target_soil") else "") if soil else "",
+            f["pump"], "; ".join(w) or "none",
             ", ".join(a["label"] for a in node_actions(hive, kind)) or "none",
             " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
     if out:
@@ -1186,6 +1217,24 @@ FIXED_REPLIES = [
      "There's no override or maintenance mode here, and approval can't be switched off from a chat message: "
      "every change still needs your Confirm. Swarm-wide mode broadcasts aren't available from chat at all - "
      "use the admin page for those. Nothing was sent."),
+    # "Water it in 2 hours": a card for an immediate watering would be confirmed as if it were scheduled.
+    (re.compile(r"(?i)^(?!\s*(when|should|how|what|why|is|are|do|does|will|would)\b)(?![^\n]*\?\s*$)[^\n]*"
+                r"\b(water|pump|irrigate)\b[^\n]*\b(in (\d+|an?|half an?|a few|few) (min(ute)?s?|hours?|hrs?)\b|"
+                r"at \d{1,2}(:\d{2})? ?(am|pm)\b|at \d{1,2}:\d{2}\b|tonight|tomorrow|later\b|"
+                r"this (evening|afternoon|morning)|every (day|morning|evening|night|\d+ (hours?|days?))|"
+                r"each (day|morning|evening|night)|daily|on a schedule|schedule)"),
+     "I can't schedule a watering: this chat only sends one right away, after you press Confirm, so I haven't "
+     "proposed anything. Ask again when you want it (for example \"water the larkspur 50 ml\"), or let the node's "
+     "automatic watering handle it - it waters by itself whenever the soil drops below its threshold (set on "
+     "the admin page)."),
+    # "Turn the pump on and leave it running": every run is a set, capped amount.
+    (re.compile(r"(?i)^(?![^\n]*\bautomatic\b)(?!\s*(when|should|how|what|why|is|are|do|does|did|was|will|would)\b)"
+                r"(?![^\n]*\?\s*$)(?=[^\n]*\bpump\b)[^\n]*\b(leave|keep)\b[^.?!\n]*\b(on|running|going)\b|"
+                r"^\s*(please\s+)?(run|pump|water|turn on)\b[^.?!\n]*\b(continuously|nonstop|non-stop|indefinitely|"
+                r"forever|until I (say|tell you|stop it)|all (day|night))\b"),
+     "A pump can't be left running: every run is a set amount in ml, capped per watering (the node refuses "
+     "more), and a node stops its pump by itself if it loses the hive. Tell me how much - for example "
+     "\"water the larkspur 100 ml\", or \"water the larkspur for 30 seconds\". Nothing was sent."),
     (re.compile(r"(?i)\b(add|install|fit|wire|wire up|replace|attach|mount|solder|plug in|connect)\b[^.?!]*"
                 r"\b(float switch|probes?|sensors?|pumps?|relays?|batter(y|ies)|wires?|tubes?|tubing|reservoir|board|"
                 r"antenna|valve)\b"),
@@ -1274,12 +1323,18 @@ def ask(hive, messages, q, on_tool=None):
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
     messages.append({"role": "user", "content": q + focus_facts(hive, q)})
-    msg, writes = {}, []
+    msg, writes, nudged = {}, [], False
     asking = not REQUEST.search(q)      # a question gets read-only tools
     for _ in range(MAX_TOOL_ROUNDS):
         msg = ollama_chat(messages, read_only=asking)
         messages.append(msg)
         if not msg.get("tool_calls"):
+            # "Let's check its settings." - and then it stops. Hold it to that, once.
+            if not nudged and PROMISE.search((msg.get("content") or "").strip()[-200:]):
+                nudged = True
+                messages.append({"role": "user", "content": "[From the hive, not the person: you said you "
+                                 "would check - call the tool now, then answer the person.]"})
+                continue
             break
         for call in msg["tool_calls"]:
             if asking and call["function"].get("name") in WRITES:
