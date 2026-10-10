@@ -180,6 +180,15 @@ back = C._from_openai({"content": None, "tool_calls": [{"id": "x2", "type": "fun
                                                         "function": {"name": "node_detail", "arguments": '{"node": "3"}'}}]})
 check(back["tool_calls"][0]["function"]["arguments"] == {"node": "3"}, "and back")
 
+# --- offers of things the chat can't do are rewritten -------------------------------
+t = C.scrub_offers("It isn't safe. Would you like me to disable automatic watering for now? Check the pump.")
+check("disable automatic watering for now" not in t and "admin page" in t and "Check the pump" in t,
+      "an offer to switch automatic watering off is replaced with where it's done", t)
+t = C.scrub_offers("Shall I recalibrate the probe?")
+check("recalibrate" not in t and "admin page" in t, "an offer to recalibrate is replaced", t)
+t = C.scrub_offers("Automatic watering is on, and calibration was done on Oct 4.")
+check(t == "Automatic watering is on, and calibration was done on Oct 4.", "plain statements are left alone", t)
+
 # --- the long-prompt check behind the Test button -------------------------------
 def keeps(messages, **kw):
     m = re.search(r"code word is (\S+)\.", messages[0]["content"])

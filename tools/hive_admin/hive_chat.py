@@ -979,6 +979,13 @@ def focus_facts(hive, q):
             " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
     if out:
         out.append("Turning automatic watering on/off, calibration and firmware: admin page only, not this chat.")
+    if len(named) >= 2 and re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|"
+                                     r"compare|which .*\b(dry|wet|moist))", q):
+        soils = [(n.get("derived") or {}).get("soil") for n in named]
+        ranked = sorted(((v, n.get("name") or "node %s" % n["id"]) for v, n in zip(soils, named) if v is not None))
+        if len(ranked) >= 2:
+            out.append("Soil right now, driest first: %s. So %s is the driest and %s the wettest." % (
+                ", ".join("%s %.0f%%" % (nm, v) for v, nm in ranked), ranked[0][1], ranked[-1][1]))
     for pat, hint in TOPIC_HINTS:
         if pat.search(q):
             try:
@@ -1026,6 +1033,28 @@ FIXED_REPLIES = [
      "that isn't available to me. I can tell you what the weather station has measured: current conditions "
      "and past rain."),
 ]
+# Offers of things this chat has no tool for. The model makes them anyway ("Would you
+# like me to disable automatic watering?"); the sentence is replaced with where it's done.
+CANT_OFFER = [
+    (re.compile(r"(?i)[^.!?\n]*\b(I can|I could|I'll|I will|shall I|should I|would you like (me )?to|do you want (me )?to|"
+                r"want me to|let me)\b[^.!?\n]*\b(disable|enable|turn (off|on)|switch (off|on)|pause|stop|start)\b"
+                r"[^.!?\n]*\bautomatic watering\b[^.!?\n]*[.!?]?"),
+     "To switch automatic watering on or off, use the Automatic watering card on the admin page - I can't do "
+     "that from here."),
+    (re.compile(r"(?i)[^.!?\n]*\b(I can|I could|I'll|I will|shall I|would you like (me )?to|do you want (me )?to|"
+                r"want me to|let me)\b[^.!?\n]*\b((re)?calibrat\w*|update the firmware|flash|broadcast)\b[^.!?\n]*[.!?]?"),
+     "Calibration, firmware and swarm-wide modes are done on the admin page, not from this chat."),
+]
+
+
+def scrub_offers(answer):
+    for pat, repl in CANT_OFFER:
+        if pat.search(answer):
+            answer = pat.sub("", answer).strip()
+            answer = (answer + "\n\n" + repl).strip()
+    return answer
+
+
 WRITES = ("water_now", "stop_pump", "set_slot", "node_action", "update_node", "add_note")
 
 
@@ -1050,9 +1079,27 @@ def ask(hive, messages, q, on_tool=None):
              "Pump flow = ml in the cup x 2.")
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
+    pumps = [n for n in nodes if has_pump(hive, n.get("kind"))]
+    if re.search(r"(?i)\bstop\b", q) and re.search(r"(?i)\b(all|every|both|each)\b[^.?!]*\bpumps?\b", q) and pumps:
+        # Stopping is the safe direction and has one right answer: a stop request for EVERY
+        # pump node, made here (the model stopped after the first one). Each is still its
+        # own write for the person to confirm; the reply says what happened to each.
+        SAID.append(" ".join("node %d" % n["id"] for n in pumps))
+        lines = []
+        for n in pumps:
+            r = t_stop_pump(hive, str(n["id"]))
+            what = ("sent" if r.get("sent") else "waiting for your Confirm" if r.get("awaiting_approval")
+                    else "not sent (%s)" % r.get("reason", "declined"))
+            lines.append("- %s (node %s): %s" % (n.get("name") or n.get("kind"), n["id"], what))
+        a = "Stop requests for every pump:\n" + "\n".join(lines)
+        messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+        return a
     if COMMAND.search(q) and nodes and not any(named_by_person(n) for n in nodes):
-        a = "Which one do you mean? The hive has: %s." % ", ".join(
-            "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in nodes)
+        # Water/pump/stop only make sense for a node with a pump: offer just those.
+        pick = pumps if re.search(r"(?i)^\s*(please\s+)?(water|pump|stop)\b", q) and pumps else nodes
+        a = "Which one do you mean? %s: %s." % (
+            "These have a pump" if pick is pumps else "The hive has",
+            ", ".join("%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in pick))
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
     messages.append({"role": "user", "content": q + focus_facts(hive, q)})
@@ -1078,7 +1125,7 @@ def ask(hive, messages, q, on_tool=None):
         tail = messages[-30:]
         first_q = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
         messages[:] = messages[:1] + tail[first_q:]
-    answer = (msg.get("content") or "").strip()
+    answer = scrub_offers((msg.get("content") or "").strip())
     if not answer:
         # Out of tool rounds, or it simply said nothing: one plain-words try, no tools.
         messages.append({"role": "user", "content": "[From the hive, not the person: answer the person now "
