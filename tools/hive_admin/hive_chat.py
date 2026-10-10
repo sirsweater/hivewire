@@ -1190,9 +1190,47 @@ def scrub_reservoir(hive, q, answer):
                   r"[^.!?\n]*\b(empty|full|low|dry)\b[^.!?\n]*[.!?]?", one, answer)
 
 
+def reporting_hint(hive):
+    """Who is and isn't reporting, as plain lists: from the status the model put the live
+    weather station among the silent ones."""
+    st = hive.call("GET", "/api/state")
+    live = ["%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in st.get("nodes", [])
+            if not n.get("hidden")]
+    silent = [x for x in st.get("silent") or [] if x.get("last_heard")]
+    recent = ["node %s (%s, last heard %s ago)" % (x["id"], x.get("name") or x.get("kind") or "?", ago(x.get("age")))
+              for x in silent if (x.get("age") or 0) < RETIRED_S]
+    old = ["node %s" % x["id"] for x in silent if (x.get("age") or 0) >= RETIRED_S]
+    return ("REPORTING NOW: %s. NOT REPORTING: %s.%s Use exactly these lists." % (
+        ", ".join(live) or "none", ", ".join(recent) or "none",
+        " Silent for over a week (probably retired): %s." % ", ".join(old) if old else ""))
+
+
+def relay_hint(hive):
+    """"Is the relay working?" was answered "working as expected" with every RangeNode silent."""
+    st = hive.call("GET", "/api/state")
+    ranges = ["node %s: reporting" % n["id"] for n in st.get("nodes", [])
+              if n.get("kind") == "RangeNode" and not n.get("hidden")]
+    ranges += ["node %s: NOT reporting (last heard %s ago)" % (x["id"], ago(x.get("age")))
+               for x in st.get("silent") or [] if x.get("kind") == "RangeNode" and x.get("last_heard")]
+    hops = ["%s (node %s): %s hop%s" % (n.get("name") or n.get("kind"), n["id"], n["hops"], "s" if n["hops"] > 1 else "")
+            for n in st.get("nodes", []) if (n.get("hops") or 0) > 0 and not n.get("hidden")]
+    return ("RELAYS: the dedicated relays are the RangeNodes - %s. %s Every other node also passes messages on "
+            "by default, so a node can still be reached through its neighbours.%s" % (
+                "; ".join(ranges) or "there are none",
+                "None of them is reporting, so say the relays are NOT working." if ranges and
+                not any(r.endswith(": reporting") for r in ranges) else "",
+                " Heard through other nodes right now: %s." % ", ".join(hops) if hops else
+                " Right now every node is heard directly."))
+
+
 # Hints keyed on what the question is about, placed beside it like focus_facts.
 TOPIC_HINTS = [
     (RESERVOIR_Q, reservoir_hint),
+    (re.compile(r"(?i)\b(relays?|range ?nodes?|repeaters?|hops?|mesh)\b"), relay_hint),
+    (re.compile(r"(?i)\b(reporting|online|offline|silent|gone quiet|went quiet|heard from|missing|alive|dead|"
+                r"responding|working)\b[^.?!]*\b(nodes?|everything|all|any|every|relay)\b|"
+                r"\b(nodes?|everything|all|any|every|relays?)\b[^.?!]*\b(reporting|online|offline|silent|"
+                r"gone quiet|went quiet|heard from|missing|alive|dead|responding|working)\b"), reporting_hint),
     (re.compile(r"(?i)\bdew ?point"), dew_point),
     (re.compile(r"(?i)\brain"), lambda hive: next(
         ("Rain amounts: call slot_history with node %s, slot 14 and the hours asked about (a week = 168); it "
@@ -1382,7 +1420,18 @@ def scrub_offers(answer):
         if pat.search(answer):
             answer = pat.sub("", answer).strip()
             answer = (answer + "\n\n" + repl).strip()
-    return answer
+    return scrub_tool_talk(answer)
+
+
+def scrub_tool_talk(answer):
+    """"You can use the `hive_status` tool. Would you like to do that?": the tools are the
+    chat's own, not the person's. Such sentences go, with a "do that?" question after one."""
+    names = "|".join(re.escape(t) for t in TOOLS)
+    pat = re.compile(r"(?i)[ \t]*[^.!?\n]*\b(you can use|you could use|use the|I will call|I'll call|call the|"
+                     r"run the|try the)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
+                     r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
+    out = pat.sub("", answer)
+    return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", out)).strip() if out != answer else answer
 
 
 WRITES = ("water_now", "stop_pump", "set_slot", "node_action", "update_node", "add_note")

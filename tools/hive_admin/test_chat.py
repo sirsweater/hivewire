@@ -304,6 +304,22 @@ app.cfg.set_node(pump["id"], {"plant_band": [90, 100]})
 check("thirst is likely" in C.focus_facts(hive, "node %d is wilting" % pump["id"]), "...in dry soil: thirst")
 app.cfg.set_node(pump["id"], {"plant_band": None, "soil_dry": None, "soil_wet": None})
 
+# --- who's reporting, as lists; no tool names handed to the person -----------------
+f = C.focus_facts(hive, "is every node reporting?")
+check("REPORTING NOW:" in f and "node %d" % pump["id"] in f.split("NOT REPORTING")[0],
+      "a reporting question gets the live nodes listed apart from the silent ones", f)
+check("REPORTING NOW" in C.focus_facts(hive, "is the relay working?"), "...'is the relay working?' too")
+t = C.scrub_offers("Two are quiet.\n\nTo check them, you can use the `hive_status` tool. Would you like to do that?")
+check(t == "Two are quiet.", "'you can use the hive_status tool' is dropped, with its question", t)
+t = C.scrub_offers("Want me to water it? If so, I will call the `water_now` tool to do this. \n\nOk.")
+check(t == "Want me to water it?\n\nOk.", "...and 'I will call the water_now tool'", t)
+check(C.scrub_offers("The hive status shows two quiet nodes.") == "The hive status shows two quiet nodes.",
+      "...plain words about the status are left alone")
+
+f = C.focus_facts(hive, "is the relay working?")
+check("RELAYS:" in f and re.search(r"node \d+: reporting", f) and "NOT working" not in f,
+      "a relay question lists the RangeNodes and how they are doing", f)
+
 # --- set commands in the log are spelled out ---------------------------------------
 who = {pump["id"]: (pump["kind"], "Seedling")}
 t = C.explain_event(hive, "set %d 24 5 -> ACK set 24=5" % pump["id"], who)
