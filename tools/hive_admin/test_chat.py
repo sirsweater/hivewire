@@ -267,6 +267,31 @@ check(re.search(r"soil now (\d|not calibrated)", f), "a named plant's soil readi
 check(hive.fmt("WaterNode", 52, 162) == "162 min (2.7 hours)", "long minute settings are also given in hours",
       hive.fmt("WaterNode", 52, 162))
 
+# --- no offer to water a plant that's already too wet -----------------------------
+app.cfg.set_node(pump["id"], {"plant_band": [5, 10]})
+n, _ = C.resolve_node(hive, str(pump["id"]))
+if (n.get("derived") or {}).get("soil") is None:      # the fake node isn't calibrated: give it a reading
+    app.cfg.set_node(pump["id"], {"soil_dry": 4000, "soil_wet": 1000})
+C.SAID[:] = ["how is node %d?" % pump["id"]]
+t = C.scrub_wet_offers(hive, "It's fine. Would you like me to water it? If so, tell me how much.\n\nMore.")
+check("Would you like" not in t and "doesn't need water now" in t and "If so" not in t and t.endswith("More."),
+      "an offer to water a plant above its target is replaced with why not", t)
+app.cfg.set_node(pump["id"], {"plant_band": [90, 100]})
+check(C.scrub_wet_offers(hive, "Would you like me to water it?") == "Would you like me to water it?",
+      "...a dry one can still be offered water")
+app.cfg.set_node(pump["id"], {"plant_band": None, "soil_dry": None, "soil_wet": None})
+C.SAID[:] = []
+check("slot 4" not in C.focus_facts(hive, "how is node %d?" % pump["id"]) and
+      "slot 4" in C.focus_facts(hive, "set node %d max per watering to 100" % pump["id"]),
+      "slot numbers sit beside requests, not questions")
+app.cfg.set_node(96, {"auto_kind": "RangeNode"})
+app.store.add_readings([(int(H.now()) - 3600, 96, 1, 5)])
+app._silent_cache = (0, {})
+n, err = C.resolve_node(hive, "96")
+check("link-quality probe" in err, "a silent node says what kind of board it is", err)
+app.cfg.data["nodes"].pop("96", None)
+app._silent_cache = (0, {})
+
 # --- a reservoir with no float switch is never called empty or full ---------------
 sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
 sl[47] = 2

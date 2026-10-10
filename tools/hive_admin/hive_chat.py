@@ -211,11 +211,14 @@ def ago(secs):
 RETIRED_S = 7 * 86400     # silent this long: probably retired, not news
 
 
-def silent_line(n):
+def silent_line(n, hive=None):
     """One sentence on a node the hive knows but no longer hears (state["silent"])."""
     kind = ", " + n["kind"] if n.get("kind") else ""
     who = "%s (node %s%s)" % (n["name"], n["id"], kind) if n.get("name") else "Node %s (%s)" % (
         n["id"], n["kind"]) if n.get("kind") else "Node %s" % n["id"]
+    desc = ((hive.kinds().get(n.get("kind")) or {}).get("description") if hive and n.get("kind") else None)
+    if desc:                # "how wet is node 3?": a relay has no soil probe, gone or not
+        who += " - %s %s -" % ("a" if not desc[:1].lower() in "aeiou" else "an", desc[:1].lower() + desc[1:])
     if not n.get("last_heard"):
         return "%s is known to the hive but has never sent a reading." % who
     when = time.strftime("%b %d %H:%M", time.localtime(n["last_heard"]))
@@ -413,7 +416,7 @@ def resolve_node(hive, ref, st=None):
     gone = [x for x in st.get("silent") or []
             if (str(x["id"]) == ref if ref.isdigit() else x.get("name") and ref.lower() in x["name"].lower())]
     if not hit and len(gone) == 1:
-        return None, silent_line(gone[0])
+        return None, silent_line(gone[0], hive)
     known = ", ".join("%s %s" % (x["id"], x.get("name") or "(%s)" % x.get("kind")) for x in nodes)
     return None, ("%s node matching %r. The hive's nodes are: %s" % (
         "More than one" if hit else "There is no", ref, known))
@@ -458,7 +461,7 @@ def t_hive_status(hive):
                                                  "temperature" in hive.slot_spec(kind, sid).get("label", "").lower()})},
                           **facts(hive, meta, n)))
     silent = [x for x in st.get("silent") or [] if x.get("last_heard")]
-    recent = [silent_line(x) for x in silent if (x.get("age") or 0) < RETIRED_S]
+    recent = [silent_line(x, hive) for x in silent if (x.get("age") or 0) < RETIRED_S]
     old = ["node %s%s" % (x["id"], " " + x["name"] if x.get("name") else "") for x in silent
            if (x.get("age") or 0) >= RETIRED_S]
     return dict({"nodes": nodes, "gateway_error": st.get("error"), "active_problems": st.get("problems"),
@@ -1114,6 +1117,32 @@ def reservoir_hint(hive):
             "reports no water." % "; ".join("%s: %s" % kv for kv in r.items()))
 
 
+WATER_OFFER = re.compile(r"(?i)\s*[^.!?\n]*\b(would you like|do you want|shall I|should I|want me to|I can|I could|"
+                         r"let me know if you('d| would)? like)\b[^.!?\n]*\b(water|watering|pump)\w*\b[^.!?\n]*[.!?]?"
+                         r"(\s*If (so|yes|you('d| would)? like|you want)\b[^.!?\n]*[.!?]?)*")
+
+
+def scrub_wet_offers(hive, answer):
+    """An offer to water a plant the person named whose soil is above its target is
+    replaced with why it doesn't need it (it offered the soaked, faulty-pump rhubarb)."""
+    try:
+        st = hive.call("GET", "/api/state")
+        cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    except RuntimeError:
+        return answer
+    wet = []
+    for n in st.get("nodes", []):
+        if n.get("hidden") or not has_pump(hive, n.get("kind")) or not named_by_person(n):
+            continue
+        p = plant(cfg.get(str(n["id"])) or {}, n)
+        if p.get("soil_vs_target", "").startswith("TOO WET"):
+            wet.append("%s doesn't need water now: its soil is %s, above its %s target." % (
+                n.get("name") or "node %s" % n["id"], derived(hive, n).get("Soil moisture"), p["target_soil"]))
+    if not wet:
+        return answer
+    return WATER_OFFER.sub(lambda m: (" " if m.group(0)[:1].isspace() else "") + " ".join(wet), answer, count=1)
+
+
 def scrub_reservoir(hive, q, answer):
     """A sentence calling a reservoir with no float switch empty or full is replaced:
     the hive has no way to know (the model said "is currently empty")."""
@@ -1194,7 +1223,7 @@ def focus_facts(hive, q):
         quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
     finally:
         SAID[:] = keep
-    out += [silent_line(x) for x in quiet]
+    out += [silent_line(x, hive) for x in quiet]
     for n in named:
         kind = n.get("kind")
         asked = stated_ml(q, pump_flow(hive, n)) if has_pump(hive, kind) else None
@@ -1216,13 +1245,16 @@ def focus_facts(hive, q):
             out.append("NOTE: %s has NO pump. If the question assumes it has one, say that first." % (
                 n.get("name") or "node %s" % n["id"]))
         soil = derived(hive, n).get("Soil moisture")
-        out.append("%s (node %s, %s): %spump: %s. Settings set_slot can change: %s. Actions: %s.%s" % (
+        # Slot numbers only beside a request: on a question they came back as "current
+        # settings: Pump flow: slot 42".
+        tools = (" Settings set_slot can change (slot numbers, not values): %s. Actions: %s." % (
+            "; ".join(w) or "none", ", ".join(a["label"] for a in node_actions(hive, kind)) or "none")
+            if REQUEST.search(q) else "")
+        out.append("%s (node %s, %s): %spump: %s.%s%s" % (
             n.get("name") or kind, n["id"], kind,
             "soil now %s%s; " % (soil, " (target %s, %s)" % (f["target_soil"], f.get("soil_vs_target"))
                                  if f.get("target_soil") else "") if soil else "",
-            f["pump"], "; ".join(w) or "none",
-            ", ".join(a["label"] for a in node_actions(hive, kind)) or "none",
-            " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
+            f["pump"], tools, " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
     if out:
         out.append("Turning automatic watering on/off, calibration and firmware: admin page only, not this chat.")
     if len(named) >= 2 and re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|"
@@ -1362,7 +1394,7 @@ def ask(hive, messages, q, on_tool=None):
     if COMMAND.search(q) and nodes and not any(named_by_person(n) for n in nodes):
         quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
         if quiet:       # a node the gateway dropped: nothing sent would arrive
-            a = " ".join(silent_line(x) for x in quiet) + " Nothing was sent."
+            a = " ".join(silent_line(x, hive) for x in quiet) + " Nothing was sent."
             messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
             return a
         # Water/pump/stop only make sense for a node with a pump: offer just those.
@@ -1401,7 +1433,7 @@ def ask(hive, messages, q, on_tool=None):
         tail = messages[-30:]
         first_q = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
         messages[:] = messages[:1] + tail[first_q:]
-    answer = scrub_reservoir(hive, q, scrub_offers((msg.get("content") or "").strip()))
+    answer = scrub_wet_offers(hive, scrub_reservoir(hive, q, scrub_offers((msg.get("content") or "").strip())))
     if not answer:
         # Out of tool rounds, or it simply said nothing: one plain-words try, no tools.
         messages.append({"role": "user", "content": "[From the hive, not the person: answer the person now "
