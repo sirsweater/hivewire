@@ -318,6 +318,10 @@ C.SAID[:] = ["how is node %d?" % pump["id"]]
 t = C.scrub_wet_offers(hive, "It's fine. Would you like me to water it? If so, tell me how much.\n\nMore.")
 check("Would you like" not in t and "doesn't need water now" in t and "If so" not in t and t.endswith("More."),
       "an offer to water a plant above its target is replaced with why not", t)
+t = C.scrub_wet_offers(hive, "Best to wait. If you still need to water it manually, I can send a command to do so, "
+                             "but please be careful. Would you like me to water it anyway?")
+check("send a command" not in t and "Would you like" not in t and t.count("doesn't need water now") == 1,
+      "...also 'if you need to water it, I can send a command', and every offer goes with one reason", t)
 app.cfg.set_node(pump["id"], {"plant_band": [90, 100]})
 check(C.scrub_wet_offers(hive, "Would you like me to water it?") == "Would you like me to water it?",
       "...a dry one can still be offered water")

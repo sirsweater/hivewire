@@ -1349,9 +1349,11 @@ def reservoir_hint(hive):
             "reports no water." % "; ".join("%s: %s" % kv for kv in r.items()))
 
 
-WATER_OFFER = re.compile(r"(?i)\s*[^.!?\n]*\b(would you like|do you want|shall I|should I|want me to|I can|I could|"
-                         r"let me know if you('d| would)? like)\b[^.!?\n]*\b(water|watering|pump)\w*\b[^.!?\n]*[.!?]?"
-                         r"(\s*If (so|yes|you('d| would)? like|you want)\b[^.!?\n]*[.!?]?)*")
+WATER_OFFER = re.compile(r"(?i)\s*[^.!?\n]*(\b(would you like|do you want|shall I|should I|want me to|I can|I could|"
+                         r"let me know if you('d| would)? like)\b[^.!?\n]*\b(water|watering|pump)\w*\b|"
+                         # "If you still need to water it, I can send a command to do so"
+                         r"\b(water|watering|pump)\w*\b[^.!?\n]*\b(I can|I could|I'll|I will|shall I|want me to)\b)"
+                         r"[^.!?\n]*[.!?]?(\s*If (so|yes|you('d| would)? like|you want)\b[^.!?\n]*[.!?]?)*")
 
 
 def scrub_wet_offers(hive, answer):
@@ -1372,7 +1374,14 @@ def scrub_wet_offers(hive, answer):
                 n.get("name") or "node %s" % n["id"], derived(hive, n).get("Soil moisture"), p["target_soil"]))
     if not wet:
         return answer
-    return WATER_OFFER.sub(lambda m: (" " if m.group(0)[:1].isspace() else "") + " ".join(wet), answer, count=1)
+    said = []
+
+    def swap(m):            # every offer goes; the reason is said once
+        if said:
+            return ""
+        said.append(1)
+        return (" " if m.group(0)[:1].isspace() else "") + " ".join(wet)
+    return WATER_OFFER.sub(swap, answer).strip()
 
 
 def scrub_reservoir(hive, q, answer):
