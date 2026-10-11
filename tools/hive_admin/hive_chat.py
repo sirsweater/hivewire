@@ -885,7 +885,10 @@ def watering_record(hive, n):
     return ("WATERING RECORD for %s (node %s): pumped in the last 24 h: %s. Pump last ran (automatic or sent): %s. "
             "Last watering sent from the hive or this chat: %s." % (
                 n.get("name") or kind, n["id"], "unknown" if pumped is None else "%s ml" % pumped,
-                "%s, %s ml" % (when(run[0]), run[1]) if run else "not in the last 7 days" if sid else "unknown",
+                "%s, %s ml (%s ago)" % (when(run[0]), run[1], "%.1f days" % ((time.time() - run[0]) / 86400.0)
+                                         if time.time() - run[0] >= 172800 else ago(int(time.time()) - run[0]))
+                if run else
+                "not in the last 7 days" if sid else "unknown",
                 "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n)
 
 
@@ -1510,7 +1513,8 @@ SYMPTOM = re.compile(r"(?i)\b(droop\w*|wilt\w*|limp|sagg\w*|floppy|yellow\w*|bro
 # "You watered it earlier, right?", "how much did you give it?", "when was it last watered?"
 PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered|gave|pumped|ran|sent)\b|"
                            r"\bdid (you|it|the hive)\b[^.?!]{0,30}\b(water|give|pump|run|send)\b|"
-                           r"\b(when|how much)\b[^.?!]{0,40}\b(watered|watering)\b")
+                           r"\b(when|how much|how long|how many (days|hours)|last)\b[^.?!]{0,40}\b(watered|watering|"
+                           r"pumped|pump ran|ran the pump)\b")
 
 
 TEMP_Q = re.compile(r"(?i)\b(temp|temps|temperature|hot|cold|warm|heat|chilly|freez\w*|frost)\b")
