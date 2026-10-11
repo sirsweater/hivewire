@@ -585,6 +585,26 @@ conv = C.Conversation()
 script[:] = [say("Sure, I will water it with 50 ml. Do you want to proceed?")]
 out = conv.ask(hive, "is node %d ok?" % pump["id"])
 check("proceed" not in out["answer"], "'Do you want to proceed?' with nothing waiting is dropped", out["answer"])
+check(C.claims_change("For node 7, the request to water 100 ml was successful.") and
+      C.claims_change("- **Action:** Watered with 100 ml"), "'the request was successful' after a decline is a claim")
+check(not C.claims_change("The reboot on Oct 3 was successful, according to the log."),
+      "...a dated one from the log is history")
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=-50),
+             say("The amount (-50 ml) is outside the allowed range. Let's try a smaller amount, say -200 ml.\n"
+                 "Would you like me to proceed with watering node %d by -200 ml?" % pump["id"])]
+out = conv.ask(hive, "water node %d -50 ml" % pump["id"])
+check(not out["pending"] and "-200" not in out["answer"] and "outside the allowed range" in out["answer"],
+      "after a refused write: no '-200 ml?' offer, the refusal stays", out["answer"])
+t = C.no_card_offers("It takes about 2.1 minutes.\nWant a test watering? If so, please confirm with a \"y\" (yes) "
+                     "or \"n\" (no).")
+check(t == "It takes about 2.1 minutes.\nWant a test watering?", "a typed y/n isn't asked for: the card is the approval", t)
+t = C.no_card_offers("0 is outside the range. I will set the pump flow to 1 ml/min instead.")
+check(t == "0 is outside the range.", "...nor an 'I will set' with no card behind it", t)
+check(C.no_card_offers("I will water it 50 ml.") == "I will water it 50 ml.", "...unless that's all there is to say")
+t = C.scrub_tool_talk("No undervoltage since the 5th.\nTo confirm, I can check the status using a tool. "
+                      "Would you like me to do that?")
+check(t == "No undervoltage since the 5th.", "an offer to 'use a tool' goes: it can just use it", t)
 
 # --- "water it" when two plants were named: ask which ---------------------------------
 _pumps = [n for n in st["nodes"] if C.has_pump(hive, n["kind"])]

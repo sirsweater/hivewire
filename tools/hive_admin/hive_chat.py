@@ -1702,7 +1702,11 @@ CLAIM = re.compile(r"(?i)(?<!can )(?<!could )(?<!shall )(?<!should )(?<!may )(?<
                    r"(watered|started|sent|set|turned|broadcast|updated|rebooted|reset|renamed)|has been "
                    r"(watered|sent|set|started|updated|rebooted|reset|renamed|approved|confirmed|done)|is now (watering|"
                    r"running(?! (low|out|dry|short))|on|set)|"
-                   r"(will|should) now (restart|reboot)|done[.!])")
+                   r"(will|should) now (restart|reboot)|done[.!]|"
+                   # "the request to water 100 ml was successful: **Action:** Watered with 100 ml" (declined)
+                   r"(was|were|has been|is) successful\b|\bsuccessfully (watered|sent|set|started|updated|rebooted|"
+                   r"reset|renamed|changed|applied|pumped)|\b(action|status|result)\W{0,6}(watered|pumped|sent|set|"
+                   r"started|updated|rebooted|renamed|done|success))")
 NEGATED = re.compile(r"(?i)\b(no|not|never|nothing|none|neither|nor|without)\b|n't\b")
 
 
@@ -1711,9 +1715,20 @@ def claims_change(text):
     true answer about the past, and it once had a correct answer replaced."""
     for m in CLAIM.finditer(text or ""):
         clause = re.split(r"[.;:!?,\n]|\b(?:but|and|so)\b", text[max(0, m.start() - 60):m.start()])[-1]
-        if not NEGATED.search(clause):
-            return True
+        if NEGATED.search(clause):
+            continue
+        # "The reboot on Oct 3 was successful" is history, not a claim about this turn.
+        sentence = re.split(r"(?<=[.!?\n])\s*", text[max(0, m.start() - 120):m.end() + 80])
+        sentence = next((x for x in sentence if m.group(0) in x), m.group(0))
+        if re.search(r"(?i)success", m.group(0)) and PAST_MARK.search(sentence):
+            continue
+        return True
     return False
+
+
+PAST_MARK = re.compile(r"(?i)\b(yesterday|last (night|week|month|time)|ago|earlier|previous(ly)?|on (mon|tue|wed|thu|fri|"
+                       r"sat|sun)\w*|on (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|(jan|feb|mar|apr|may|jun|jul|"
+                       r"aug|sep|oct|nov|dec)\w* \d|\d{4}-\d\d-\d\d|according to|the log)\b")
 
 
 # A request for a change, as opposed to a question: an imperative verb at the start
@@ -1811,7 +1826,10 @@ def scrub_tool_talk(answer):
                      r"run the|try the)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
-    return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", out)).strip() if out != answer else answer
+    # "I can check the current status using a tool. Would you like me to do that?" - it can just check.
+    out = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(using|run|use|with|call) (a|the|my|one of my|another) tools?\b[^.!?\n]*[.!?]?"
+                 r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?", "", out)
+    return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", out)).strip() if out.strip() and out != answer else answer
 
 
 WRITES = ("water_now", "stop_pump", "set_slot", "node_action", "update_node", "add_note")
@@ -1956,11 +1974,33 @@ def ask(hive, messages, q, on_tool=None):
         if claims_change(answer):
             why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
             answer = "Nothing was changed%s." % (": " + why if why else "")
-    if not writes:
-        # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with.
-        answer = re.sub(r"(?i)\s*\b(do you want (me )?to proceed|shall i proceed|should i proceed|would you like (me )?"
-                        r"to proceed)\b[^.?!\n]*\?", "", answer).strip() or answer
+    if not any(isinstance(r, dict) and r.get("awaiting_approval") for _, r in writes):
+        # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with
+        # (once after a refused -50 ml: "Let's try -200 ml. Would you like me to proceed?").
+        answer = no_card_offers(answer)
     return plain_math(must_say(hive, q, answer))
+
+
+def no_card_offers(answer):
+    """Offers and promises with no card waiting for a Confirm: nothing will happen, so they go
+    (each step kept only if something is left)."""
+    steps = [
+        (r"(?i)\s*\b(do you want (me )?to (proceed|go ahead)|shall i (proceed|go ahead)|should i (proceed|go ahead)|"
+         r"would you like (me )?to (proceed|go ahead))\b[^.?!\n]*\?", ""),
+        # The Confirm button is the approval; a typed y/n isn't one.
+        (r"(?i)[ \t]*[^.!?\n]*\b(confirm|reply|answer|respond)\b[^.!?\n]*(\(?\by/n\b\)?|\byes/no\b|"
+         r"[\"'“]y[\"'”]\s*(\(yes\))?\s*or\s*[\"'“]n[\"'”])[^.!?\n]*[.!?]?", ""),
+        # once after a refused -50 ml: "Let's try a smaller amount, say -200 ml."
+        (r"(?i)[ \t]*[^.!?\n]*\b(try|say|suggest|instead|how about)\b[^.!?\n]*(?<![\w.])-\d+ ?ml\b[^.!?\n]*[.!?]?", ""),
+        # "I will set the pump flow to 1 ml/min" with no card
+        (r"(?i)[ \t]*[^.!?\n]*\bI('ll| will| am going to|'m going to) (now |go ahead and )?(set|water|change|turn|"
+         r"start|send|update|adjust|reboot|rename|stop)\b[^.!?\n]*[.!?]?", ""),
+    ]
+    for pat, repl in steps:
+        out = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", re.sub(pat, repl, answer))).strip()
+        if out:
+            answer = out
+    return answer
 
 
 def must_say(hive, q, answer):
