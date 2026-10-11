@@ -743,6 +743,10 @@ SET_EVENT = re.compile(r"^set (\d+) (\d+) (-?\d+)\s*(?:->\s*(.*))?$")
 def explain_event(hive, text, who):
     """"set 7 24 5 -> ACK set 24=5" in words: it was read as a watering setting, and slot
     24 seeds firmware to another node. `who` maps node id -> (kind, name)."""
+    if (text or "").startswith("chat proposed (awaiting confirm): "):
+        # The model read a row of these (eval and smoke-test cards, declined) as "recent manual waterings".
+        return ("a card shown in the chat, NOT a pump run or a change - only a later 'confirmed by the person' "
+                "event means it was sent: " + text.split(": ", 1)[1])
     m = SET_EVENT.match(text or "")
     if not m or int(m.group(1)) not in who:
         return text
@@ -1475,6 +1479,47 @@ OTHER_READING = re.compile(r"(?i)\b(moist\w*|wet|dry|batter(y|ies)|reservoir|tan
                            r"band|threshold)\b")
 
 
+FIRMWARE_Q = re.compile(r"(?i)\b(firmware|software)\b[^?]*\b(version|build|running|runs|run|on it|up to date|latest|"
+                        r"crc|which|what|same)\b|\b(what|which) (firmware|software|version|build)\b|\bversion\b|"
+                        r"\bsame (firmware|build|software)\b")
+
+
+def firmware_fact(hive, st, named):
+    """Asked "what firmware version is the rhubarb running?", it said "not provided, check the
+    admin page". Nodes report no version, only the CRC of the image they run (slot 25), and
+    the admin knows the CRCs of the images uploaded to it and pushed from it."""
+    nodes = [n for n in (named or st.get("nodes", [])) if n.get("slots", {}).get("25") is not None and not n.get("hidden")]
+    if not nodes:
+        return None
+    fw = hive.call("GET", "/api/firmware") or {}
+    image = {i.get("crc"): i.get("name") for i in fw.get("images") or []}
+    newest = {}                                 # family -> its most recently uploaded image
+    for i in sorted(fw.get("images") or [], key=lambda i: i.get("mtime") or 0):
+        for fam in i.get("families") or []:
+            newest[fam] = i
+    pushed = {}
+    for h in fw.get("history") or []:          # newest first
+        if h.get("result") == "complete":
+            pushed.setdefault(h.get("crc"), time.strftime("%b %d", time.localtime(h["ts"])))
+    crc = lambda n: "%08x" % (int(n["slots"]["25"]) & 0xFFFFFFFF)  # noqa: E731
+    lines = []
+    for n in nodes:
+        c = crc(n)
+        same = [x.get("name") or "node %s" % x["id"] for x in st.get("nodes", [])
+                if x["id"] != n["id"] and x.get("slots", {}).get("25") is not None and crc(x) == c]
+        nw = newest.get(n.get("kind"))
+        lines.append("%s (node %s, %s family): CRC %s - %s%s%s%s" % (
+            n.get("name") or n.get("kind"), n["id"], n.get("kind"), c,
+            ("the image %s" % image[c]) if c in image else "not one of the images uploaded to the admin (flashed "
+            "another way, e.g. over USB)", (", pushed from the admin on %s" % pushed[c]) if c in pushed else "",
+            ("; same build as %s" % ", ".join(same)) if same else "",
+            "" if not nw else "; that IS the newest %s image uploaded" % n.get("kind") if nw.get("crc") == c else
+            "; the newest %s image uploaded is %s (%s), a different build" % (
+                n.get("kind"), nw.get("name"), time.strftime("%b %d", time.localtime(nw.get("mtime") or 0)))))
+    return ("FIRMWARE: nodes report no version number, only a Firmware CRC (slot 25): a checksum that identifies "
+            "the build. " + "; ".join(lines) + ".")
+
+
 def temp_extremes(hive, q):
     """A day's high and low air temperature, worked out here: asked "what was the high
     yesterday?", the model searched the event log and then said the station has no thermometer."""
@@ -1685,6 +1730,13 @@ def focus_facts(hive, q):
         t = None
     if t:
         out.append(t)
+    if FIRMWARE_Q.search(q):
+        try:
+            t = firmware_fact(hive, st, named)
+        except RuntimeError:
+            t = None
+        if t:
+            out.append(t)
     for pat, hint in TOPIC_HINTS:
         if pat.search(q):
             try:
@@ -2106,7 +2158,7 @@ class Conversation:
         if p:
             self.messages.append({"role": "user", "content": "[From the page, not typed: the person declined "
                                   "this, it was NOT sent: %s]" % p["summary"]})
-        return {"sent": False}
+        return {"sent": False, "summary": p["summary"] if p else None}
 
 
 def main():

@@ -201,6 +201,38 @@ cfg = h.out[0]
 check(cfg["enabled"] and cfg["key_set"] and "sekrit" not in json.dumps(cfg), "the API key is stored but never sent back")
 check(os.stat(os.path.join(tmp, "config.json")).st_mode & 0o077 == 0, "config.json (holding the key) is private")
 
+# A card declined on the page is logged, and a proposal in the log isn't read as a pump run.
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=20), say("Water it?")]
+out = conv.ask(hive, "water node %d 20 ml" % pump["id"])
+app.chats["local"] = conv
+h = H._Capture(app, {"id": out["pending"][0]["id"]})
+h.route_post("/api/chat/decline", {})
+check(any("declined by the person, not sent" in e.get("text", "") for e in app.store.events(20)),
+      "a card declined on the page is logged as declined", app.store.events(5))
+app.chats.pop("local", None)
+t = C.explain_event(hive, "chat proposed (awaiting confirm): pump 50 ml on node 7", {})
+check(t.startswith("a card shown in the chat, NOT a pump run"), "a proposal in the event log says it isn't a pump run", t)
+
+
+class _Fw:
+    def call(self, method, path, *a, **k):
+        return {"images": [{"name": "SoilNode-a.bin", "crc": "e34081be", "families": ["SoilNode"], "mtime": 100},
+                           {"name": "SoilNode-b.bin", "crc": "00000001", "families": ["SoilNode"], "mtime": 200}],
+                "history": [{"ts": 150, "crc": "e34081be", "result": "complete"}]}
+
+
+_st = {"nodes": [{"id": 6, "name": "Cactus", "kind": "SoilNode", "slots": {"25": -482311746}},
+                 {"id": 5, "name": "Rhubarb", "kind": "WaterNode", "slots": {"25": -2002821344}},
+                 {"id": 7, "name": "Larkspur", "kind": "WaterNode", "slots": {"25": -2002821344}}]}
+t = C.firmware_fact(_Fw(), _st, [_st["nodes"][0]])
+check("no version number" in t and "CRC e34081be - the image SoilNode-a.bin, pushed" in t and
+      "newest SoilNode image uploaded is SoilNode-b.bin" in t, "a firmware question gets the CRC, its image and the newest", t)
+t = C.firmware_fact(_Fw(), _st, [_st["nodes"][1]])
+check("not one of the images uploaded" in t and "same build as Larkspur" in t, "...or says it wasn't pushed from here", t)
+check(C.FIRMWARE_Q.search("what firmware version is the rhubarb running?") and
+      not C.FIRMWARE_Q.search("water the larkspur 50 ml"), "...and only for a firmware question")
+
 # --- OpenAI <-> Ollama message shapes ------------------------------------------
 msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "x1", "function": {"name": "hive_status",

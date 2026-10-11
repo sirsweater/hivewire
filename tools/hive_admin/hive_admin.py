@@ -2417,7 +2417,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not conv:
                 raise ValueError("no chat in progress")
             if path.endswith("decline"):
-                return self.send_json(conv.decline(pid))
+                out = conv.decline(pid)
+                if out.get("summary"):
+                    app.store.event("command", "chat: declined by the person, not sent: %s"
+                                    % out["summary"].split("\n")[0])
+                return self.send_json(out)
             out = conv.approve(LocalHive(app), pid)
             app.store.event("command", "chat: confirmed by the person: %s" % out["summary"].split("\n")[0])
             return self.send_json(out)
