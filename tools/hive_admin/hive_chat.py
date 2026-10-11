@@ -1927,6 +1927,12 @@ def must_say(hive, q, answer):
         named = [n for n in st.get("nodes", []) if not n.get("hidden") and named_by_person(n)]
     finally:
         SAID[:] = keep
+    # "The Rhubarb (node 5) does not have a pump" - it does; the model mixed it up with the Cactus.
+    for n in st.get("nodes", []):
+        if n.get("name") and has_pump(hive, n.get("kind")):
+            answer = re.sub(r"(?i)[^.!?\n]*\b%s\b(\s*\(node %d\))?[^.!?\n]{0,40}\b(does not have a pump|doesn't have a "
+                            r"pump|has no pump|cannot be watered|can't be watered)\b[^.!?\n]*[.!?]?\s*"
+                            % (re.escape(n["name"]), n["id"]), "", answer).strip()
     add = []
     for n in named:
         name = n.get("name") or "node %s" % n["id"]

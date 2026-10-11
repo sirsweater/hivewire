@@ -408,6 +408,12 @@ script[:] = [tool("water_now", node=str(pump["id"]), ml=50), say("Press Confirm 
 out = conv.ask(hive, "water node %d 50 ml and node %d 50 ml" % (pump["id"], nopump["id"]))
 check("node %d) has no pump" % nopump["id"] in out["answer"], "asked to water a node with no pump, the answer "
       "always says so", out["answer"])
+app.cfg.set_node(pump["id"], {"name": "Basil"})
+t = C.must_say(hive, "is node %d ok?" % pump["id"], "Basil (node %d) does not have a pump and cannot be watered. "
+               "All good otherwise." % pump["id"])
+check("does not have a pump" not in t and t.startswith("All good"), "a false 'no pump' about a node that has "
+      "one is removed", t)
+app.cfg.set_node(pump["id"], {"name": None})
 for p_ in out["pending"]:
     conv.decline(p_["id"])
 
