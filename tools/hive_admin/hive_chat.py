@@ -404,6 +404,57 @@ def stated_value(q, unit):
     return found.pop() if len(found) == 1 else None
 
 
+ML_AMOUNT = re.compile(r"(?i)(?<![\w.])(\d+(?:\.\d+)?)\s*(?:ml|millilit(?:er|re)s?)\b")
+
+
+def amounts_by_node(hive, q):
+    """{node id: (ml, how)} when one message gives different plants different amounts:
+    "water the larkspur 100 ml and the rhubarb 2 cups" came back as 100 ml on the Rhubarb and
+    200 ml on the Larkspur. Each amount goes with the plant named just before it (or, if
+    none, just after); one amount with "each"/"both" goes to every plant named. None when
+    the pairing isn't clear: the person should say which amount is for which plant."""
+    st = hive.call("GET", "/api/state")
+    nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
+    mentions = []
+    for n in nodes:
+        pats = [r"\bnode\s*#?%d\b" % n["id"]]
+        if n.get("name"):
+            pats.append(r"\b%s\b" % re.escape(n["name"]))
+        for pat in pats:
+            mentions += [(m.start(), n["id"]) for m in re.finditer("(?i)" + pat, q)]
+    mentions.sort()
+    amounts = [(m.start(), float(m.group(1)), None) for m in ML_AMOUNT.finditer(q)]
+    for m in AMOUNT.finditer(q):
+        unit = next(((per, name) for pat, per, name in UNITS if re.fullmatch(pat, m.group(2), re.I)), None)
+        if unit and unit[0] > 1.0:          # volumes only; pump time needs each node's own flow
+            v = amount_number(m.group(1)) + ((0.5 if "half" in m.group(3).lower() else 0.25) if m.group(3) else 0)
+            amounts.append((m.start(), v * unit[0], "%g %s%s" % (v, unit[1], "s" if v > 1 and not
+                                                               unit[1].endswith("oz") else "")))
+    amounts.sort()
+    ids = list(dict.fromkeys(i for _, i in mentions))
+    if not amounts or len(ids) < 2:         # one plant: nothing to pair
+        return {}
+    if len(amounts) == 1:
+        if len(ids) > 1 and re.search(r"(?i)\b(each|both|all of them|every one)\b", q):
+            _, ml, how = amounts[0]
+            return {i: (int(round(ml)), how) for i in ids}
+        return {}
+    # "the larkspur 100 ml and the rhubarb 2 cups" (name first) or "100 ml to the rhubarb and
+    # 50 ml to the larkspur" (amount first): each amount's own stretch must name one plant.
+    name_first = mentions[0][0] < amounts[0][0]
+    out = {}
+    for k, (pos, ml, how) in enumerate(amounts):
+        if name_first:
+            lo, hi = (amounts[k - 1][0] if k else -1), pos
+        else:
+            lo, hi = pos, (amounts[k + 1][0] if k + 1 < len(amounts) else len(q) + 1)
+        here = list(dict.fromkeys(i for p, i in mentions if lo < p < hi))
+        if len(here) != 1 or here[0] in out:
+            return None                     # "the rhubarb and larkspur, 50 ml and 80 ml": ask
+        out[here[0]] = (int(round(ml)), how)
+    return out
+
+
 def facts(hive, meta, n):
     """What a small model would otherwise guess at: pump or not, battery or not, known faults."""
     kind = n.get("kind")
@@ -932,7 +983,17 @@ def t_water_now(hive, node, ml):
                 "from the hive." % (name, n["id"], kind)}
     said = SAID[-1] if SAID else ""
     asked = stated_ml(said, pump_flow(hive, n))
-    if asked:
+    pairs = amounts_by_node(hive, said)
+    if pairs is None:
+        return {"sent": False, "reason": "the message gives several amounts and it isn't clear which is for which "
+                "plant - ask the person (e.g. \"100 ml for the larkspur and 2 cups for the rhubarb?\")"}
+    if pairs and n["id"] not in pairs:
+        return {"sent": False, "reason": "the person gave amounts for %s, not for %s (node %s)" % (
+            ", ".join("node %s" % i for i in pairs), n.get("name") or kind, n["id"])}
+    if n["id"] in pairs:
+        asked = (pairs[n["id"]][0], pairs[n["id"]][1]) if pairs[n["id"]][1] else None
+        ml = pairs[n["id"]][0]
+    elif asked:
         ml = asked[0]
     elif vague_amount(said):
         return {"sent": False, "reason": "\"%s\" isn't an amount - ask the person how much (in ml or cups)"
@@ -1495,9 +1556,15 @@ def focus_facts(hive, q):
     finally:
         SAID[:] = keep
     out += [silent_line(x, hive) for x in quiet]
+    pairs = amounts_by_node(hive, q)
+    if pairs is None:
+        out.append("AMOUNTS: the message gives several amounts and it isn't clear which is for which plant - "
+                   "ask before any water_now.")
     for n in named:
         kind = n.get("kind")
         asked = stated_ml(q, pump_flow(hive, n)) if has_pump(hive, kind) else None
+        if pairs and n["id"] in pairs and has_pump(hive, kind):
+            asked = (pairs[n["id"]][0], pairs[n["id"]][1] or "%d ml" % pairs[n["id"]][0])
         vague = vague_amount(q) if has_pump(hive, kind) and not asked else None
         if asked:
             out.append("AMOUNT for %s: %s = %d ml. Use ml=%d." % (n.get("name") or "node %s" % n["id"],
@@ -1548,13 +1615,21 @@ def focus_facts(hive, q):
             f["pump"], tools, " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
     if out:
         out.append("Turning automatic watering on/off, calibration and firmware: admin page only, not this chat.")
+    # "Which plant got the most water this week?" names none: every pump's total.
+    if not named and (WATER_TOTAL.search(q) or re.search(r"(?i)\b(most|least|more|less)\b[^?]{0,20}\bwater(ed)?\b", q)) \
+            and re.search(r"(?i)\b(week|days?|month|since|so far|total|today|24 ?h)\b", q):
+        for n in st.get("nodes", []):
+            if not n.get("hidden") and has_pump(hive, n.get("kind")):
+                t = watering_total(hive, n, q)
+                if t:
+                    out.append(t)
     # "Which plant is the wettest?" names none: rank them all. Left to itself the model
     # called the Cactus at 52% wetter than the Rhubarb at 79%, because it's further over its band.
     pool = named if len(named) >= 2 else [n for n in st.get("nodes", []) if not n.get("hidden")] \
-        if re.search(r"(?i)\b(driest|wettest|most (dry|wet|moist|water)|least (dry|wet|water)|which (plant|pot|one)s?\b"
+        if re.search(r"(?i)\b(driest|wettest|most (dry|wet|moist)|least (dry|wet)|which (plant|pot|one)s?\b"
                      r"[^?]*\b(dri|dry|wet|moist))", q) else []
     if re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|most (dry|wet|moist|"
-                 r"water)|least (dry|wet|water)|compare|which .*\b(dry|wet|moist|dri))", q):
+                 r"wet)|least (dry|wet)|compare|which .*\b(dry|wet|moist|dri))", q):
         soils = [(n.get("derived") or {}).get("soil") for n in pool]
         ranked = sorted(((v, n.get("name") or "node %s" % n["id"]) for v, n in zip(soils, pool) if v is not None))
         if len(ranked) >= 2:

@@ -269,6 +269,9 @@ app.store.add_readings([(t0 - 3 * 86400, pump["id"], 45, 0), (t0 - 3 * 86400 + 6
                         (t0 - 86400 + 3600, pump["id"], 45, 0)])
 tot = C.focus_facts(hive, "how much water has node %d had this week?" % pump["id"])
 check("last 7 days: 190 ml in 3 waterings" in tot, "a week's water is the sum of the runs, one per watering", tot)
+f = C.focus_facts(hive, "which plant got the most water this week?")
+check("WATER TOTAL for %s" % (pump.get("name") or pump["kind"]) in f and "driest first" not in f,
+      "'which plant got the most water this week' gets every pump's total, not the soil ranking", f)
 check("last 2 days: 100 ml in 2 waterings" in C.watering_total(hive, pump, "how much in the last two days"),
       "...over the days the question names", C.watering_total(hive, pump, "how much in the last two days"))
 _ki = os.path.join(tmp, "known_issues_test.json")
@@ -476,6 +479,31 @@ if m and len(soiled) >= 2:
 check("driest first" not in C.focus_facts(hive, "is the hive ok?"), "...an unrelated question gets no ranking")
 for nid in _probes:
     app.cfg.set_node(nid, {"soil_dry": None, "soil_wet": None})
+
+# --- two plants, two amounts: each amount goes with its own plant -------------------
+_two = [n for n in st["nodes"] if n["id"] != pump["id"]][:1]
+_ids = (pump["id"], _two[0]["id"])
+pr = C.amounts_by_node(hive, "water node %d 100 ml and node %d 2 cups" % _ids)
+check(pr == {_ids[0]: (100, None), _ids[1]: (473, "2 US cups")}, "'node A 100 ml and node B 2 cups' pairs each amount "
+      "with its node", pr)
+check(C.amounts_by_node(hive, "give 100 ml to node %d and 50 ml to node %d" % _ids) == {_ids[0]: (100, None),
+                                                                                   _ids[1]: (50, None)},
+      "...amount-first too")
+check(C.amounts_by_node(hive, "water node %d and node %d, 50 ml and 80 ml" % _ids) is None,
+      "...and an unclear pairing is flagged, not guessed")
+check(C.amounts_by_node(hive, "water node %d 100 ml, it got 50 ml yesterday" % pump["id"]) == {},
+      "one plant with two numbers isn't a pairing")
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=200), say("Press Confirm.")]
+out = conv.ask(hive, "water node %d 100 ml and node %d 2 cups" % _ids)
+check(out["pending"] and out["pending"][0]["summary"].startswith("pump 100 ml on"),
+      "the model's swapped 200 ml for node A becomes the 100 ml the person gave it", out["pending"])
+for p_ in out["pending"]:
+    conv.decline(p_["id"])
+script[:] = [tool("water_now", node=str(pump["id"]), ml=50), say("Press Confirm.")]
+out = conv.ask(hive, "water node %d and node %d, 50 ml and 80 ml" % _ids)
+check(not out["pending"] and "isn't clear which" in last_tool_result(conv)["reason"],
+      "an unclear pairing gets a question, not a card", out)
 
 # --- the same change on every node: one node at a time, so a fixed answer ----------
 conv = C.Conversation()
