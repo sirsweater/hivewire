@@ -1902,7 +1902,38 @@ def ask(hive, messages, q, on_tool=None):
         if claims_change(answer):
             why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
             answer = "Nothing was changed%s." % (": " + why if why else "")
-    return plain_math(answer)
+    return plain_math(must_say(hive, q, answer))
+
+
+def must_say(hive, q, answer):
+    """What the answer has to contain whatever the model chose to say: the 24-hour allowance
+    when asked how much more a plant can get (it gave the 30 ml automatic amount instead), and
+    that a plant asked to be watered has no pump (it watered the other one and said nothing)."""
+    answer = re.sub(r"(?i)\s*(do you want to proceed\?\s*)?\(?\b(y/n|yes/no)\b\)?\??\s*$", "", answer).rstrip()
+    try:
+        st = hive.call("GET", "/api/state")
+    except RuntimeError:
+        return answer
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in st.get("nodes", []) if not n.get("hidden") and named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    add = []
+    for n in named:
+        name = n.get("name") or "node %s" % n["id"]
+        if has_pump(hive, n.get("kind")):
+            b = water_budget(hive, n) if BUDGET.search(q) and not REQUEST.search(q) else None
+            m = re.search(r"(\d+) ml more is allowed", b or "")
+            if m and not re.search(r"(?<![\d.])%s ?ml" % m.group(1), answer):
+                add.append("%s can get %s ml more in the next 24 hours%s." % (
+                    name, m.group(1), "".join(re.findall(r", at most \d+ ml in any one watering", b))))
+        elif re.search(r"(?i)\b(water|irrigate)\b", q) and REQUEST.search(q) and not re.search(
+                r"(?i)%s[^.]*\b(no pump|doesn't have a pump|does not have a pump|can't be watered|cannot be watered)"
+                % re.escape(name), answer):
+            add.append("%s (node %s) has no pump, so it can't be watered from the hive." % (name, n["id"]))
+    return (answer + ("\n\n" + " ".join(add) if add else "")).strip()
 
 
 class Conversation:

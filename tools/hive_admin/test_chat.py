@@ -396,8 +396,20 @@ check(b and "300 ml more is allowed" in b and "at most 250 ml in any one waterin
       "the water budget is the 24 h limit minus what was pumped", b)
 check("WATER BUDGET" in C.focus_facts(hive, "how much more water can node %d get today?" % pump["id"]),
       "...and sits beside a how-much-more question")
+conv = C.Conversation()
+script[:] = [say("It can receive up to 30 ml per watering. Do you want to proceed? Y/N")]
+out = conv.ask(hive, "how much more water can node %d get today?" % pump["id"])
+check("300 ml more in the next 24 hours" in out["answer"] and "Y/N" not in out["answer"],
+      "'how much more can it get' always gives the 24 h allowance (it gave the automatic amount)", out["answer"])
 for k in (44, 45, 43):
     sl.pop(k, None)
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=50), say("Press Confirm for that one.")]
+out = conv.ask(hive, "water node %d 50 ml and node %d 50 ml" % (pump["id"], nopump["id"]))
+check("node %d) has no pump" % nopump["id"] in out["answer"], "asked to water a node with no pump, the answer "
+      "always says so", out["answer"])
+for p_ in out["pending"]:
+    conv.decline(p_["id"])
 
 # --- a day's high or low comes from that day, not the whole window ----------------
 import time as _t  # noqa: E402
