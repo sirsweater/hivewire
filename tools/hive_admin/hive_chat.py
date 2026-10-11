@@ -1091,6 +1091,19 @@ def t_update_node(hive, node, name=None, location=None, notes=None):
     patch = {k: v for k, v in (("name", name), ("location", location), ("notes", notes)) if v is not None}
     if not patch:
         return {"sent": False, "reason": "nothing to change"}
+    if name is not None:
+        # Two nodes with one name can't be told apart here any more ("water the rhubarb"
+        # would match both), and a name that's a number reads as a node id.
+        name = patch["name"] = str(name).strip()
+        st = hive.call("GET", "/api/state")
+        twin = next((x for x in st.get("nodes", []) + (st.get("silent") or []) if x["id"] != n["id"]
+                     and (x.get("name") or "").strip().lower() == name.lower()), None)
+        if twin:
+            return {"sent": False, "reason": "NOT sent: node %s is already called %s. Two nodes with one name "
+                    "can't be told apart; ask for a different name." % (twin["id"], twin["name"])}
+        if re.fullmatch(r"(?i)(node\s*)?#?\d+", name) or not name:
+            return {"sent": False, "reason": "NOT sent: %s would be read as a node number, not a name; ask "
+                    "for a name with letters in it." % (repr(name) if name else "an empty name")}
     return write(hive, "update node %s (%s) in the admin: %s" % (n["id"], n.get("name") or n.get("kind"), patch),
                  "/api/node", dict(patch, id=n["id"]))
 

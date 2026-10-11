@@ -67,8 +67,8 @@ fake_llm.calls = []
 C.llm_chat = C.ollama_chat = fake_llm
 
 
-def tool(name, **a):
-    return {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": name, "arguments": a}}]}
+def tool(_name, **a):
+    return {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": _name, "arguments": a}}]}
 
 
 def say(text):
@@ -170,6 +170,21 @@ for ref in (str(pump["id"]), "node %d" % pump["id"], "#%d" % pump["id"], "id %d"
             "%d %s" % (pump["id"], _nm), "%s (node %d)" % (_nm, pump["id"]), "%s (%d)" % (_nm, pump["id"])):
     n, err = C.resolve_node(hive, ref)
     check(n and n["id"] == pump["id"], "resolve_node understands %r" % ref, err)
+
+# A rename onto another node's name: "the rhubarb" would then match two nodes.
+app.cfg.set_node(nopump["id"], {"name": "Rhubarb"})
+conv = C.Conversation()
+script[:] = [tool("update_node", node=str(pump["id"]), name="rhubarb"), say("Renamed.")]
+out = conv.ask(hive, "rename node %d to rhubarb" % pump["id"])
+check(not out["pending"] and "already called Rhubarb" in last_tool_result(conv)["reason"],
+      "a name another node already has is refused", out)
+script[:] = [tool("update_node", node=str(pump["id"]), name="7"), say("Renamed.")]
+out = conv.ask(hive, "rename node %d to 7" % pump["id"])
+check(not out["pending"] and "node number" in last_tool_result(conv)["reason"], "...and so is a bare number", out)
+script[:] = [tool("update_node", node=str(pump["id"]), name="Larkspur"), say("Rename it?")]
+out = conv.ask(hive, "rename node %d to Larkspur" % pump["id"])
+check(len(out["pending"]) == 1, "...a new name goes to the card as usual", out)
+app.cfg.set_node(nopump["id"], {"name": None})
 
 # --- the HTTP routes, through a real handler ---------------------------------
 h = H._Capture(app, {"url": "ftp://nope", "model": "m"})
