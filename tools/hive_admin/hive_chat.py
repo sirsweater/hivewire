@@ -645,6 +645,13 @@ def t_slot_history(hive, node, slot, hours=24, day=None):
         # An hour with nothing heard (an outage) has no min/max: it would sink the whole window.
         rows = [x for x in rows if x.get("min") is not None and x.get("max") is not None and x.get("avg") is not None]
     if not rows:
+        # Just after midnight "today" has no finished hour yet: say so, with the reading now,
+        # rather than "no data" (the model took that to mean the sensor was broken).
+        now = next((x for x in st.get("nodes", []) if x["id"] == int(node)), {}).get("slots", {}).get(str(slot))
+        if t1 - t0 < 2 * 3600 and now is not None and hive.slot_spec(kind, slot).get("rollup") != "counter":
+            return {"node": node, "slot": slot, "window": window,
+                    "note": "%s only began %d minutes ago, so there is no hourly summary yet; the reading now is %s"
+                            % (window, max(1, (t1 - t0) // 60), hive.fmt(kind, slot, now))}
         return {"node": node, "slot": slot, "note": "no data in that window"}
     if hive.slot_spec(kind, slot).get("rollup") == "counter":
         return rain_history(hive, kind, node, slot, rows, res)
@@ -1109,9 +1116,9 @@ TOOLS = {
         "node_detail readings. For soil moisture use slot 3: it comes back as calibrated %. For rain use "
         "slot 14 on the weather station: it comes back as mm per hour/day and a total.",
         {"node": dict(STR, description="node name or id"), "slot": INT,
-         "hours": dict(INT, description="how far back, default 24"),
+         "hours": dict(INT, description="how far back, default 24; a week = 168 (and leave day out)"),
          "day": dict(STR, description="'today', 'yesterday', a weekday name or a date YYYY-MM-DD; use this for "
-                                      "a particular day (e.g. yesterday's high)")}, ["node", "slot"])),
+                                      "one particular day (e.g. yesterday's high), not for a week")}, ["node", "slot"])),
     "recent_events": (t_recent_events, spec("recent_events",
         "The hive's event log for a time window, newest first: commands sent, automatic watering changes, "
         "config changes, notes, errors, alerts. Routine timer jobs (forecast downloads, hourly summaries, "
@@ -1442,16 +1449,25 @@ def relay_hint(hive):
 
 # Hints keyed on what the question is about, placed beside it like focus_facts.
 TEMP_EXTREME = re.compile(r"(?i)\b(high|highs|low|lows|max(imum)?|min(imum)?|hottest|coldest|warmest|coolest|peak|"
-                          r"how (hot|cold|warm|cool|chilly)\b[^?]{0,20}\b(get|got|was|did|were))\b")
+                          r"how (hot|cold|warm|cool|chilly)\b[^?]{0,20}\b(get|got|was|did|were|been))\b")
 DAY_WORD = re.compile(r"(?i)\b(today|yesterday|last night|overnight|this week|last 7 days|past week|"
                       r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2})\b")
+
+
+TEMP_WORD = re.compile(r"(?i)\b(temp|temps|temperature|hot|hottest|cold|coldest|warm|warmest|cool|coolest|chilly|"
+                       r"degrees|highs|lows)\b|°")
+# "Is the battery low?" is not about the weather: a bare high/low needs a day and no other reading.
+OTHER_READING = re.compile(r"(?i)\b(moist\w*|wet|dry|batter(y|ies)|reservoir|tank|float|water\w*|pump\w*|signal|"
+                           r"rssi|humidity|wind|gusts?|pressure|rain\w*|light|lux|uv|volt\w*|flow|level|cap|limit|"
+                           r"band|threshold)\b")
 
 
 def temp_extremes(hive, q):
     """A day's high and low air temperature, worked out here: asked "what was the high
     yesterday?", the model searched the event log and then said the station has no thermometer."""
-    if not TEMP_EXTREME.search(q) or not re.search(r"(?i)\b(temp|temps|temperature|hot|cold|warm|cool|chilly|"
-                                                   r"degrees|°|highs?|lows?)\b", q) or re.search(r"(?i)\bsoil\b", q):
+    if not TEMP_EXTREME.search(q) or re.search(r"(?i)\bsoil\b", q) or not (
+            TEMP_WORD.search(q) or (re.search(r"(?i)\b(high|low)\b", q) and DAY_WORD.search(q)
+                                    and not OTHER_READING.search(q))):
         return None
     st = hive.call("GET", "/api/state")
     wx = next((n for n in st.get("nodes", []) if n.get("kind") == "WeatherNode"), None)
@@ -1472,7 +1488,8 @@ def temp_extremes(hive, q):
         day = "today"
     r = t_slot_history(hive, str(wx["id"]), sid, day=day)
     if "overall" not in r:
-        return None
+        return ("AIR TEMPERATURE at the %s: %s." % (wx.get("name") or "weather station", r["note"])
+                if "only began" in r.get("note", "") else None)
     return ("AIR TEMPERATURE at the %s, %s: high %s, low %s (from its hourly readings; use these numbers)." % (
         wx.get("name") or "weather station", r.get("window", day), r["overall"]["max"], r["overall"]["min"]))
 
@@ -1698,6 +1715,10 @@ REQUEST = re.compile(r"(?i)(^|[.!?]\s+|\b(can|could|would|will) you\s+|\bplease\
                      r"|^(?![^\n]*\?)(?!\s*(what|when|how|why|is|are|was|did|does|do)\b)\W*(\S+\s+){0,4}?\S*\d+(\.\d+)? ?"
                      r"(ml|cups?|l|litres?|liters?|oz)\b(\s+\S+){0,3}\s*$")
 CALIBRATE = re.compile(r"(?i)(calibrat|measur\w* (the |its )?flow|\bfor \d+ ?(s|sec|secs|seconds)\b)")
+# "The pump flow is wrong, fix it": with no number given there's nothing to set yet; the model
+# offered to keep the old 95 ml/min. Measuring is the only way to the right one.
+FLOW_WRONG = re.compile(r"(?i)\bflow\b[^.?!]*\b(wrong|off|incorrect|inaccurate|not right|isn't right|too (high|low)|"
+                        r"broken|bad)\b|\b(fix|correct|adjust|update)\b[^.?!]*\bflow\b")
 # Questions with one right answer, given without the model: it gets these
 # wrong often enough (going along with a fake "override", answering a forecast
 # question with past rain) that a fixed reply is the reliable one.
@@ -1822,7 +1843,7 @@ def ask(hive, messages, q, on_tool=None):
     if fixed:
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": fixed}]
         return fixed
-    if CALIBRATE.search(q) and re.search(r"(?i)pump|flow", q):
+    if (CALIBRATE.search(q) or (FLOW_WRONG.search(q) and not re.search(r"\d", re.sub(r"(?i)\bnode\s*#?\d+|\(\d+\)", "", q)))) and re.search(r"(?i)pump|flow", q):
         a = ("Pump calibration isn't done from this chat: it runs the pump into a measuring cup while you watch. "
              "Use the node's card on the admin page: \"Calibrate: run 30 s\", then set "
              "Pump flow = ml in the cup x 2.")
@@ -1951,6 +1972,20 @@ def must_say(hive, q, answer):
                             r"pump|has no pump|cannot be watered|can't be watered)\b[^.!?\n]*[.!?]?\s*"
                             % (re.escape(n["name"]), n["id"]), "", answer).strip()
     add = []
+    # "What were the daily highs this week?": the week's table was in the focus facts, the
+    # model asked for today instead (just after midnight: nothing yet) and said there was no data.
+    fact = temp_extremes(hive, q)
+    if fact:
+        nums = re.findall(r"(-?\d+(?:\.\d+)?) °C", fact)
+        given = [x for x in nums if re.search(r"(?<![\d.])%s(?![\d])" % re.escape(x), answer) or re.search(
+            r"(?<![\d.])(%d|%d)(\.\d)? ?°? ?F" % (int(float(x) * 9 / 5 + 32), round(float(x) * 9 / 5 + 32)), answer)]
+        if len(given) * 2 < len(nums):
+            line = re.sub(r" \(from its hourly readings[^)]*\)", "", "Air temperature" + fact[len("AIR TEMPERATURE"):])
+            if re.search(r"(?i)(couldn't|could not|can't|cannot|unable to) (find|get|retrieve)|\b(don't|do not) have\b[^.]*"
+                         r"\b(data|readings?|temperature)|\bno (air )?"
+                         r"(temperature )?(data|readings?)\b|not available|isn't functioning|not functioning", answer):
+                answer = ""
+            add.append(line)
     for n in named:
         name = n.get("name") or "node %s" % n["id"]
         if has_pump(hive, n.get("kind")):

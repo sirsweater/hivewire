@@ -127,6 +127,12 @@ script[:] = [tool("set_slot", target=str(pump["id"]), slot=49, value=0), say("Us
 out = conv.ask(hive, "set automatic watering on node %d to off" % pump["id"])
 check(not out["pending"], "automatic-watering slot refused", out)
 
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "the pump flow on node %d is wrong, fix it" % pump["id"])
+check("measuring cup" in out["answer"] and not out.get("proposals") and not fake_llm.calls,
+      "'the flow is wrong, fix it' with no number gets the measuring-cup way, not a guessed value", out)
+
 # A setting the person didn't name (asked about flow, model reaches for the float switch).
 conv = C.Conversation()
 script[:] = [tool("set_slot", target=str(pump["id"]), slot=48, value=0), say("Done.")]
@@ -424,7 +430,7 @@ _lt = _t.localtime()
 _mid = int(_t.mktime((_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 0, 0, 0, 0, 0, -1)))
 # yesterday peaks at 30.0 C at 15:00; today's hours are hotter still (35.0 C) to catch a mix-up
 _rows = [(wx["id"], 1, _mid - 86400 + h * 3600, 3600, 6, 2000, 1900, 3000 if h == 15 else 2100, None) for h in range(24)]
-_rows += [(wx["id"], 1, t, 3600, 6, 2600, 2500, 3500, None) for t in range(_mid, int(_t.time()) - 3600, 3600)]
+_rows += [(wx["id"], 1, t, 3600, 6, 2600, 2500, 3500, None) for t in range(_mid, int(_t.time()), 3600)]
 with app.store.db() as c:
     c.executemany("INSERT OR REPLACE INTO rollup_hour VALUES(?,?,?,?,?,?,?,?,?)", _rows)
 y = C.t_slot_history(hive, str(wx["id"]), 1, day="yesterday")
@@ -462,6 +468,35 @@ check(t and "yesterday: high 30.0 °C" in t, "'yesterday's high' is worked out a
 check(C.temp_extremes(_WxHive(hive), "what's the larkspur's max per watering?") is None and
       C.temp_extremes(_WxHive(hive), "what was the lowest the soil got yesterday?") is None,
       "...not for a watering limit, or the soil")
+check(C.temp_extremes(_WxHive(hive), "is the battery low?") is None and
+      C.temp_extremes(_WxHive(hive), "was the signal low yesterday?") is None,
+      "...nor for a battery or a signal that's 'low'")
+q = "what was the high temperature yesterday?"
+t = C.must_say(_WxHive(hive), q, "I couldn't find any air temperature readings for yesterday. Shall I check the log?")
+check("high 30.0 °C" in t and "couldn't find" not in t,
+      "a 'no data' answer is replaced by the high and low the code worked out", t)
+t = C.must_say(_WxHive(hive), q, "Yesterday's high was 30.0 °C and the low was 19.0 °C.")
+check(t == "Yesterday's high was 30.0 °C and the low was 19.0 °C.", "...and an answer that gave them is left alone", t)
+t = C.must_say(_WxHive(hive), q, "Yesterday's high was 86 °F and the low 66.2 °F.")
+check("Air temperature" not in t, "...in Fahrenheit too", t)
+
+
+class _NoRollup(_WxHive):
+    """Just after midnight: today has no finished hour yet."""
+    def call(self, method, path, *a, **k):
+        return {"rows": []} if path == "/api/rollup" else _WxHive.call(self, method, path, *a, **k)
+
+
+_dw = C.day_window
+C.day_window = lambda d: (int(_t.time()) - 600, int(_t.time()), "today") if d == "today" else _dw(d)
+try:
+    t = C.t_slot_history(_NoRollup(hive), str(wx["id"]), 1, day="today")
+    check("only began 10 minutes ago" in t.get("note", "") and "reading now" in t["note"],
+          "a day only minutes old gives the reading now, not 'no data'", t)
+    t = C.temp_extremes(_NoRollup(hive), "how hot has it been today?")
+    check(t and "only began" in t, "...and so does the temperature fact beside the question", t)
+finally:
+    C.day_window = _dw
 t0n, t1n, lbl = C.day_window("last night")
 check(t1n - t0n == 14 * 3600 and t1n == _mid + 8 * 3600, "'last night' is 18:00 yesterday to 08:00 today, "
       "whatever time it's asked", (t0n, t1n, _mid))
