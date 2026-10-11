@@ -1693,7 +1693,10 @@ REQUEST = re.compile(r"(?i)(^|[.!?]\s+|\b(can|could|would|will) you\s+|\bplease\
                      r"(water|pump|stop|reboot|restart|reset|set|rename|turn|run|change|add|note|log|mark|give|"
                      r"enable|disable|switch|update|make|redo|try|use|do)\b"
                      # an amendment to the last request: "make it 50 ml instead", "change that to 50"
-                     r"|\b(make|change) (it|that|this)\b.*\b(ml|instead|to \d)|\binstead\b.*\b\d+ ?ml\b")
+                     r"|\b(make|change) (it|that|this)\b.*\b(ml|instead|to \d)|\binstead\b.*\b\d+ ?ml\b"
+                     # "💧 larkspur 50ml pls": no verb, but a short message with an amount and no question
+                     r"|^(?![^\n]*\?)(?!\s*(what|when|how|why|is|are|was|did|does|do)\b)\W*(\S+\s+){0,4}?\S*\d+(\.\d+)? ?"
+                     r"(ml|cups?|l|litres?|liters?|oz)\b(\s+\S+){0,3}\s*$")
 CALIBRATE = re.compile(r"(?i)(calibrat|measur\w* (the |its )?flow|\bfor \d+ ?(s|sec|secs|seconds)\b)")
 # Questions with one right answer, given without the model: it gets these
 # wrong often enough (going along with a fake "override", answering a forecast
@@ -1902,6 +1905,10 @@ def ask(hive, messages, q, on_tool=None):
         if claims_change(answer):
             why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
             answer = "Nothing was changed%s." % (": " + why if why else "")
+    if not writes:
+        # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with.
+        answer = re.sub(r"(?i)\s*\b(do you want (me )?to proceed|shall i proceed|should i proceed|would you like (me )?"
+                        r"to proceed)\b[^.?!\n]*\?", "", answer).strip() or answer
     return plain_math(must_say(hive, q, answer))
 
 

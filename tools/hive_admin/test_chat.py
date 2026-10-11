@@ -521,6 +521,15 @@ out = conv.ask(hive, "water node %d and node %d, 50 ml and 80 ml" % _ids)
 check(not out["pending"] and "isn't clear which" in last_tool_result(conv)["reason"],
       "an unclear pairing gets a question, not a card", out)
 
+# --- "💧 node 14 50ml pls": a request without a verb ----------------------------------
+check(C.REQUEST.search("💧 larkspur 50ml pls") and not C.REQUEST.search("how much is 50 ml?") and
+      not C.REQUEST.search("the larkspur got 50ml yesterday afternoon from the hose"),
+      "a short message with an amount and no question is a request")
+conv = C.Conversation()
+script[:] = [say("Sure, I will water it with 50 ml. Do you want to proceed?")]
+out = conv.ask(hive, "is node %d ok?" % pump["id"])
+check("proceed" not in out["answer"], "'Do you want to proceed?' with nothing waiting is dropped", out["answer"])
+
 # --- the same change on every node: one node at a time, so a fixed answer ----------
 conv = C.Conversation()
 fake_llm.calls.clear()
