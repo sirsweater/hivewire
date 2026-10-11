@@ -173,7 +173,10 @@ views.dashboard = async (el) => {
       <div class="card stat"><div class="v" style="color:${warnCount ? "var(--warn)" : "var(--good)"}">${warnCount}</div><div class="k">nodes needing attention</div></div>
     </div>
     <h2 style="margin-top:28px">Nodes</h2>
-    <div class="grid cols-4" id="cards"></div>`;
+    <div class="grid cols-4" id="cards"></div>
+    ${(s.silent || []).length ? `<h2 style="margin-top:28px">Not reporting</h2>
+    <p class="muted small">The gateway has dropped these: nothing heard from them for hours. Check the power, or whether one moved out of range. A board you've retired can be hidden.</p>
+    <div class="grid cols-4" id="silent"></div>` : ""}`;
   $("#refresh").onclick = async () => { await api("/api/poll", {}); toast("Asked the gateway for fresh values"); setTimeout(refresh, 1500); };
   const cards = $("#cards");
   if (!nodes.length) cards.innerHTML = '<div class="card empty">No nodes heard yet.</div>';
@@ -193,6 +196,22 @@ views.dashboard = async (el) => {
         ${n.warnings.length ? `<div class="warnings">${n.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
       </a>`);
   }
+  // Known to the hive but no longer listed by the gateway (see silent_nodes in hive_admin.py).
+  for (const n of s.silent || []) {
+    $("#silent").insertAdjacentHTML("beforeend", `
+      <div class="card node-card">
+        <div class="spread"><div class="title">${esc(nodeTitle(n))}</div><span class="pill bad">${n.last_heard ? fmtAge(n.age) : "never heard"}</span></div>
+        <div class="sub">#${n.id} · ${esc(n.kind || "unknown type")}${n.location ? " · " + esc(n.location) : ""}</div>
+        <div class="kv"><div class="k">Last heard</div><div class="v">${n.last_heard ? esc(fmtTime(n.last_heard)) : "—"}</div></div>
+        <div class="row" style="margin-top:10px"><button data-hide="${n.id}">Hide (retired)</button></div>
+      </div>`);
+  }
+  if ($("#silent")) $("#silent").onclick = async (e) => {
+    const id = e.target.dataset.hide;
+    if (!id) return;
+    try { await api("/api/node", { id: +id, hidden: true }); toast("Hidden: unhide it on the Settings page"); await refresh(true); }
+    catch (err) { toast(err.message); }
+  };
 };
 
 views.node = async (el, id) => {
@@ -933,7 +952,12 @@ views.problems = async (el) => {
 
 views.settings = async (el) => {
   const cfg = await api("/api/config");
-  const nodes = STATE.nodes;
+  // Configured nodes the gateway no longer lists (gone quiet, or hidden and quiet) too:
+  // otherwise a retired board can never be hidden, or unhidden.
+  const live = new Set(STATE.nodes.map((n) => n.id));
+  const quiet = Object.entries(cfg.nodes || {}).filter(([id]) => !live.has(+id)).map(([id, c]) =>
+    ({ id: +id, name: c.name, kind: c.kind || c.auto_kind, location: c.location, slots: {}, quiet: true }));
+  const nodes = STATE.nodes.concat(quiet).sort((a, b) => a.id - b.id);
   const kinds = Object.keys(KINDS);
   el.innerHTML = `
     <div class="head"><h1>Settings</h1></div>
@@ -965,7 +989,7 @@ views.settings = async (el) => {
       // Any type with a soil probe (SoilNode, WaterNode...), not one name.
       const soil = !!((KINDS[n.kind] || {}).derived || {}).soil;
       return `<tr data-id="${n.id}">
-        <td>${n.id}</td>
+        <td>${n.id}${n.quiet ? '<div class="muted small">not reporting</div>' : ""}</td>
         <td><input data-k="name" value="${esc(c.name || "")}" placeholder="${esc(nodeTitle(n))}" style="width:150px"></td>
         <td><input data-k="location" value="${esc(c.location || "")}" style="width:140px"></td>
         <td><select data-k="kind"><option value="">auto (${esc(n.kind || "unknown")})</option>${kinds.map((k) => `<option ${c.kind === k ? "selected" : ""}>${k}</option>`).join("")}</select></td>

@@ -525,7 +525,10 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
 ```
 
 - **Dashboard** — every node, when it was last heard, its key readings, and a
-  warning when one goes quiet or reports a failed sensor.
+  warning when one goes quiet or reports a failed sensor. The gateway drops a
+  node some hours after it stops reporting; the hive still lists it under
+  **Not reporting** with when it was last heard, until you hide it as retired
+  (unhide it under Settings).
 - **Node pages** — every slot with a label and unit, history charts, the node's
   own log fetched over the air, writable slots and maintenance actions.
 - **Reports** — any reading over any range, daily low/average/high, CSV export.
