@@ -536,6 +536,39 @@ script[:] = [say("Sure, I will water it with 50 ml. Do you want to proceed?")]
 out = conv.ask(hive, "is node %d ok?" % pump["id"])
 check("proceed" not in out["answer"], "'Do you want to proceed?' with nothing waiting is dropped", out["answer"])
 
+# --- "water it" when two plants were named: ask which ---------------------------------
+_pumps = [n for n in st["nodes"] if C.has_pump(hive, n["kind"])]
+conv = C.Conversation()
+script[:] = [say("Both look fine.")]
+conv.ask(hive, "how are node %d and node %d doing?" % (_pumps[0]["id"], nopump["id"]))
+fake_llm.calls.clear()
+script[:] = [tool("water_now", node=str(_pumps[0]["id"]), ml=50), say("Press Confirm.")]
+out = conv.ask(hive, "water it 50 ml")
+check(out["pending"], "'water it' after naming one pump node and one without: the pump node is meant", out)
+for p_ in out["pending"]:
+    conv.decline(p_["id"])
+if len(_pumps) >= 2:
+    conv = C.Conversation()
+    script[:] = [say("Both look fine.")]
+    conv.ask(hive, "how are node %d and node %d doing?" % (_pumps[0]["id"], _pumps[1]["id"]))
+    fake_llm.calls.clear()
+    script[:] = [tool("water_now", node=str(_pumps[0]["id"]), ml=50), say("Press Confirm.")]
+    out = conv.ask(hive, "water it 50 ml")
+    check(not out["pending"] and out["answer"].startswith("Which one do you mean") and not fake_llm.calls,
+          "'water it' after naming two pump nodes asks which, without the model", out)
+else:
+    app.poller.snapshot["nodes"][77] = dict(app.poller.snapshot["nodes"][_pumps[0]["id"]])
+    st2 = hive.call("GET", "/api/state")
+    conv = C.Conversation()
+    script[:] = [say("Both look fine.")]
+    conv.ask(hive, "how are node %d and node 77 doing?" % _pumps[0]["id"])
+    fake_llm.calls.clear()
+    script[:] = [tool("water_now", node=str(_pumps[0]["id"]), ml=50), say("Press Confirm.")]
+    out = conv.ask(hive, "water it 50 ml")
+    check(not out["pending"] and out["answer"].startswith("Which one do you mean") and not fake_llm.calls,
+          "'water it' after naming two pump nodes asks which, without the model", out)
+    del app.poller.snapshot["nodes"][77]
+
 # --- the same change on every node: one node at a time, so a fixed answer ----------
 conv = C.Conversation()
 fake_llm.calls.clear()

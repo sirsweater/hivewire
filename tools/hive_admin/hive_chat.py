@@ -1843,6 +1843,23 @@ def ask(hive, messages, q, on_tool=None):
         a = "Stop requests for every pump:\n" + "\n".join(lines)
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
+    # "How are the rhubarb and the larkspur?" then "water it 50 ml": "it" is either, and the model
+    # picked the rhubarb (soaked, pump not trusted). This message names none: ask which.
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        here = [n for n in nodes if named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    if REQUEST.search(q) and not here and re.search(r"(?i)\b(it|that one|this one|that|this|the plant|the pot)\b", q):
+        earlier = [n for n in nodes if named_by_person(n)]
+        if re.search(r"(?i)\b(water|pump|stop)\b", q):
+            earlier = [n for n in earlier if has_pump(hive, n.get("kind"))]
+        if len(earlier) >= 2:
+            a = "Which one do you mean: %s?" % " or ".join(
+                "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in earlier)
+            messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+            return a
     if COMMAND.search(q) and nodes and not any(named_by_person(n) for n in nodes):
         quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
         if quiet:       # a node the gateway dropped: nothing sent would arrive
