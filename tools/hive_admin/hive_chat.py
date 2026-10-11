@@ -249,8 +249,9 @@ def readings(hive, n, only=None):
             soil_t = next((x for x, v in slots.items() if v is not None and
                            hive.slot_spec(kind, x).get("label") == "Soil temperature"), None)
             if "temperature" in label.lower() and soil_t:
-                out["%s (slot %s)" % (label, sid)] += (" - this node's temperature is the Soil temperature "
-                                                       "(slot %s) reading" % soil_t)
+                out["%s (slot %s)" % (label, sid)] += (" - there is no air temperature here; the only "
+                                                       "temperature is the Soil temperature (slot %s), measured "
+                                                       "in the pot - call it soil temperature" % soil_t)
         else:
             out["%s (slot %s)" % (label, sid)] = hive.fmt(kind, sid, raw)
     return out
@@ -310,13 +311,42 @@ def has_pump(hive, kind):
 # An amount asked for in other units is worked out here: a small model passes ml=1
 # for "1 cup", or takes "30 seconds" for 30 ml.
 UNITS = [(r"fl\.? ?oz|fluid ounces?|ounces?|oz", 29.57, "US fl oz"), (r"cups?", 236.6, "US cup"),
+         (r"pints?", 473.2, "US pint"), (r"quarts?|qt", 946.4, "US quart"),
          (r"litres?|liters?|l", 1000.0, "litre"), (r"gallons?|gal", 3785.0, "US gallon"),
          (r"tablespoons?|tbsp", 14.79, "tablespoon"), (r"teaspoons?|tsp", 4.93, "teaspoon"),
          (r"seconds?|secs?|s", 1 / 60.0, "s"), (r"minutes?|mins?", 1.0, "min")]
 WORD_NUM = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "half": 0.5, "a half": 0.5,
-            "half a": 0.5, "half an": 0.5, "quarter": 0.25, "a quarter": 0.25, "quarter of a": 0.25}
-AMOUNT = re.compile(r"(?i)(?<![\w.])(\d+(?:\.\d+)?|\d+/\d+|half an?|a half|a quarter|quarter of a|half|quarter|"
-                    r"an?|one|two|three|four|five)\s*(?:of\s+)?(?:an?\s+)?(%s)\b" % "|".join(u for u, _, _ in UNITS))
+            "half a": 0.5, "half an": 0.5, "quarter": 0.25, "a quarter": 0.25, "quarter of a": 0.25,
+            "a couple": 2, "a couple of": 2, "couple": 2}
+# "1 1/2 cups", "one and a half cups", "a cup and a half": the half is part of the amount.
+AMOUNT = re.compile(r"(?i)(?<![\w.])(\d+\s+\d+/\d+|(?:\d+(?:\.\d+)?|an?|one|two|three|four|five)\s+and\s+an?\s+"
+                    r"(?:half|quarter)|\d+(?:\.\d+)?|\d+/\d+|half an?|a half|a quarter|quarter of a|half|quarter|"
+                    r"a couple(?: of)?|couple|an?|one|two|three|four|five)\s*(?:of\s+)?(?:an?\s+)?(%s)\b"
+                    r"(\s+and\s+an?\s+(?:half|quarter)\b)?" % "|".join(u for u, _, _ in UNITS))
+# "a few cups", "some water": no number to work out, so ask rather than guess.
+VAGUE_AMOUNT = re.compile(r"(?i)\b(a few|few|several|some|a bit of|a little|a lot of|lots of)\s+(more\s+)?(%s)\b"
+                          % "|".join(u for u, _, _ in UNITS[:-2]))
+
+
+def vague_amount(q):
+    """ "a few cups" with no amount in ml beside it, or None."""
+    m = VAGUE_AMOUNT.search(q)
+    return m.group(0) if m and not re.search(r"(?i)\d\s*(ml|millilit|cc)\b", q) else None
+
+
+def amount_number(num):
+    """The number in front of a unit: "2", "1/2", "1 1/2", "a half", "one and a half", "a couple"."""
+    num = re.sub(r"\s+", " ", num.lower().strip())
+    m = re.fullmatch(r"(.+?) and an? (half|quarter)", num)
+    if m:
+        return amount_number(m.group(1)) + (0.5 if m.group(2) == "half" else 0.25)
+    m = re.fullmatch(r"(\d+) (\d+)/(\d+)", num)
+    if m:
+        return int(m.group(1)) + float(m.group(2)) / float(m.group(3))
+    if "/" in num:
+        a, b = num.split("/")
+        return float(a) / float(b)
+    return WORD_NUM[num] if num in WORD_NUM else float(num)
 
 
 def pump_flow(hive, n):
@@ -335,9 +365,10 @@ def stated_ml(q, flow=None):
         return None                     # said in ml: nothing to work out
     found = set()
     for m in AMOUNT.finditer(q):
-        num, unit = m.group(1).lower(), m.group(2)
-        n = (float(num.split("/")[0]) / float(num.split("/")[1]) if "/" in num else
-             WORD_NUM[num] if num in WORD_NUM else float(num))
+        unit = m.group(2)
+        n = amount_number(m.group(1))
+        if m.group(3):
+            n += 0.5 if "half" in m.group(3).lower() else 0.25
         for pat, per, name in UNITS:
             if not re.fullmatch(pat, unit, re.I):
                 continue
@@ -349,6 +380,27 @@ def stated_ml(q, flow=None):
             else:
                 found.add((int(round(n * per)), "%g %s%s" % (n, name, "s" if n > 1 and not name.endswith("oz") else "")))
             break
+    return found.pop() if len(found) == 1 else None
+
+
+TIME_IN = {"min": [(r"hours?|hrs?|h", 60), (r"days?", 1440), (r"minutes?|mins?", 1)],
+           "s": [(r"minutes?|mins?", 60), (r"seconds?|secs?|s", 1), (r"hours?|hrs?", 3600)]}
+
+
+def stated_value(q, unit):
+    """(value, how) for a setting the person gave in other units: "max per watering 1 cup" is
+    237 (ml), "minimum gap 2 hours" is 120 (min). None when there's nothing to work out."""
+    if unit == "ml":
+        return stated_ml(q)
+    found = set()
+    for pat, per in TIME_IN.get(unit, []):
+        for m in re.finditer(r"(?i)(?<![\w.])(\d+(?:\.\d+)?|an?|one|two|three|half an?)\s*(%s)\b" % pat, q):
+            if per == 1:
+                return None                 # already in the slot's own unit
+            num = m.group(1).lower()
+            n = WORD_NUM.get(num, None) if not num[0].isdigit() else float(num)
+            if n:
+                found.add((int(round(n * per)), "%g %s" % (n, m.group(2))))
     return found.pop() if len(found) == 1 else None
 
 
@@ -412,6 +464,15 @@ def resolve_node(hive, ref, st=None):
     m = re.fullmatch(r"(?i)(?:node|id|#)\s*#?\s*(\d+)", ref)      # "node 14", "#14", "id 14"
     if m:
         ref = m.group(1)
+    # "5 Rhubarb" (the way the error below lists them) or "Rhubarb (node 5)": the id decides,
+    # if the name agrees with it.
+    m = re.fullmatch(r"(?i)#?(\d+)\s*[-:]?\s*\(?([^()]*?)\)?|([^()]*?)\s*\((?:node|id|#)?\s*#?(\d+)\)", ref)
+    if m and not ref.isdigit():
+        nid, name = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+        x = next((x for x in nodes if str(x["id"]) == nid), None)
+        if x and (not name or name.lower() in (x.get("name") or "").lower() or
+                  name.lower() in (x.get("kind") or "").lower()):
+            return x, st
     hit = [x for x in nodes if str(x["id"]) == ref] if ref.isdigit() else \
           [x for x in nodes if ref.lower() in (x.get("name") or "").lower()]
     if len(hit) == 1:
@@ -508,19 +569,30 @@ def t_list_problems(hive):
                             for e in (p.get("events") or [])[:10]]}
 
 
-def t_slot_history(hive, node, slot, hours=24):
+def t_slot_history(hive, node, slot, hours=24, day=None):
     n, err = resolve_node(hive, node)
     if not n:
         return {"error": err}
     node = n["id"]
-    hours = max(1, min(24 * 90, int(hours)))
-    res = "hour" if hours <= 24 * 7 else "day"
     t1 = int(time.time())
+    if day:
+        try:
+            t0, t1, window = day_window(day)
+        except ValueError:
+            return {"error": "day must be today, yesterday, last night, a weekday or YYYY-MM-DD"}
+        hours = (t1 - t0) // 3600 + 1
+    else:
+        hours = max(1, min(24 * 90, int(hours)))
+        t0, window = t1 - hours * 3600, "the last %d h" % hours
+    res = "hour" if hours <= 24 * 7 else "day"
     r = hive.call("GET", "/api/rollup", {"node": int(node), "slot": int(slot), "res": res,
-                                         "from": t1 - hours * 3600, "to": t1})
+                                         "from": t0, "to": t1})
     st = hive.call("GET", "/api/state")
     kind = next((n.get("kind") for n in st.get("nodes", []) if n["id"] == int(node)), None)
     rows = r.get("rows") or []
+    if hive.slot_spec(kind, slot).get("rollup") != "counter":
+        # An hour with nothing heard (an outage) has no min/max: it would sink the whole window.
+        rows = [x for x in rows if x.get("min") is not None and x.get("max") is not None and x.get("avg") is not None]
     if not rows:
         return {"node": node, "slot": slot, "note": "no data in that window"}
     if hive.slot_spec(kind, slot).get("rollup") == "counter":
@@ -541,13 +613,22 @@ def t_slot_history(hive, node, slot, hours=24):
     label = hive.slot_spec(kind, slot).get("label")
     if soil_from == int(slot) and f(0).endswith("%"):
         label = "Soil moisture (calibrated %)"
-    return {"node": node, "slot": slot, "label": label,
-            "resolution": res, "overall": {"min": f(min(x["min"] for x in rows)),
-                                           "max": f(max(x["max"] for x in rows))},
-            "points": [{"at": time.strftime("%a %H:%M", time.localtime(x["ts"])),
-                        "avg": f(x["avg"] if isinstance(x["avg"], float) and soil_from == int(slot) else round(x["avg"])),
-                        "min": f(x["min"]), "max": f(x["max"])}
-                       for x in rows[::step]]}
+    out = {"node": node, "slot": slot, "label": label, "window": window,
+           "resolution": res, "overall": {"min": f(min(x["min"] for x in rows)),
+                                          "max": f(max(x["max"] for x in rows))}}
+    # "Yesterday's high" out of a 48-hour window: the overall max may be today's,
+    # and the thinned-out points can skip the hour it happened in.
+    days = {}
+    for x in rows:
+        days.setdefault(time.strftime("%a %d %b", time.localtime(x["ts"])), []).append(x)
+    if res == "hour" and len(days) > 1:
+        out["by_day"] = [{"day": d, "min": f(min(x["min"] for x in v)), "max": f(max(x["max"] for x in v))}
+                         for d, v in days.items()]
+    out["points"] = [{"at": time.strftime("%a %H:%M", time.localtime(x["ts"])),
+                      "avg": f(x["avg"] if isinstance(x["avg"], float) and soil_from == int(slot) else round(x["avg"])),
+                      "min": f(x["min"]), "max": f(x["max"])}
+                     for x in rows[::step]]
+    return out
 
 
 # Logged on a timer whether or not anything happened; they drown out the events
@@ -564,10 +645,13 @@ def day_window(day):
         return midnight, int(time.time()), "today"
     if d == "yesterday":
         return midnight - 86400, midnight, "yesterday"
-    if d in ("last night", "tonight", "overnight"):
-        # 18:00 yesterday to 08:00 today, or tonight so far if it's evening now
+    if d == "last night":
+        # 18:00 yesterday to 08:00 today - also when it's asked in the evening
+        return midnight - 6 * 3600, midnight + 8 * 3600, "last night (18:00-08:00)"
+    if d in ("tonight", "overnight"):
+        # the night that's on now, or the one just gone if it's daytime
         start = midnight - 6 * 3600 if now.tm_hour < 18 else midnight + 18 * 3600
-        return start, min(start + 14 * 3600, int(time.time())), "last night (18:00-08:00)"
+        return start, min(start + 14 * 3600, int(time.time())), "%s (18:00-08:00)" % d
     days = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
     wd = next((i for i, n in enumerate(days) if d.rstrip("s").startswith(n[:3])), None) \
         if d.isalpha() else None
@@ -672,24 +756,72 @@ def t_watering_advice(hive, node):
     return {k: v for k, v in out.items() if v is not None}
 
 
-def last_pump_run(hive, n, sid, days=7):
-    """(ts, ml) of the last rise in the node's pumped-in-24-h count: the last time its pump
-    ran, automatic or sent, to within the admin's polling interval. None if it didn't run."""
+def pump_runs(hive, n, sid, days=7):
+    """[(ts, ml)] for each rise in the node's pumped-in-24-h count: each time its pump
+    ran, automatic or sent, to within the admin's polling interval."""
     t1 = int(time.time())
     pts = (hive.call("GET", "/api/series", {"node": n["id"], "slot": sid, "from": t1 - days * 86400, "to": t1})
            or {}).get("points") or []
-    last = None
+    runs = []
     for (_, a), (t, b) in zip(pts, pts[1:]):
-        if a is not None and b is not None and b > a:
-            last = (t, b - a)
-    return last
+        if a is None or b is None or b <= a:
+            continue
+        if runs and t - runs[-1][2] <= 600:     # a long run seen over several polls is one watering
+            runs[-1] = (runs[-1][0], runs[-1][1] + b - a, t)
+        else:
+            runs.append((t, b - a, t))
+    return [(t, ml) for t, ml, _ in runs]
+
+
+def last_pump_run(hive, n, sid, days=7):
+    """(ts, ml) of the last time the pump ran, or None if it didn't in that many days."""
+    runs = pump_runs(hive, n, sid, days)
+    return runs[-1] if runs else None
+
+
+def pumped_slot(hive, kind):
+    return next((sid for sid, sp in ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
+                 if sp.get("label", "").startswith("Pumped, last 24")), None)
+
+
+# "How much water did it get this week": the 24-hour count summed hour by hour counts
+# each watering 24 times over.
+WATER_TOTAL = re.compile(r"(?i)\bhow (much|many)\b[^?]{0,50}\b(water(ed|ing|ings)?|pumped|ml)\b[^?]{0,40}"
+                         r"\b(week|days?|month|since|so far|in total|altogether|total)\b|"
+                         r"\btotal\b[^?]{0,30}\b(water|pumped|watering)")
+
+
+def watering_total(hive, n, q):
+    """The sum of the pump runs over the period the question names (7 days unless it says)."""
+    sid = pumped_slot(hive, n.get("kind"))
+    if not sid:
+        return None
+    m = re.search(r"(?i)\b(?:last|past)\s+(\d+|two|three|four|five|six)\s+days\b", q)
+    days = (int(m.group(1)) if m.group(1).isdigit() else WORD_NUM.get(m.group(1).lower(), 7)) if m else \
+        30 if re.search(r"(?i)\bmonth\b", q) else 7
+    days = max(1, min(30, days))
+    runs = pump_runs(hive, n, sid, days)
+    when = lambda t: time.strftime("%b %d %H:%M", time.localtime(t))  # noqa: E731
+    return ("WATER TOTAL for %s (node %s), last %d days: %d ml in %d watering%s%s. (Worked out from each rise "
+            "in the pumped-in-24-h count; don't add up that count yourself.)" % (
+                n.get("name") or n.get("kind"), n["id"], days, sum(ml for _, ml in runs), len(runs),
+                "" if len(runs) == 1 else "s",
+                ": " + ", ".join("%s %d ml" % (when(t), ml) for t, ml in runs[-8:]) if runs else "")) + \
+        uncounted(n)
+
+
+def uncounted(n):
+    """A pump with a known fault can run without the firmware counting it (the Rhubarb's
+    stuck-on pump, 2026-10-05): the count is then a floor, not the amount."""
+    issue = known_issue(n["id"])
+    return (" KNOWN ISSUE: %s So the pump may have run more than this count shows - say so." % issue
+            if issue and re.search(r"(?i)pump", issue) else "")
 
 
 def watering_record(hive, n):
     """What the hive itself shows was pumped: for "you watered it earlier, right?"."""
     kind, slots = n.get("kind"), n.get("slots") or {}
-    sid = next((sid for sid, sp in ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
-                if sp.get("label", "").startswith("Pumped, last 24")), None)
+    sid = pumped_slot(hive, kind)
     pumped = slots.get(sid) if sid else None
     run = last_pump_run(hive, n, sid) if sid else None
     sent = None
@@ -703,7 +835,7 @@ def watering_record(hive, n):
             "Last watering sent from the hive or this chat: %s." % (
                 n.get("name") or kind, n["id"], "unknown" if pumped is None else "%s ml" % pumped,
                 "%s, %s ml" % (when(run[0]), run[1]) if run else "not in the last 7 days" if sid else "unknown",
-                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log"))
+                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n)
 
 
 def confirm(summary, path=None, body=None):
@@ -723,7 +855,9 @@ def write(hive, summary, path, body):
                 "reason": "NOT sent yet: it is shown to the person with a Confirm button and goes out only if "
                           "they press it. Tell them what it will do and to press Confirm if they want it."}
     if not decision:
-        return {"sent": False, "reason": "the person declined"}
+        # "The person declined... due to concerns": said to the person, about them, with a guessed reason.
+        return {"sent": False, "reason": "NOT sent: the person you're talking to answered no. Tell them, as "
+                "'you', that nothing was sent; don't guess why they said no."}
     return {"sent": True, "reply": hive.call("POST", path, body=body)}
 
 
@@ -774,11 +908,15 @@ def t_set_slot(hive, slot, value, target=None, node=None):
         return {"sent": False, "reason": "the person didn't ask about %s (slot %s). Find the slot whose name "
                 "matches what they asked for in node_detail's writable_slots, or tell them there isn't one."
                 % (spec.get("label"), slot)}
+    asked = stated_value(SAID[-1] if SAID else "", spec.get("unit"))
+    if asked:
+        value = asked[0]
     if not spec.get("min", 0) <= value <= spec.get("max", 0):
         return {"sent": False, "reason": "%s must be %s..%s; %s would be refused" % (
             spec.get("label"), spec.get("min"), spec.get("max"), value)}
-    return write(hive, "set %s (slot %s) to %s on node %s %s  (sent over the radio mesh)" % (
-        spec.get("label"), slot, hive.fmt(kind, slot, value), n["id"], n.get("name") or ""),
+    return write(hive, "set %s (slot %s) to %s%s on node %s %s  (sent over the radio mesh)" % (
+        spec.get("label"), slot, hive.fmt(kind, slot, value), " (%s)" % asked[1] if asked else "", n["id"],
+        n.get("name") or ""),
         "/api/set", {"target": str(n["id"]), "slot": slot, "value": value})
 
 
@@ -792,9 +930,13 @@ def t_water_now(hive, node, ml):
     if not has_pump(hive, kind):
         return {"sent": False, "reason": "%s (node %s) is a %s: it has no pump, so it can't be watered "
                 "from the hive." % (name, n["id"], kind)}
-    asked = stated_ml(SAID[-1] if SAID else "", pump_flow(hive, n))
+    said = SAID[-1] if SAID else ""
+    asked = stated_ml(said, pump_flow(hive, n))
     if asked:
         ml = asked[0]
+    elif vague_amount(said):
+        return {"sent": False, "reason": "\"%s\" isn't an amount - ask the person how much (in ml or cups)"
+                % vague_amount(said)}
     spec = hive.slot_spec(kind, 40)
     cap = (n.get("slots") or {}).get("43")
     if not 1 <= ml <= spec.get("max", 0):
@@ -903,7 +1045,9 @@ TOOLS = {
         "node_detail readings. For soil moisture use slot 3: it comes back as calibrated %. For rain use "
         "slot 14 on the weather station: it comes back as mm per hour/day and a total.",
         {"node": dict(STR, description="node name or id"), "slot": INT,
-         "hours": dict(INT, description="how far back, default 24")}, ["node", "slot"])),
+         "hours": dict(INT, description="how far back, default 24"),
+         "day": dict(STR, description="'today', 'yesterday', a weekday name or a date YYYY-MM-DD; use this for "
+                                      "a particular day (e.g. yesterday's high)")}, ["node", "slot"])),
     "recent_events": (t_recent_events, spec("recent_events",
         "The hive's event log for a time window, newest first: commands sent, automatic watering changes, "
         "config changes, notes, errors, alerts. Routine timer jobs (forecast downloads, hourly summaries, "
@@ -1224,6 +1368,42 @@ def relay_hint(hive):
 
 
 # Hints keyed on what the question is about, placed beside it like focus_facts.
+TEMP_EXTREME = re.compile(r"(?i)\b(high|highs|low|lows|max(imum)?|min(imum)?|hottest|coldest|warmest|coolest|peak|"
+                          r"how (hot|cold|warm|cool|chilly)\b[^?]{0,20}\b(get|got|was|did|were))\b")
+DAY_WORD = re.compile(r"(?i)\b(today|yesterday|last night|overnight|this week|last 7 days|past week|"
+                      r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2})\b")
+
+
+def temp_extremes(hive, q):
+    """A day's high and low air temperature, worked out here: asked "what was the high
+    yesterday?", the model searched the event log and then said the station has no thermometer."""
+    if not TEMP_EXTREME.search(q) or not re.search(r"(?i)\b(temp|temps|temperature|hot|cold|warm|cool|chilly|"
+                                                   r"degrees|°|highs?|lows?)\b", q) or re.search(r"(?i)\bsoil\b", q):
+        return None
+    st = hive.call("GET", "/api/state")
+    wx = next((n for n in st.get("nodes", []) if n.get("kind") == "WeatherNode"), None)
+    if not wx:
+        return None
+    sid = next((sid for sid, sp in ((hive.kinds().get(wx["kind"]) or {}).get("slots") or {}).items()
+                if sp.get("label") == "Air temperature"), None)
+    if sid is None:
+        return None
+    m = DAY_WORD.search(q)
+    day = (m.group(1).lower() if m else "today")
+    if day in ("this week", "last 7 days", "past week"):
+        r = t_slot_history(hive, str(wx["id"]), sid, hours=168)
+        if r.get("by_day"):
+            return ("AIR TEMPERATURE at the %s, by day (high / low): %s." % (
+                wx.get("name") or "weather station", "; ".join("%s %s / %s" % (d["day"], d["max"], d["min"])
+                                                              for d in r["by_day"])))
+        day = "today"
+    r = t_slot_history(hive, str(wx["id"]), sid, day=day)
+    if "overall" not in r:
+        return None
+    return ("AIR TEMPERATURE at the %s, %s: high %s, low %s (from its hourly readings; use these numbers)." % (
+        wx.get("name") or "weather station", r.get("window", day), r["overall"]["max"], r["overall"]["min"]))
+
+
 TOPIC_HINTS = [
     (RESERVOIR_Q, reservoir_hint),
     (re.compile(r"(?i)\b(relays?|range ?nodes?|repeaters?|hops?|mesh)\b"), relay_hint),
@@ -1272,6 +1452,33 @@ PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered
                            r"\b(when|how much)\b[^.?!]{0,40}\b(watered|watering)\b")
 
 
+TEMP_Q = re.compile(r"(?i)\b(temp|temps|temperature|hot|cold|warm|heat|chilly|freez\w*|frost)\b")
+
+
+def temperatures(hive, n):
+    """Which temperatures a node really has: a node with no air sensor got its soil probe's
+    reading reported as the air temperature."""
+    r = readings(hive, n)
+    air = next((v for k, v in r.items() if k.startswith("Air temperature")), None)
+    soil = next((v for k, v in r.items() if k.startswith("Soil temperature")), None)
+    name = "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"])
+    if air is None and soil is None:
+        return None
+    if air is None or air.startswith("NO READING"):
+        wx = next((x for x in hive.call("GET", "/api/state").get("nodes", []) if x.get("kind") == "WeatherNode"
+                   and x["id"] != n["id"]), None)
+        wx_air = next((v for k, v in readings(hive, wx).items() if k.startswith("Air temperature")), None) \
+            if wx else None
+        return ("TEMPERATURE at %s: %s. There is NO air temperature at this node (no air sensor fitted) - say "
+                "that, and call the number the soil temperature.%s" % (
+                    name, "soil temperature %s (probe in the pot)" % soil if soil and not soil.startswith("NO")
+                    else "no temperature reading at all",
+                    " The air temperature at the %s is %s." % (wx.get("name") or "weather station", wx_air)
+                    if wx_air and not wx_air.startswith("NO") else ""))
+    return "TEMPERATURE at %s: air %s%s." % (name, air, "; soil %s (probe in the pot)" % soil
+                                              if soil and not soil.startswith("NO") else "")
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -1291,9 +1498,13 @@ def focus_facts(hive, q):
     for n in named:
         kind = n.get("kind")
         asked = stated_ml(q, pump_flow(hive, n)) if has_pump(hive, kind) else None
+        vague = vague_amount(q) if has_pump(hive, kind) and not asked else None
         if asked:
             out.append("AMOUNT for %s: %s = %d ml. Use ml=%d." % (n.get("name") or "node %s" % n["id"],
                                                                 asked[1], asked[0], asked[0]))
+        elif vague:
+            out.append("AMOUNT for %s: \"%s\" is not a number - ask how much (ml or cups) before any water_now."
+                       % (n.get("name") or "node %s" % n["id"], vague))
         f = facts(hive, cfg.get(str(n["id"])) or {}, n)
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
@@ -1310,12 +1521,20 @@ def focus_facts(hive, q):
             b = water_budget(hive, n)
             if b:
                 out.append(b)
-        if has_pump(hive, kind) and PAST_WATERING.search(q):
+        if TEMP_Q.search(q):
+            t = temperatures(hive, n)
+            if t:
+                out.append(t)
+        if has_pump(hive, kind) and WATER_TOTAL.search(q):
+            t = watering_total(hive, n, q)
+            if t:
+                out.append(t)
+        elif has_pump(hive, kind) and PAST_WATERING.search(q):
             out.append(watering_record(hive, n) + " If the message assumes a watering this record doesn't show, "
                        "say plainly that it didn't happen.")
-        if re.search(r"(?i)\bpump", q) and not has_pump(hive, kind):
-            out.append("NOTE: %s has NO pump. If the question assumes it has one, say that first." % (
-                n.get("name") or "node %s" % n["id"]))
+        if re.search(r"(?i)\bpump|auto(matic|[- ]?)water|watering schedule", q) and not has_pump(hive, kind):
+            out.append("NOTE: %s has NO pump, so no automatic watering either. If the question assumes it has "
+                       "one, say that first." % (n.get("name") or "node %s" % n["id"]))
         soil = derived(hive, n).get("Soil moisture")
         # Slot numbers only beside a request: on a question they came back as "current
         # settings: Pump flow: slot 42".
@@ -1329,13 +1548,25 @@ def focus_facts(hive, q):
             f["pump"], tools, " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
     if out:
         out.append("Turning automatic watering on/off, calibration and firmware: admin page only, not this chat.")
-    if len(named) >= 2 and re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|"
-                                     r"compare|which .*\b(dry|wet|moist))", q):
-        soils = [(n.get("derived") or {}).get("soil") for n in named]
-        ranked = sorted(((v, n.get("name") or "node %s" % n["id"]) for v, n in zip(soils, named) if v is not None))
+    # "Which plant is the wettest?" names none: rank them all. Left to itself the model
+    # called the Cactus at 52% wetter than the Rhubarb at 79%, because it's further over its band.
+    pool = named if len(named) >= 2 else [n for n in st.get("nodes", []) if not n.get("hidden")] \
+        if re.search(r"(?i)\b(driest|wettest|most (dry|wet|moist|water)|least (dry|wet|water)|which (plant|pot|one)s?\b"
+                     r"[^?]*\b(dri|dry|wet|moist))", q) else []
+    if re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|most (dry|wet|moist|"
+                 r"water)|least (dry|wet|water)|compare|which .*\b(dry|wet|moist|dri))", q):
+        soils = [(n.get("derived") or {}).get("soil") for n in pool]
+        ranked = sorted(((v, n.get("name") or "node %s" % n["id"]) for v, n in zip(soils, pool) if v is not None))
         if len(ranked) >= 2:
-            out.append("Soil right now, driest first: %s. So %s is the driest and %s the wettest." % (
-                ", ".join("%s %.0f%%" % (nm, v) for v, nm in ranked), ranked[0][1], ranked[-1][1]))
+            out.append("Soil right now, driest first: %s. So %s is the driest and %s the wettest (by the reading; "
+                       "each plant's own target band is a separate question)." % (
+                           ", ".join("%s %.0f%%" % (nm, v) for v, nm in ranked), ranked[0][1], ranked[-1][1]))
+    try:
+        t = temp_extremes(hive, q)
+    except RuntimeError:
+        t = None
+    if t:
+        out.append(t)
     for pat, hint in TOPIC_HINTS:
         if pat.search(q):
             try:
@@ -1351,8 +1582,22 @@ def focus_facts(hive, q):
 COMMAND = re.compile(r"(?i)^\s*(please\s+)?(water|pump|stop|reboot|restart|reset|set|rename|turn)\b")
 CLAIM = re.compile(r"(?i)(?<!can )(?<!could )(?<!shall )(?<!should )(?<!may )(?<!to )\b(i('ve| have)? "
                    r"(watered|started|sent|set|turned|broadcast|updated|rebooted|reset|renamed)|has been "
-                   r"(watered|sent|set|started|updated|rebooted|reset|renamed|approved|confirmed|done)|is now (watering|running|on|set)|"
+                   r"(watered|sent|set|started|updated|rebooted|reset|renamed|approved|confirmed|done)|is now (watering|"
+                   r"running(?! (low|out|dry|short))|on|set)|"
                    r"(will|should) now (restart|reboot)|done[.!])")
+NEGATED = re.compile(r"(?i)\b(no|not|never|nothing|none|neither|nor|without)\b|n't\b")
+
+
+def claims_change(text):
+    """CLAIM outside a negated clause: "no watering has been sent from the hive" is a
+    true answer about the past, and it once had a correct answer replaced."""
+    for m in CLAIM.finditer(text or ""):
+        clause = re.split(r"[.;:!?,\n]|\b(?:but|and|so)\b", text[max(0, m.start() - 60):m.start()])[-1]
+        if not NEGATED.search(clause):
+            return True
+    return False
+
+
 # A request for a change, as opposed to a question: an imperative verb at the start
 # of a sentence, or after "can you / please / go ahead and ...".
 REQUEST = re.compile(r"(?i)(^|[.!?]\s+|\b(can|could|would|will) you\s+|\bplease\s+|\bgo ahead and\s+|"
@@ -1395,6 +1640,16 @@ FIXED_REPLIES = [
      "That's hands-on work - nothing in the hive can fit, wire or replace hardware, and I won't record it as done "
      "before it is. Once you've done it, tell me: I can add a note to the log, and for a float switch set the "
      "node's Float switch setting so it's used."),
+    # "Do it for all of them": a model left to it sends the same setting to every node, one
+    # set_slot at a time (a neighbour's "ttl 0 saves battery" tip, 2026-10-10).
+    (re.compile(r"(?i)^(?!\s*(when|should|how|what|why|is|are|do (you|i|we|they)|does|did|was|will|would|can|"
+                r"could)\b)(?![^\n]*\?\s*$)(?![^\n]*\b(water|pump|stop)\b)[^\n]*\b(do (it|that|this|the same)|set|change|apply|"
+                r"update|switch|turn|make|put|copy)\b[^.?!\n]*\b(all|every|each)( (of )?(them|the nodes|nodes?|"
+                r"node's|devices|boards|plants)|one)\b|^(?![^\n]*\?\s*$)[^\n]*\bevery node'?s\b[^\n]*\b(do it|"
+                r"set (it|them)|change (it|them))\b"),
+     "This chat changes one node at a time, and only a setting you name for that node - never the same change "
+     "across every node. Settings for the whole swarm are on the admin page. If you want one node changed, name "
+     "the node and the setting. Nothing was sent."),
     (re.compile(r"(?i)\b(will it|is it going to|gonna) (rain|snow|freeze|frost|storm)|\bforecast\b|"
                 r"\b(rain|weather) (tomorrow|tonight|this week(end)?|next week)\b"),
      "I can't see weather forecasts - the hive downloads them only to score them against the station, and "
@@ -1435,6 +1690,29 @@ def scrub_tool_talk(answer):
 
 
 WRITES = ("water_now", "stop_pump", "set_slot", "node_action", "update_node", "add_note")
+
+
+# LaTeX the model writes for arithmetic ("\[ \frac{8}{2} = 4 \]") shows as raw markup in a
+# terminal or a plain chat box: written out in plain characters here.
+LATEX_SYMBOLS = [(r"\\times", "×"), (r"\\cdot", "·"), (r"\\div", "÷"), (r"\\approx", "≈"), (r"\\le(q)?\b", "≤"),
+                 (r"\\ge(q)?\b", "≥"), (r"\\neq\b", "≠"), (r"\^\s*\{?\\circ\}?", "°"), (r"\\degree\b", "°"),
+                 (r"\\%", "%"), (r"\\left|\\right", ""), (r"\\[,;:!]|\\quad|\\qquad", " ")]
+
+
+def plain_math(text):
+    if "\\" not in (text or ""):
+        return text
+    t = text
+    for _ in range(3):      # \frac{\text{8 ft}}{2}: inner ones first
+        t = re.sub(r"\\(?:text|mathrm|textbf|mathbf|operatorname)\s*\{([^{}]*)\}", r"\1", t)
+        t = re.sub(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", lambda m: "%s/%s" % tuple(
+            "(%s)" % x.strip() if " " in x.strip() else x.strip() for x in m.groups()), t)
+    for pat, rep in LATEX_SYMBOLS:
+        t = re.sub(pat, rep, t)
+    t = re.sub(r"\\\[\s*|\s*\\\]|\\\(\s*|\s*\\\)", lambda m: "\n" if "[" in m.group(0) or "]" in m.group(0) else "", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
 def ask(hive, messages, q, on_tool=None):
@@ -1525,7 +1803,7 @@ def ask(hive, messages, q, on_tool=None):
         messages.append(msg)
         answer = (msg.get("content") or "").strip() or "Sorry - I couldn't come up with an answer to that."
     sent = [r for _, r in writes if isinstance(r, dict) and r.get("sent")]
-    if not sent and CLAIM.search(answer):
+    if not sent and claims_change(answer):
         # It says it changed something; the tools say nothing was sent. Ask once
         # more, then fall back to the tools' own words.
         messages.append({"role": "user", "content": "[Check from the hive, not the person: NO change was sent "
@@ -1533,10 +1811,10 @@ def ask(hive, messages, q, on_tool=None):
         msg = ollama_chat(messages, read_only=True)
         messages.append(msg)
         answer = (msg.get("content") or "").strip()
-        if CLAIM.search(answer):
+        if claims_change(answer):
             why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
             answer = "Nothing was changed%s." % (": " + why if why else "")
-    return answer
+    return plain_math(answer)
 
 
 class Conversation:

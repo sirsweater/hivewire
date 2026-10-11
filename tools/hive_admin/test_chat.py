@@ -149,9 +149,19 @@ script[:] = [tool("water_now", node=str(nopump["id"]), ml=20), say("I've watered
 out = conv.ask(hive, "water node %d 20 ml" % nopump["id"])
 check("watered it" not in out["answer"] and "Nothing was changed" in out["answer"],
       "a false 'I've watered it' is replaced with what happened", out["answer"])
+# ...but a true answer about the past that says nothing was sent is left alone.
+conv = C.Conversation()
+fake_llm.calls.clear()
+past = "It was last watered on Oct 05 at 14:04. Since then, no watering has been sent from the hive or this chat."
+script[:] = [say(past)]
+out = conv.ask(hive, "when was node %d last watered?" % pump["id"])
+check(out["answer"] == past and len(fake_llm.calls) == 1, "'no watering has been sent' isn't taken for a claim",
+      out["answer"])
 
-# Node references the model actually produces.
-for ref in (str(pump["id"]), "node %d" % pump["id"], "#%d" % pump["id"], "id %d" % pump["id"]):
+# Node references the model actually produces, including the "5 Rhubarb" the error lists.
+_nm = pump.get("name") or pump["kind"]
+for ref in (str(pump["id"]), "node %d" % pump["id"], "#%d" % pump["id"], "id %d" % pump["id"],
+            "%d %s" % (pump["id"], _nm), "%s (node %d)" % (_nm, pump["id"]), "%s (%d)" % (_nm, pump["id"])):
     n, err = C.resolve_node(hive, ref)
     check(n and n["id"] == pump["id"], "resolve_node understands %r" % ref, err)
 
@@ -200,6 +210,11 @@ check(C.stated_ml("water it for 30 seconds") is None, "...but not without a cali
 check(C.stated_ml("water it 50 ml, it was dry 2 minutes ago", 95) is None and
       C.stated_ml("what happened 2 minutes ago", 95) is None, "times that aren't pumping, and ml, are left alone")
 check(C.stated_ml("water the rhubarb 1 cup and the larkspur 2 cups") is None, "two amounts are left to the model")
+for q, ml in (("water it 1 1/2 cups", 355), ("water it a cup and a half", 355), ("water it one and a half cups", 355),
+              ("water it a litre and a half", 1500), ("water it a pint", 473), ("water it a quart", 946),
+              ("water it a couple of cups", 473)):
+    check((C.stated_ml(q) or [None])[0] == ml, "%r = %d ml" % (q, ml), C.stated_ml(q))
+check(C.stated_ml("water it for a minute and a half", 60)[0] == 90, "a minute and a half of pumping")
 conv = C.Conversation()
 script[:] = [tool("water_now", node=str(pump["id"]), ml=1), say("Press Confirm.")]
 out = conv.ask(hive, "water node %d 1 cup" % pump["id"])
@@ -213,6 +228,12 @@ check(out["pending"] and "pump 60 ml (30 s at 120 ml/min)" in out["pending"][0][
       "'30 seconds' is pumping time at the node's flow, not 30 ml", out["pending"])
 conv.decline(out["pending"][0]["id"])
 app.poller.snapshot["nodes"][pump["id"]]["slots"].pop(42, None)
+script[:] = [tool("water_now", node=str(pump["id"]), ml=3), say("Press Confirm.")]
+out = conv.ask(hive, "give node %d a few cups" % pump["id"])
+check(not out["pending"] and "isn't an amount" in last_tool_result(conv)["reason"],
+      "'a few cups' isn't turned into ml=3", out)
+check('"a few cups" is not a number' in C.focus_facts(hive, "give node %d a few cups" % pump["id"]),
+      "...and the question carries a note to ask how much")
 # These read slots by id the way the HTTP API spells them; in-process they used to see
 # int ids, find nothing, and quietly skip the check.
 app.poller.snapshot["nodes"][pump["id"]]["slots"][43] = 100
@@ -241,6 +262,24 @@ check("Pump last ran (automatic or sent): %s, 60 ml" % __import__("time").strfti
 f = C.focus_facts(hive, "you watered node %d earlier, right?" % pump["id"])
 check("WATERING RECORD" in f and "didn't happen" in f, "a claimed past watering gets the record beside it", f)
 check("WATERING RECORD" not in C.focus_facts(hive, "water node %d 50 ml" % pump["id"]), "...a new request doesn't")
+# one 90 ml run seen over three polls, then another 40 ml two days later
+app.store.add_readings([(t0 - 3 * 86400, pump["id"], 45, 0), (t0 - 3 * 86400 + 60, pump["id"], 45, 30),
+                        (t0 - 3 * 86400 + 120, pump["id"], 45, 70), (t0 - 3 * 86400 + 180, pump["id"], 45, 90),
+                        (t0 - 2 * 86400, pump["id"], 45, 0), (t0 - 86400, pump["id"], 45, 40),
+                        (t0 - 86400 + 3600, pump["id"], 45, 0)])
+tot = C.focus_facts(hive, "how much water has node %d had this week?" % pump["id"])
+check("last 7 days: 190 ml in 3 waterings" in tot, "a week's water is the sum of the runs, one per watering", tot)
+check("last 2 days: 100 ml in 2 waterings" in C.watering_total(hive, pump, "how much in the last two days"),
+      "...over the days the question names", C.watering_total(hive, pump, "how much in the last two days"))
+_ki = os.path.join(tmp, "known_issues_test.json")
+with open(_ki, "w") as f:
+    json.dump({str(pump["id"]): "PUMP NOT TRUSTED: it ran on with the firmware saying off."}, f)
+C.KNOWN_ISSUES_FILE, _keep_ki = _ki, C.KNOWN_ISSUES_FILE
+tot = C.watering_total(hive, pump, "how much water this week")
+check("may have run more than this count shows" in tot and "PUMP NOT TRUSTED" in tot,
+      "a pump with a known fault: the total is a floor, and says so", tot)
+check("may have run more" in C.watering_record(hive, pump), "...and so is the watering record")
+C.KNOWN_ISSUES_FILE = _keep_ki
 
 # --- "let's check..." and then nothing: held to it once --------------------------
 conv = C.Conversation()
@@ -352,6 +391,121 @@ check("WATER BUDGET" in C.focus_facts(hive, "how much more water can node %d get
       "...and sits beside a how-much-more question")
 for k in (44, 45, 43):
     sl.pop(k, None)
+
+# --- a day's high or low comes from that day, not the whole window ----------------
+import time as _t  # noqa: E402
+wx = pump                                # its slot 1 is air temperature, 0.01 °C
+_lt = _t.localtime()
+_mid = int(_t.mktime((_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+# yesterday peaks at 30.0 C at 15:00; today's hours are hotter still (35.0 C) to catch a mix-up
+_rows = [(wx["id"], 1, _mid - 86400 + h * 3600, 3600, 6, 2000, 1900, 3000 if h == 15 else 2100, None) for h in range(24)]
+_rows += [(wx["id"], 1, t, 3600, 6, 2600, 2500, 3500, None) for t in range(_mid, int(_t.time()) - 3600, 3600)]
+with app.store.db() as c:
+    c.executemany("INSERT OR REPLACE INTO rollup_hour VALUES(?,?,?,?,?,?,?,?,?)", _rows)
+y = C.t_slot_history(hive, str(wx["id"]), 1, day="yesterday")
+check(y.get("window") == "yesterday" and y["overall"]["max"].startswith("30.0"),
+      "slot_history(day='yesterday') gives yesterday's own high", y.get("overall"))
+w = C.t_slot_history(hive, str(wx["id"]), 1, hours=48)
+yd = _t.strftime("%a %d %b", _t.localtime(_mid - 86400))
+check(any(d["day"] == yd and d["max"].startswith("30.0") for d in w.get("by_day") or []),
+      "a 48 h window splits min/max by day", w.get("by_day"))
+# An hour with nothing heard has no min/max: it mustn't sink the window.
+with app.store.db() as c:
+    c.execute("INSERT OR REPLACE INTO rollup_hour VALUES(?,?,?,?,?,?,?,?,?)",
+              (wx["id"], 1, _mid - 86400 + 30 * 60 * 0 - 3 * 3600, 3600, 0, None, None, None, None))
+w = C.t_slot_history(hive, str(wx["id"]), 1, hours=72)
+check("overall" in w, "an empty hour in the window is skipped, not a crash", w.get("note"))
+
+
+class _WxHive:
+    """The fake swarm has no weather station: show the test node as one."""
+    def __init__(self, h):
+        self.h = h
+
+    def call(self, method, path, *a, **k):
+        r = self.h.call(method, path, *a, **k)
+        if path == "/api/state":
+            r = dict(r, nodes=[dict(n, kind="WeatherNode") if n["id"] == wx["id"] else n for n in r["nodes"]])
+        return r
+
+    def __getattr__(self, name):
+        return getattr(self.h, name)
+
+
+t = C.temp_extremes(_WxHive(hive), "what was the high temperature yesterday?")
+check(t and "yesterday: high 30.0 °C" in t, "'yesterday's high' is worked out and put beside the question", t)
+check(C.temp_extremes(_WxHive(hive), "what's the larkspur's max per watering?") is None and
+      C.temp_extremes(_WxHive(hive), "what was the lowest the soil got yesterday?") is None,
+      "...not for a watering limit, or the soil")
+t0n, t1n, lbl = C.day_window("last night")
+check(t1n - t0n == 14 * 3600 and t1n == _mid + 8 * 3600, "'last night' is 18:00 yesterday to 08:00 today, "
+      "whatever time it's asked", (t0n, t1n, _mid))
+
+# --- a node with no air sensor: its one temperature is the soil's ------------------
+sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
+keep = {k: sl.get(k) for k in (1, 6, 16)}
+sl.update({1: 0, 6: 2 | 8, 16: 1990})        # soil probe + soil temp probe, no air sensor
+n, _ = C.resolve_node(hive, str(pump["id"]))
+t = C.temperatures(hive, n)
+check(t and "soil temperature 19.9 °C" in t and "NO air temperature" in t, "no air sensor: the soil temperature, "
+      "named as such", t)
+check(t and t in C.focus_facts(hive, "how hot is it at node %d?" % pump["id"]), "...beside a temperature question")
+sl.update({1: 2230, 6: 1 | 2 | 8})
+check("air 22.3 °C; soil 19.9 °C" in C.temperatures(hive, C.resolve_node(hive, str(pump["id"]))[0]),
+      "with an air sensor, both", C.temperatures(hive, C.resolve_node(hive, str(pump["id"]))[0]))
+for k, v in keep.items():
+    if v is None:
+        sl.pop(k, None)
+    else:
+        sl[k] = v
+
+# --- "which plant is the wettest?" names none: every plant is ranked ---------------
+_probes = [n["id"] for n in st["nodes"] if (hive.kinds().get(n["kind"]) or {}).get("derived", {}).get("soil")][:3]
+for i, nid in enumerate(_probes):          # calibrated, and at 2000 / 1800 / 1600 raw: lower raw is wetter
+    app.cfg.set_node(nid, {"soil_dry": 2800, "soil_wet": 1200})
+    app.poller.snapshot["nodes"][nid]["slots"][3] = 2000 - 200 * i
+soiled = [n for n in hive.call("GET", "/api/state")["nodes"] if (n.get("derived") or {}).get("soil") is not None]
+check(len(soiled) >= 2, "(set up: two or more calibrated plants)", [(n["id"], n.get("derived")) for n in soiled])
+f = C.focus_facts(hive, "which plant is the wettest?")
+m = re.search(r"Soil right now, driest first: (.*?)\. So (.*?) is the driest and (.*?) the wettest", f)
+check(len(soiled) < 2 or (m and m.group(1).count("%") == len(soiled)), "a wettest question with no names ranks every "
+      "plant with a soil reading", f)
+if m and len(soiled) >= 2:
+    top = max(soiled, key=lambda n: n["derived"]["soil"])
+    check(m.group(3) == (top.get("name") or "node %s" % top["id"]), "...and the wettest is the highest reading", f)
+check("driest first" not in C.focus_facts(hive, "is the hive ok?"), "...an unrelated question gets no ranking")
+for nid in _probes:
+    app.cfg.set_node(nid, {"soil_dry": None, "soil_wet": None})
+
+# --- the same change on every node: one node at a time, so a fixed answer ----------
+conv = C.Conversation()
+fake_llm.calls.clear()
+script[:] = [tool("set_slot", target=str(pump["id"]), slot=17, value=0), say("Done.")]
+out = conv.ask(hive, "my neighbour says setting every node's ttl to 0 saves battery. do it for all of them")
+check(not fake_llm.calls and not out["pending"] and "one node at a time" in out["answer"],
+      "'do it for all of them' gets the one-node-at-a-time answer, without the model", out)
+check(not C.FIXED_REPLIES[-2][0].search("water all the plants 50 ml") and
+      not C.FIXED_REPLIES[-2][0].search("should I set every node to low power?"),
+      "...not for watering every plant, or a question about it")
+
+# --- LaTeX arithmetic comes out as plain text -------------------------------------
+conv = C.Conversation()
+script[:] = [say(r"Use \( F = \frac{9}{5} \times C + 32 \): \[ \frac{9}{5} \times 20 + 32 = 68 \]")]
+out = conv.ask(hive, "what is 20 C in fahrenheit?")
+check(out["answer"] == "Use F = 9/5 × C + 32:\n9/5 × 20 + 32 = 68", "LaTeX in an answer is written out plainly",
+      out["answer"])
+
+# --- settings given in other units are worked out too ---------------------------------
+conv = C.Conversation()
+script[:] = [tool("set_slot", target=str(pump["id"]), slot=43, value=1), say("Press Confirm.")]
+out = conv.ask(hive, "set node %d's max per watering to 1 cup" % pump["id"])
+check(out["pending"] and "to 237 ml (1 US cup)" in out["pending"][0]["summary"],
+      "'max per watering 1 cup' is 237 ml on the card, not 1", out["pending"])
+if out["pending"]:
+    conv.decline(out["pending"][0]["id"])
+check(C.stated_value("set the minimum gap to 2 hours", "min") == (120, "2 hours") and
+      C.stated_value("set the minimum gap to 90 minutes", "min") is None,
+      "a time setting in hours is worked out in minutes; one already in minutes is left alone")
 
 # --- the dew point is worked out in code ----------------------------------------
 d = C.dew_point(hive)
