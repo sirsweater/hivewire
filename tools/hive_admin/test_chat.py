@@ -203,6 +203,8 @@ check(t.startswith("Larkspur is the drier one: 69% against Rhubarb's 79%") and "
       and "79.0%" in t, "a drier/wetter claim that turns the readings round is replaced", t)
 check(C.fix_comparison("Larkspur is drier (69.0%) than the Rhubarb.", r) == "Larkspur is drier (69.0%) than the Rhubarb.",
       "...a right one is left alone")
+t = C.scrub_tool_talk("It's at 70%. It can be watered manually using the `water_now` tool if needed. Ok.")
+check(t == "It's at 70%. Ok.", "'using the water_now tool' goes too", t)
 t = C.scrub_tool_talk("Soil is 69%, inside its band.\n\n**water_now 30 ml**\n\nWhat would you like to do?")
 check("water_now" not in t and "inside its band" in t, "a bare tool-call line is taken out", t)
 check(C.NEXT_WATER_Q.search("when will the larkspur need water next?") and
@@ -457,6 +459,10 @@ f = C.focus_facts(hive, "node %d looks droopy, what should I do?" % pump["id"])
 check("LOOKS UNWELL" in f and "NOT thirst" in f, "a droopy plant in moist soil: not thirst, said beside it", f)
 app.cfg.set_node(pump["id"], {"plant_band": [90, 100]})
 check("thirst is likely" in C.focus_facts(hive, "node %d is wilting" % pump["id"]), "...in dry soil: thirst")
+app.cfg.set_node(pump["id"], {"plant_band": [5, 10]})
+f = C.focus_facts(hive, "my node %d pot feels really dry" % pump["id"])
+check("FEELS DRY TO THE PERSON" in f and "skewer" in f, "'my pot feels really dry' with a moist probe: where to feel, beside it", f)
+check("FEELS DRY" not in C.focus_facts(hive, "is node %d dry?" % pump["id"]), "...not for a question")
 app.cfg.set_node(pump["id"], {"plant_band": None, "soil_dry": None, "soil_wet": None})
 
 # --- who's reporting, as lists; no tool names handed to the person -----------------

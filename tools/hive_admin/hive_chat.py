@@ -1639,6 +1639,9 @@ def water_budget(hive, n):
 
 SYMPTOM = re.compile(r"(?i)\b(droop\w*|wilt\w*|limp|sagg\w*|floppy|yellow\w*|brown\w*|crisp\w*|dying|sad|"
                      r"unhealthy|curl\w*)\b")
+# "My larkspur pot feels really dry" (asked for real, probe at 70 %): the reading, then where to feel.
+FEELS_DRY = re.compile(r"(?i)\b(feels?|looks?|seems?|is|it's|gone|getting|top is|surface is)\b[^.?!]{0,25}\b(really |very |so |bone[- ]?|super )?"
+                       r"(dry|dried out|parched|crispy)\b|\bbone[- ]?dry\b|\bdry (on top|at the top|to the touch)\b")
 # "You watered it earlier, right?", "how much did you give it?", "when was it last watered?"
 PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered|gave|pumped|ran|sent)\b|"
                            r"\bdid (you|it|the hive)\b[^.?!]{0,30}\b(water|give|pump|run|send)\b|"
@@ -1804,6 +1807,15 @@ def focus_facts(hive, q):
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
+        if FEELS_DRY.search(q) and not re.match(r"(?i)\s*(is|are|does|do|how|what|which|when)\b", q) and \
+                (n.get("derived") or {}).get("soil") is not None and not SYMPTOM.search(q):
+            sv = f.get("soil_vs_target", "")
+            if not (sv.startswith("TOO DRY") or sv.endswith("near the dry end")):
+                out.append("FEELS DRY TO THE PERSON, but the probe reads %s (%s). The surface dries first; the probe "
+                           "reads deeper. Give the reading, then suggest pushing a finger or a wooden skewer 5-8 cm "
+                           "down next to the probe: damp there means it's fine; dry there means the probe and the pot "
+                           "disagree, so water it if they want and check where the probe sits. Don't propose a "
+                           "watering unless they ask." % (derived(hive, n).get("Soil moisture"), sv or "no target set"))
         if SYMPTOM.search(q) and (n.get("derived") or {}).get("soil") is not None:
             sv = f.get("soil_vs_target", "")
             thirsty = sv.startswith("TOO DRY") or sv.endswith("near the dry end")
@@ -2023,7 +2035,7 @@ def scrub_tool_talk(answer):
     chat's own, not the person's. Such sentences go, with a "do that?" question after one."""
     names = "|".join(re.escape(t) for t in TOOLS)
     pat = re.compile(r"(?i)[ \t]*[^.!?\n]*\b(you can use|you could use|use the|I will call|I'll call|call the|"
-                     r"run the|try the)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
+                     r"run the|try the|using the|with the|via the|through the)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
     # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
