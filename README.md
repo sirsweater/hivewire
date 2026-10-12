@@ -720,6 +720,29 @@ mode. Wiring: switch input on GPIO4, float switch on GPIO5 to GND.
 **Not yet run on hardware.** Built and exercised against the admin's simulated
 swarm only, until a pump is on the bench.
 
+### Seed mode and field capacity (the admin)
+
+A probe reads several centimetres down, and a pot stays wet there for days
+after a watering: the bottom holds water the drainage hole can't pull out,
+while the top dries. On 2026-10-12 a cactus pot read ~48% at probe depth with a
+bone-dry surface; soaked, it reached 100% (past the in-water calibration point)
+within four minutes, then bounced at 82-87% as water drained down past the
+probe. Two admin features in [`potcare.py`](tools/hive_admin/potcare.py) work
+around that, with no reflash:
+
+- **Seed mode** (node page, pump nodes): a small dose on a timer ("10 ml every
+  12 h for 14 days") whatever the probe says, so seeds in the top centimetre
+  stay damp; it stops by itself on the end date. Each dose is an action, sent
+  once; if the node's own pumped-in-24-h count hasn't risen ten minutes later
+  (a missed broadcast), it is sent one more time, and a second miss is logged.
+  The node's caps apply to every dose, and automatic watering carries on.
+- **Field capacity** (node page, soil nodes): soak the pot and let it drain;
+  the admin finds the soak's peak and the level the drain settles at (30 min
+  within 2 points) and saves it as the pot's field capacity. "Scale the plant's
+  band to it" reads the plant's moisture band as a share of that level, so a
+  band this soil can never reach stops reading "too wet". Automatic watering,
+  adaptive watering and the chat all use the scaled band.
+
 ## Testing it for hours
 
 [`tools/soak`](tools/soak) holds the long-running tests these numbers come from.

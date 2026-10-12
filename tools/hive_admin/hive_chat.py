@@ -277,6 +277,15 @@ def plant(meta, n):
     """The plant's target band and where the soil sits against it."""
     band, soil = meta.get("plant_band"), (n.get("derived") or {}).get("soil")
     out = {}
+    fc = meta.get("soil_fc")
+    if band and fc and meta.get("band_scale") == "fc":
+        # The band read as a share of what this pot holds when drained (potcare.py), as the
+        # admin waters by it.
+        band = [round(band[0] * fc / 100.0, 1), round(band[1] * fc / 100.0, 1)]
+        out["target_note"] = "the plant's band scaled to this pot's field capacity (%s %%)" % fc
+    if fc:
+        out["field_capacity"] = "%s %% - the most this pot's soil holds once a soak has drained%s" % (
+            fc, "; soil now is %.0f %% of that" % (100.0 * soil / fc) if soil is not None else "")
     if band:
         out["target_soil"] = "%s-%s %%" % tuple(band)
         if soil is not None:
@@ -288,6 +297,11 @@ def plant(meta, n):
     if "adaptive" in meta:
         out["automatic_watering"] = "on" if (meta["adaptive"].get("on") and
                                              not meta["adaptive"].get("user_off")) else "off"
+    sm = meta.get("seed_mode")
+    if sm and sm.get("until", 0) > time.time():
+        out["seed_mode"] = ("ON: %s ml every %s h until %s, whatever the probe says, to keep seeds in the top "
+                            "centimetre damp (started and stopped on the admin page, not from this chat)" % (
+                                sm.get("ml"), sm.get("every_h"), time.strftime("%b %d %H:%M", time.localtime(sm["until"]))))
     return out
 
 
@@ -1861,8 +1875,11 @@ def focus_facts(hive, q):
             "soil now %s%s; " % (soil, " (target %s, %s)" % (f["target_soil"], f.get("soil_vs_target"))
                                  if f.get("target_soil") else "") if soil else "",
             f["pump"], tools, " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
+        extra = ["%s: %s" % (k.replace("_", " "), f[k]) for k in ("target_note", "field_capacity", "seed_mode") if f.get(k)]
+        if extra:
+            out.append("%s, more: %s." % (n.get("name") or kind, "; ".join(extra)))
     if out:
-        out.append("Turning automatic watering on/off, calibration and firmware: admin page only, not this chat.")
+        out.append("Turning automatic watering or seed mode on/off, calibration, field capacity and firmware: admin page only, not this chat.")
     # "Which plant got the most water this week?" names none: every pump's total.
     if not named and (WATER_TOTAL.search(q) or re.search(r"(?i)\b(most|least|more|less)\b[^?]{0,20}\bwater(ed)?\b", q)) \
             and re.search(r"(?i)\b(week|days?|month|since|so far|total|today|24 ?h)\b", q):

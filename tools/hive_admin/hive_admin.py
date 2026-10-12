@@ -49,6 +49,7 @@ sys.path.insert(0, HERE)
 from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # noqa: E402
                     slot_modes_from_kind)
 from waterlearn import LearnThread, WaterLearner  # noqa: E402
+from potcare import SeedMode, SeedThread, analyze_soak, scaled_band  # noqa: E402
 from forecasts import Forecasts, ForecastThread  # noqa: E402
 import hive_chat  # noqa: E402
 
@@ -1303,6 +1304,11 @@ class App:
         self.learner = None if self.flash_only else WaterLearner(
             self.store, self.calibration, self.adaptive_node,
             log=lambda msg: self.store.event("command", msg))
+        # Small timed doses while seeds germinate (potcare.py). Each dose is an
+        # action: sent once, never re-sent like a setting.
+        self.seed = None if self.flash_only else SeedMode(
+            self.cfg, self.send_action, self.node_live, self.store.event,
+            slots=lambda nid: ((self.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {})
         # Public model forecasts saved next to what the station measures, and
         # scored against it (forecasts.py). Off until the config has a place.
         self.forecasts = None if self.flash_only else Forecasts(
@@ -1405,11 +1411,16 @@ class App:
     ADAPTIVE_DEFAULT = {"on": True, "from_plant": True}
 
     def adaptive_node(self, nid):
-        """The node's config with its adaptive-watering settings filled in."""
+        """The node's config with its adaptive-watering settings filled in, and
+        its plant band on this pot's own scale when it opted in (potcare.py):
+        everything that waters by the band reads it from here."""
         n = dict(self.cfg.node(nid))
         a = dict(self.ADAPTIVE_DEFAULT)
         a.update(n.get("adaptive") or {})
         n["adaptive"] = a
+        if n.get("band_scale") == "fc" and n.get("soil_fc") and n.get("plant_band"):
+            n["plant_band_library"] = n["plant_band"]
+            n["plant_band"] = scaled_band(n["plant_band"], n["soil_fc"])
         return n
 
     def note_plant_bands(self, nodes):
@@ -1440,7 +1451,7 @@ class App:
         dry, wet, calibrated = self.calibration(nid)
         if not calibrated:
             return []
-        band = self.cfg.node(nid).get("plant_band") if conf.get("from_plant") else None
+        band = self.adaptive_node(nid).get("plant_band") if conf.get("from_plant") else None
         below_pct = band[0] if band else 40
         below_raw = max(1, min(4095, int(round(dry - below_pct / 100.0 * (dry - wet)))))
         writes = [(51, slots.get(51) or 100), (52, slots.get(52) if slots.get(52) and slots.get(52) != 720 else 360),
@@ -1568,6 +1579,16 @@ class App:
                     self.cfg.set_node(nid, {"auto_kind": name})
                 return name
         return meta.get("auto_kind") if meta.get("auto_kind") in self.kinds else None
+
+    def send_action(self, nid, slot, value):
+        """A one-shot write (water now, reboot): sent once, never tracked for a
+        re-send. True when the gateway sent it."""
+        ack = self.gw.command("set %d %d %d" % (nid, slot, value), r"ACK set|ERR")
+        self.store.event("command", "set %d %d %d -> %s" % (nid, slot, value, ack or "no reply"))
+        return bool(ack and ack.startswith("ACK"))
+
+    def node_live(self, nid):
+        return nid in ((self.poller.snapshot or {}).get("nodes") or {})
 
     def calibration(self, nid):
         """Both ends of the soil scale, and whether a person actually measured
@@ -2011,6 +2032,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             rows = [dict(zip(keys, r)) for r in app.rollup.series(node, slot, t0, t1, res)]
             return self.send_json({"rows": rows, "res": res, "from": t0, "to": t1,
                                    "raw_cutoff": app.rollup.raw_cutoff()})
+        if path == "/api/fieldcap":
+            # The last soak in this node's soil history: its peak, and where the
+            # drain levelled off (this pot's field capacity), as potcare.py reads it.
+            nid = int(q["node"])
+            t1 = now()
+            pts = self.series(nid, "d:soil", t1 - 2 * 86400, t1)
+            out = analyze_soak(pts, t1)
+            node = app.cfg.node(nid)
+            out.update(saved=node.get("soil_fc"), saved_at=node.get("soil_fc_at"),
+                       band_scale=node.get("band_scale"), plant_band=node.get("plant_band"),
+                       scaled_band=scaled_band(node.get("plant_band"), node.get("soil_fc")))
+            return self.send_json(out)
         if path == "/api/waterlearn":
             # What adaptive watering has learned about a node, and what it would do.
             nid = int(q["node"])
@@ -2124,7 +2157,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Off on purpose stays off: auto_defaults() never switches it back on.
         conf["user_off"] = not enable
         app.cfg.set_node(nid, {"adaptive": conf})
-        band = app.cfg.node(nid).get("plant_band")
+        band = app.adaptive_node(nid).get("plant_band")
         if conf.get("from_plant", True) and band and b.get("below_pct") in (None, ""):
             b["below_pct"] = band[0]
         pct = float(b["below_pct"])
@@ -2375,9 +2408,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/node":
             b = self.jbody()
             nid = int(b.pop("id"))
-            allowed = {"name", "location", "kind", "soil_dry", "soil_wet", "hidden",
+            allowed = {"name", "location", "kind", "soil_dry", "soil_wet", "hidden", "band_scale",
                        "notes", "batt_scale"}
             patch = {k: v for k, v in b.items() if k in allowed}
+            if patch.get("band_scale") not in (None, "", "fc"):
+                raise ValueError("band_scale is 'fc' (scale the plant band to this pot's field capacity) or empty")
             for k in ("soil_dry", "soil_wet"):
                 if k in patch and patch[k] not in (None, ""):
                     patch[k] = int(patch[k])
@@ -2487,6 +2522,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json({"reply": ack, "confirming": tracking})
         if path == "/api/autowater":
             return self.send_json(self.autowater(self.jbody()))
+        if path == "/api/seedmode":
+            b = self.jbody()
+            nid = int(b["node"])
+            if not app.seed:
+                raise ValueError("seed mode needs the hive (not available in flash-only mode)")
+            if b.get("off"):
+                return self.send_json({"ok": app.seed.stop(nid)})
+            conf = app.seed.start(nid, b.get("ml", 10), b.get("every_h", 12), b.get("days", 14))
+            return self.send_json({"ok": True, "seed_mode": conf})
+        if path == "/api/fieldcap":
+            # Save this pot's field capacity: the settled level the analysis found,
+            # or a value the person typed; {clear: true} removes it.
+            b = self.jbody()
+            nid = int(b["node"])
+            if b.get("clear"):
+                app.cfg.set_node(nid, {"soil_fc": None, "soil_fc_at": None, "band_scale": None})
+                app.store.event("config", "node %d field capacity cleared" % nid)
+                return self.send_json({"ok": True})
+            if b.get("value") not in (None, ""):
+                fc = float(b["value"])
+            else:
+                t1 = now()
+                a = analyze_soak(self.series(nid, "d:soil", t1 - 2 * 86400, t1), t1)
+                if a.get("status") != "settled":
+                    raise ValueError("no settled soak to save yet (%s): soak the pot, let it drain, and wait "
+                                     "until the reading holds for half an hour" % a.get("status"))
+                fc = a["settled"]
+            if not 20 <= fc <= 100:
+                raise ValueError("field capacity must be 20-100 %% on the probe's scale, not %s" % fc)
+            patch = {"soil_fc": round(fc, 1), "soil_fc_at": int(now())}
+            if "band_scale" in b:
+                patch["band_scale"] = "fc" if b["band_scale"] else None
+            app.cfg.set_node(nid, patch)
+            app.store.event("config", "node %d field capacity %.1f%%%s" % (
+                nid, fc, ", plant band scaled to it" if patch.get("band_scale") else ""))
+            return self.send_json({"ok": True, "soil_fc": patch["soil_fc"]})
         if path == "/api/mode":
             b = self.jbody()
             m, p, ttl = int(b["mode"]), int(b.get("param", 0)), int(b.get("ttl", 0))
@@ -2588,6 +2659,7 @@ def main():
             return ok
 
         LearnThread(app.learner, pump_nodes, command).start()
+        SeedThread(app.seed).start()
     srv = Server((args.listen, args.http_port), Handler)
     print("hive admin on http://%s:%d/ (%s)" % (args.listen, args.http_port,
           "flash only" if app.flash_only else "simulated" if args.fake else args.port), flush=True)

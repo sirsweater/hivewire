@@ -465,6 +465,37 @@ check("FEELS DRY TO THE PERSON" in f and "skewer" in f, "'my pot feels really dr
 check("FEELS DRY" not in C.focus_facts(hive, "is node %d dry?" % pump["id"]), "...not for a question")
 app.cfg.set_node(pump["id"], {"plant_band": None, "soil_dry": None, "soil_wet": None})
 
+# --- seed mode and field capacity reach the chat ---------------------------------
+import time as _tm  # noqa: E402
+app.cfg.set_node(pump["id"], {"plant_band": [50, 100], "soil_dry": 4000, "soil_wet": 1000, "soil_fc": 80.0,
+                              "band_scale": "fc", "seed_mode": {"ml": 10, "every_h": 12, "until": int(_tm.time()) + 86400}})
+f = C.focus_facts(hive, "how is node %d doing?" % pump["id"])
+check("seed mode: ON: 10 ml every 12 h" in f, "seed mode shows beside a question about the node", f)
+check("target 40.0-80.0 %" in f and "field capacity: 80.0 %" in f and "scaled to this pot" in f,
+      "...and with a field capacity and band_scale, the band the admin waters by", f)
+app.cfg.set_node(pump["id"], {"plant_band": None, "soil_dry": None, "soil_wet": None, "soil_fc": None,
+                              "band_scale": None, "seed_mode": None})
+h = H._Capture(app, {"node": pump["id"], "ml": 10, "every_h": 12, "days": 2})
+h.route_post("/api/seedmode", {})
+check(h.out[0].get("ok") and app.cfg.node(pump["id"]).get("seed_mode", {}).get("ml") == 10, "the seed mode route saves it", h.out)
+h = H._Capture(app, {"node": pump["id"], "off": True})
+h.route_post("/api/seedmode", {})
+check(not app.cfg.node(pump["id"]).get("seed_mode"), "...and switches it off")
+h = H._Capture(app, None)
+h.route_get("/api/fieldcap", {"node": str(pump["id"])})
+check(h.out[0].get("status") in ("no soak", "draining", "settled"), "the field capacity route answers", h.out)
+h = H._Capture(app, {"node": pump["id"], "value": 82, "band_scale": True})
+h.route_post("/api/fieldcap", {})
+check(app.cfg.node(pump["id"]).get("soil_fc") == 82 and app.cfg.node(pump["id"]).get("band_scale") == "fc",
+      "a typed field capacity is saved, with the band scaled", app.cfg.node(pump["id"]))
+app.cfg.set_node(pump["id"], {"plant_band": [50, 100]})
+check(app.adaptive_node(pump["id"])["plant_band"] == [41.0, 82.0], "...and everything that waters by the band gets the scaled one",
+      app.adaptive_node(pump["id"]).get("plant_band"))
+h = H._Capture(app, {"node": pump["id"], "clear": True})
+h.route_post("/api/fieldcap", {})
+app.cfg.set_node(pump["id"], {"plant_band": None})
+check(not app.cfg.node(pump["id"]).get("soil_fc"), "...and cleared")
+
 # --- who's reporting, as lists; no tool names handed to the person -----------------
 f = C.focus_facts(hive, "is every node reporting?")
 check("REPORTING NOW:" in f and "node %d" % pump["id"] in f.split("NOT REPORTING")[0],

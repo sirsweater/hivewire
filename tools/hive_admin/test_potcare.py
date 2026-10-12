@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Offline test for potcare.py: seed mode's timer and limits, the soak analysis
+that finds a pot's field capacity, and the band scaled to it.
+
+    python tools/hive_admin/test_potcare.py
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import potcare as P  # noqa: E402
+
+failed = 0
+
+
+def check(cond, msg, detail=None):
+    global failed
+    if cond:
+        print("ok: " + msg)
+    else:
+        failed += 1
+        print("FAIL: %s %s" % (msg, "" if detail is None else detail))
+
+
+# --- field capacity from a soak ------------------------------------------------
+# The shape the cactus pot showed on 2026-10-12: ~48% before, 100% within four
+# minutes of soaking, a bouncing drain, then a level it holds.
+T = 1_800_000_000
+soak = [(T - 7200 + i * 600, 48.0) for i in range(12)]                  # two hours at 48%
+soak += [(T, 70.0), (T + 60, 99.5), (T + 120, 100.0), (T + 300, 100.0)]  # the soak
+soak += [(T + 600, 85.0), (T + 700, 87.0), (T + 900, 82.0), (T + 1100, 86.0)]  # drain, bouncing
+soak += [(T + 1500 + i * 120, 78.0 + (0.5 if i % 2 else 0)) for i in range(40)]  # holds ~78
+a = P.analyze_soak(soak, now=T + 1500 + 40 * 120)
+check(a["status"] == "settled" and abs(a["settled"] - 78.2) < 1 and a["peak"] == 100.0 and a["start"] == 48.0,
+      "a soak's peak, start and settled level are found", a)
+a = P.analyze_soak(soak[:20], now=soak[19][0])
+check(a["status"] == "draining" and "settled" not in a, "...and while it's still bouncing, it says draining", a)
+check(P.analyze_soak([(T + i * 600, 50.0 + i * 0.1) for i in range(30)])["status"] == "no soak",
+      "...slow drift is not a soak")
+check(P.analyze_soak([(T, 45.0), (T + 600, 65.0)])["status"] == "no soak",
+      "...nor a watering that never reached saturation")
+check(P.analyze_soak([])["status"] == "no soak", "...nor no data")
+
+# --- the band scaled to the pot --------------------------------------------------
+check(P.scaled_band([5, 20], 80.0) == [4.0, 16.0], "a 5-20% band at 80% field capacity is 4-16%")
+check(P.scaled_band([45, 75], None) == [45, 75] and P.scaled_band(None, 80) is None, "...unchanged without both")
+
+# --- seed mode -----------------------------------------------------------------
+
+
+class _Cfg:
+    def __init__(self):
+        self.data = {"nodes": {}}
+
+    def node(self, nid):
+        return self.data["nodes"].get(str(nid), {})
+
+    def set_node(self, nid, patch):
+        n = dict(self.node(nid))
+        for k, v in patch.items():
+            if v in (None, ""):
+                n.pop(k, None)
+            else:
+                n[k] = v
+        self.data["nodes"][str(nid)] = n
+
+
+cfg, sent, events, up = _Cfg(), [], [], {7: True}
+ack = {"ok": True}
+seed = P.SeedMode(cfg, lambda nid, slot, v: (sent.append((nid, slot, v)), ack["ok"])[1],
+                  lambda nid: up.get(nid, False), lambda kind, text: events.append(text))
+for bad in ((0, 12, 7), (500, 12, 7), (10, 0.2, 7), (10, 12, 0), (10, 12, 90)):
+    try:
+        seed.start(7, *bad, now=T)
+        check(False, "seed mode refuses %r" % (bad,))
+    except ValueError:
+        check(True, "seed mode refuses %r" % (bad,))
+seed.start(7, 10, 12, 3, now=T)
+check(seed.run_once(now=T + 5) == [(7, 10)] and sent == [(7, 40, 10)], "the first dose goes at once, as water-now ml")
+check(seed.run_once(now=T + 6 * 3600) == [], "...nothing until the interval passes")
+check(seed.run_once(now=T + 12 * 3600 + 10) == [(7, 10)], "...then the next one")
+up[7] = False
+check(seed.run_once(now=T + 24 * 3600 + 20) == [], "a node that isn't reporting gets nothing (it would be lost)")
+up[7], ack["ok"] = True, False
+n = len(sent)
+check(seed.run_once(now=T + 24 * 3600 + 30) == [] and len(sent) == n + 1 and cfg.node(7)["seed_mode"]["last"] == T + 12 * 3600 + 10,
+      "an unacknowledged dose isn't counted, so it's tried again next pass")
+ack["ok"] = True
+check(seed.run_once(now=T + 24 * 3600 + 90) == [(7, 10)], "...and goes when the gateway sends it")
+check(seed.run_once(now=T + 3 * 86400 + 1) == [] and "seed_mode" not in cfg.node(7) and
+      any("end date passed" in e for e in events), "it stops by itself on the end date, and says so")
+seed.start(7, 10, 12, 3, now=T)
+check(seed.stop(7) and "seed_mode" not in cfg.node(7) and not seed.stop(7), "switching it off clears it once")
+
+# A dose the node never reported (a missed broadcast) is sent once more, not forever.
+pumped = {"45": 0}
+cfg2, sent2, ev2 = _Cfg(), [], []
+s2 = P.SeedMode(cfg2, lambda nid, slot, v: (sent2.append(v), True)[1], lambda nid: True,
+                lambda kind, text: ev2.append(text), slots=lambda nid: {45: pumped["45"]})
+s2.start(7, 10, 12, 3, now=T)
+s2.run_once(now=T)
+check(s2.run_once(now=T + 300) == [] and len(sent2) == 1, "no re-send before the check time")
+s2.run_once(now=T + 700)
+check(len(sent2) == 2 and any("sent once more" in e for e in ev2), "a dose not seen in the pumped total is sent once more", ev2)
+s2.run_once(now=T + 1400)
+check(len(sent2) == 2 and any("even after a re-send" in e for e in ev2), "...and a second miss is logged, not re-sent", ev2)
+pumped["45"] = 10
+s2.run_once(now=T + 12 * 3600 + 5)
+pumped["45"] = 20                       # the node reports the dose
+s2.run_once(now=T + 12 * 3600 + 700)
+check(len(sent2) == 3, "...while a dose that shows up is left alone (no re-send)", sent2)
+
+print("\n%s" % ("%d FAILED" % failed if failed else "all passed"))
+sys.exit(1 if failed else 0)

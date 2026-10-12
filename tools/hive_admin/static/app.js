@@ -257,6 +257,20 @@ views.node = async (el, id) => {
           </form>
           <p class="muted small">The node decides on its own, even when the Pi is off. It waters only after two dry readings a minute apart, never sooner than the gap, never past the daily maximum, and switches itself off if a watering does not show up in the soil. Following the plant uses its moisture range on g4rden (wetter for seeds and seedlings): water below the low end, fill towards the middle. Learning adjusts only the amount, after two automatic waterings, by at most 40% at a time and never past the per-dose cap.</p>
           <div id="auto-reply" class="mono muted small"></div></div>` : ""}
+        ${(k.slots || {})["40"] ? `<div class="card stack" id="seed-card"><h2>Seed mode</h2>
+          <div id="seed-status" class="muted"></div>
+          <form id="seed-form" class="row">
+            <label class="f">Each dose (ml)<input id="sd-ml" type="number" min="1" max="200" value="10" style="width:90px" required></label>
+            <label class="f">Every (hours)<input id="sd-every" type="number" min="1" max="72" step="0.5" value="12" style="width:90px" required></label>
+            <label class="f">For (days)<input id="sd-days" type="number" min="1" max="45" value="14" style="width:90px" required></label>
+            <button class="primary">Start</button><button type="button" id="sd-stop">Stop</button></form>
+          <p class="muted small">For seeds in the top centimetre, which dry out while the probe, further down, still reads wet. Small doses on a timer, whatever the probe says, until the end date; then it stops by itself. The node's caps still apply to every dose. Automatic watering carries on as set.</p></div>` : ""}
+        ${(k.derived || {}).soil ? `<div class="card stack" id="fc-card"><h2>Field capacity</h2>
+          <div id="fc-status" class="muted">checking…</div>
+          <div class="row"><button type="button" id="fc-save">Save as this pot's field capacity</button>
+            <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="fc-scale"> Scale the plant's band to it</label>
+            <button type="button" id="fc-clear">Clear</button></div>
+          <p class="muted small">How wet this pot stays once a soak has drained: the most its soil holds. Soak the pot, let it drain, and the reading falls from 100% and levels off. That level is this pot's field capacity. Scaling the band reads the plant's range as a share of it, so a band this soil can never reach stops reading "too wet".</p></div>` : ""}
         <div class="card"><h2>Actions</h2><div class="row" id="actions"></div>
           <form id="setform" class="row" style="margin-top:14px">
             <select id="set-slot"></select><input id="set-val" type="number" style="width:110px" placeholder="value" required>
@@ -316,6 +330,54 @@ views.node = async (el, id) => {
         toast(r.ok ? "Automatic watering saved" : "Not all settings went through");
       } catch (err) { $("#auto-reply").textContent = err.message; toast(err.message); }
     };
+  }
+  if ($("#seed-form")) {
+    const showSeed = async () => {
+      const c = ((await api("/api/config")).nodes || {})[nid] || {};
+      const sm = c.seed_mode;
+      $("#seed-status").textContent = sm
+        ? `On: ${sm.ml} ml every ${sm.every_h} h until ${new Date(sm.until * 1000).toLocaleString()}` +
+          (sm.last ? ` · last dose ${fmtAge(Date.now() / 1000 - sm.last)} ago` : " · first dose within a minute")
+        : "Off.";
+    };
+    $("#seed-form").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api("/api/seedmode", { node: nid, ml: +$("#sd-ml").value, every_h: +$("#sd-every").value, days: +$("#sd-days").value });
+        toast("Seed mode on"); showSeed();
+      } catch (err) { toast(err.message); }
+    };
+    $("#sd-stop").onclick = async () => {
+      try { await api("/api/seedmode", { node: nid, off: true }); toast("Seed mode off"); showSeed(); } catch (err) { toast(err.message); }
+    };
+    showSeed();
+  }
+  if ($("#fc-card")) {
+    const showFc = async () => {
+      try {
+        const f = await api(`/api/fieldcap?node=${nid}`);
+        const when = (t) => new Date(t * 1000).toLocaleString();
+        const last = f.status === "settled" ? `Last soak: from ${f.start}% to ${f.peak}%, settled at ${f.settled}% (${when(f.settled_at)}).`
+          : f.status === "draining" ? `Last soak: from ${f.start}% to ${f.peak}% at ${when(f.peak_at)}; still draining. Wait until it holds for half an hour.`
+          : "No soak in the last two days.";
+        const saved = f.saved != null ? `Saved: ${f.saved}%${f.band_scale === "fc" && f.plant_band ? ` · plant band ${f.plant_band[0]}-${f.plant_band[1]}% scaled to ${f.scaled_band[0]}-${f.scaled_band[1]}%` : ""}.` : "Not measured yet.";
+        $("#fc-status").textContent = saved + " " + last;
+        $("#fc-save").disabled = f.status !== "settled";
+        $("#fc-scale").checked = f.band_scale === "fc";
+      } catch (err) { $("#fc-status").textContent = err.message; }
+    };
+    $("#fc-save").onclick = async () => {
+      try { await api("/api/fieldcap", { node: nid, band_scale: $("#fc-scale").checked }); toast("Field capacity saved"); showFc(); }
+      catch (err) { toast(err.message); }
+    };
+    $("#fc-scale").onchange = async () => {
+      try { await api("/api/node", { id: nid, band_scale: $("#fc-scale").checked ? "fc" : "" }); toast("Saved"); showFc(); }
+      catch (err) { toast(err.message); }
+    };
+    $("#fc-clear").onclick = async () => {
+      try { await api("/api/fieldcap", { node: nid, clear: true }); toast("Cleared"); showFc(); } catch (err) { toast(err.message); }
+    };
+    showFc();
   }
   $("#addmark").onclick = async () => {
     const text = prompt("What happened? (shows as a line on every chart)", "");
