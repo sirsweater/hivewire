@@ -496,6 +496,13 @@ h.route_post("/api/fieldcap", {})
 app.cfg.set_node(pump["id"], {"plant_band": None})
 check(not app.cfg.node(pump["id"]).get("soil_fc"), "...and cleared")
 
+for q, hit in (("turn on seed mode for the larkspur", True), ("stop seed mode on node 7", True),
+               ("save the cactus field capacity", True), ("what is seed mode?", False),
+               ("is seed mode on for the larkspur?", False)):
+    a = next((r for pat, r in C.FIXED_REPLIES if pat.search(q)), None)
+    check(bool(a and "admin page" in a and "Seed mode card" in a) == hit, "seed mode / field capacity request %r: %s"
+          % (q, "admin page" if hit else "answered"), a)
+
 # --- who's reporting, as lists; no tool names handed to the person -----------------
 f = C.focus_facts(hive, "is every node reporting?")
 check("REPORTING NOW:" in f and "node %d" % pump["id"] in f.split("NOT REPORTING")[0],

@@ -1994,7 +1994,16 @@ FIXED_REPLIES = [
      "I can't schedule a watering: this chat only sends one right away, after you press Confirm, so I haven't "
      "proposed anything. Ask again when you want it (for example \"water the larkspur 50 ml\"), or let the node's "
      "automatic watering handle it - it waters by itself whenever the soil drops below its threshold (set on "
-     "the admin page)."),
+     "the admin page). For small doses on a timer while seeds sprout, use Seed mode on the node's admin page "
+     "(for example 10 ml every 12 hours for two weeks)."),
+    # "Turn on seed mode for the larkspur": an admin-page setting; the model reached for set_slot.
+    (re.compile(r"(?i)^(?!\s*(when|should|how|what|why|is|are|do|does|did|was|will|would|can)\b)(?![^\n]*\?\s*$)[^\n]*"
+                r"\b(turn|switch|start|stop|enable|disable|end|set up|begin|put|save|set|measure|record|use)\b[^\n]*"
+                r"\b(seed|germination|sprouting) mode\b|^(?!\s*(when|how|what|why|is|are|do|does)\b)(?![^\n]*\?\s*$)"
+                r"[^\n]*\b(save|set|measure|record|use)\b[^\n]*\bfield capacity\b"),
+     "That's set on the admin page, not from this chat. Open the node's page: the Seed mode card takes a dose, "
+     "how often and for how many days (it stops by itself), and the Field capacity card saves the level the soil "
+     "settles at after a soak. Nothing was changed."),
     # "Turn the pump on and leave it running": every run is a set, capped amount.
     (re.compile(r"(?i)^(?![^\n]*\bautomatic\b)(?!\s*(when|should|how|what|why|is|are|do|does|did|was|will|would)\b)"
                 r"(?![^\n]*\?\s*$)(?=[^\n]*\bpump\b)[^\n]*\b(leave|keep)\b[^.?!\n]*\b(on|running|going)\b|"
