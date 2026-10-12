@@ -178,6 +178,8 @@ script[:] = [tool("update_node", node=str(pump["id"]), name="rhubarb"), say("Ren
 out = conv.ask(hive, "rename node %d to rhubarb" % pump["id"])
 check(not out["pending"] and "already called Rhubarb" in last_tool_result(conv)["reason"],
       "a name another node already has is refused", out)
+check(out["answer"].startswith("Rhubarb (node %d) is already called Rhubarb" % nopump["id"]) and "Renamed" not in out["answer"],
+      "...and the answer is the refusal's own words (it said 'both nodes are named Rhubarb')", out["answer"])
 script[:] = [tool("update_node", node=str(pump["id"]), name="7"), say("Renamed.")]
 out = conv.ask(hive, "rename node %d to 7" % pump["id"])
 check(not out["pending"] and "node number" in last_tool_result(conv)["reason"], "...and so is a bare number", out)
@@ -195,6 +197,10 @@ check(t.startswith("Larkspur is the drier one: 69% against Rhubarb's 79%") and "
       and "79.0%" in t, "a drier/wetter claim that turns the readings round is replaced", t)
 check(C.fix_comparison("Larkspur is drier (69.0%) than the Rhubarb.", r) == "Larkspur is drier (69.0%) than the Rhubarb.",
       "...a right one is left alone")
+t = C.scrub_tool_talk("Soil is 69%, inside its band.\n\n**water_now 30 ml**\n\nWhat would you like to do?")
+check("water_now" not in t and "inside its band" in t, "a bare tool-call line is taken out", t)
+check(C.NEXT_WATER_Q.search("when will the larkspur need water next?") and
+      not C.NEXT_WATER_Q.search("water the larkspur 50 ml"), "a next-watering question is recognised")
 _pn = dict(pump, slots=dict(pump.get("slots") or {}, **{"43": 250}))
 t = C.pump_time(_pn, 95, None, "how long would it take to deliver 500 ml?")
 check(t and "5.3 min (316 s)" in t and "refuse" in t, "pump time is worked out, and an amount over the cap is flagged", t)

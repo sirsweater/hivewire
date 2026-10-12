@@ -1103,8 +1103,13 @@ def t_update_node(hive, node, name=None, location=None, notes=None):
         twin = next((x for x in st.get("nodes", []) + (st.get("silent") or []) if x["id"] != n["id"]
                      and (x.get("name") or "").strip().lower() == name.lower()), None)
         if twin:
+            # The model then said "both nodes are currently named Rhubarb": the answer is this one.
             return {"sent": False, "reason": "NOT sent: node %s is already called %s. Two nodes with one name "
-                    "can't be told apart; ask for a different name." % (twin["id"], twin["name"])}
+                    "can't be told apart; ask for a different name." % (twin["id"], twin["name"]),
+                    "say": "%s (node %s) is already called %s, so %s (node %s) can't have that name too - two nodes "
+                           "with one name couldn't be told apart here. Nothing was changed. What else would you like "
+                           "to call it?" % (twin["name"], twin["id"], twin["name"], n.get("name") or n.get("kind"),
+                                            n["id"])}
         if (n.get("name") or "").strip().lower() == name.lower():
             # The model renamed node 5 (already "Rhubarb") to "Rhubarb" when asked to rename the larkspur.
             return {"sent": False, "reason": "NOT sent: node %s is already called %s, so there's nothing to change. "
@@ -1632,6 +1637,32 @@ def temperatures(hive, n):
                                               if soil and not soil.startswith("NO") else "")
 
 
+NEXT_WATER_Q = re.compile(r"(?i)\b(when|how soon|how long (until|before))\b[^?]*\b(water|watered|watering)\b[^?]*"
+                          r"\b(next|again)\b|\bnext (automatic )?watering\b|\bwhen will\b[^?]*\bneed (water|watering)\b")
+
+
+def next_watering(hive, n):
+    """ "When will the larkspur need water next?" got the raw ADC threshold and an offer to
+    water a plant inside its band. The threshold in %, the reading now and the week's trend."""
+    a = t_watering_advice(hive, str(n["id"]))
+    below = a.get("automatic watering starts when soil falls below")
+    if not below:
+        return None
+    soil_from = (((hive.kinds().get(n.get("kind")) or {}).get("derived") or {}).get("soil") or {}).get("from")
+    h = t_slot_history(hive, str(n["id"]), soil_from, hours=168) if soil_from is not None else {}
+    pts = h.get("points") or []
+    auto = (n.get("slots") or {}).get("49")
+    return ("NEXT WATERING for %s: automatic watering is %s; it starts when the soil falls below %s and then gives %s. "
+            "Soil now %s (target %s)%s.%s The hive has no forecast: give no date or day, and don't offer a "
+            "watering it doesn't need." % (
+                n.get("name") or "node %s" % n["id"], "on" if auto else "OFF" if auto == 0 else "set on the node",
+                below, a.get("automatic amount now", "its automatic amount"), a.get("soil moisture now"),
+                a.get("plant's target band", "not set"),
+                ", so not yet" if a.get("soil moisture now") and float(a["soil moisture now"].split()[0]) > float(
+                    below.split()[0]) else ", so it's due now",
+                (" Over the last 7 days the soil went from %s to %s." % (pts[0]["avg"], pts[-1]["avg"])) if len(pts) > 1 else ""))
+
+
 PUMP_TIME_Q = re.compile(r"(?i)\bhow long\b[^?]*\b(pump|deliver|give|put out|take)|\bhow many (seconds|minutes|mins|secs)\b")
 
 
@@ -1745,6 +1776,10 @@ def focus_facts(hive, q):
                 "Dry soil: thirst is likely; a watering is the first thing to try." if thirsty else
                 "The soil is moist, so this is NOT thirst - don't suggest more water or more frequent watering. "
                 "Think heat or strong sun, root rot from overwatering, poor drainage, or transplant shock."))
+        if has_pump(hive, kind) and NEXT_WATER_Q.search(q):
+            t = next_watering(hive, n)
+            if t:
+                out.append(t)
         if has_pump(hive, kind) and PUMP_TIME_Q.search(q):
             t = pump_time(n, pump_flow(hive, n), asked[0] if asked else None, q)
             if t:
@@ -1949,6 +1984,8 @@ def scrub_tool_talk(answer):
                      r"run the|try the)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
+    # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
+    out = re.sub(r"(?im)^[ \t>*_`-]*(%s)\b[^\n]{0,60}$\n?" % names, "", out)
     # "I can check the current status using a tool. Would you like me to do that?" - it can just check.
     out = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(using|run|use|with|call) (a|the|my|one of my|another) tools?\b[^.!?\n]*[.!?]?"
                  r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?", "", out)
@@ -2097,6 +2134,10 @@ def ask(hive, messages, q, on_tool=None):
         if claims_change(answer):
             why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
             answer = "Nothing was changed%s." % (": " + why if why else "")
+    says = [r["say"] for _, r in writes if isinstance(r, dict) and r.get("say")]
+    if says and not any(isinstance(r, dict) and (r.get("sent") or r.get("awaiting_approval")) for _, r in writes):
+        # A refusal whose outcome is fixed: its own words, not the model's retelling.
+        answer = " ".join(dict.fromkeys(says))
     if not any(isinstance(r, dict) and r.get("awaiting_approval") for _, r in writes):
         # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with
         # (once after a refused -50 ml: "Let's try -200 ml. Would you like me to proceed?").
