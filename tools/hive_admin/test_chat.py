@@ -790,6 +790,13 @@ check(any("node 99" in x for x in s.get("not_reporting", [])) and
       not any("node 98" in x for x in s.get("not_reporting", [])), "the status lists what went quiet this week", s.get("not_reporting"))
 check("98" in json.dumps({k: v for k, v in s.items() if k.startswith("silent_over")}),
       "...and names the long-silent ones apart, as probably retired")
+f = C.focus_facts(hive, "is every node reporting?")
+check("node 99" in f.split("NOT REPORTING")[1] and "node 98" in f.split("NOT REPORTING")[1] and "NOT every node" in f,
+      "a node silent over a week is still listed as NOT reporting (it read 'NOT REPORTING: none')", f)
+t = C.must_report_silent(hive, "is every node reporting?", "All nodes are reporting.\n\n- node 3\n\nNo nodes are silent.")
+check(t.startswith("Not every node is reporting: 2 are silent") and "All nodes are reporting" not in t
+      and "No nodes are silent" not in t, "'all nodes are reporting' with nodes silent is corrected", t)
+check(C.must_report_silent(hive, "is the relay working?", "Yes.") == "Yes.", "...only for every/all/any questions")
 f = C.focus_facts(hive, "how's node 99 doing?")
 check("NOT reporting" in f, "a question naming it gets the fact beside it", f)
 conv = C.Conversation()

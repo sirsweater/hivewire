@@ -1449,6 +1449,12 @@ def scrub_reservoir(hive, q, answer):
                   r"[^.!?\n]*\b(empty|full|low|dry)\b[^.!?\n]*[.!?]?", one, answer)
 
 
+REPORTING_Q = re.compile(r"(?i)\b(reporting|online|offline|silent|gone quiet|went quiet|heard from|missing|alive|dead|"
+                         r"responding|working)\b[^.?!]*\b(nodes?|everything|all|any|every|relay)\b|"
+                         r"\b(nodes?|everything|all|any|every|relays?)\b[^.?!]*\b(reporting|online|offline|silent|"
+                         r"gone quiet|went quiet|heard from|missing|alive|dead|responding|working)\b")
+
+
 def reporting_hint(hive):
     """Who is and isn't reporting, as plain lists: from the status the model put the live
     weather station among the silent ones."""
@@ -1456,12 +1462,36 @@ def reporting_hint(hive):
     live = ["%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in st.get("nodes", [])
             if not n.get("hidden")]
     silent = [x for x in st.get("silent") or [] if x.get("last_heard")]
-    recent = ["node %s (%s, last heard %s ago)" % (x["id"], x.get("name") or x.get("kind") or "?", ago(x.get("age")))
-              for x in silent if (x.get("age") or 0) < RETIRED_S]
-    old = ["node %s" % x["id"] for x in silent if (x.get("age") or 0) >= RETIRED_S]
-    return ("REPORTING NOW: %s. NOT REPORTING: %s.%s Use exactly these lists." % (
-        ", ".join(live) or "none", ", ".join(recent) or "none",
-        " Silent for over a week (probably retired): %s." % ", ".join(old) if old else ""))
+    # Every silent node is NOT reporting: with node 4 past a week, "NOT REPORTING: none" plus a
+    # separate "probably retired" list came back as "all nodes are reporting".
+    quiet = ["node %s (%s, last heard %s ago%s)" % (
+        x["id"], x.get("name") or x.get("kind") or "?", ago(x.get("age")),
+        " - over a week, maybe retired" if (x.get("age") or 0) >= RETIRED_S else "") for x in silent]
+    return ("REPORTING NOW: %s. NOT REPORTING: %s. %s Use exactly these lists." % (
+        ", ".join(live) or "none", ", ".join(quiet) or "none",
+        "So NOT every node is reporting." if quiet else "Every known node is reporting."))
+
+
+ALL_REPORTING = re.compile(r"(?i)\b(all (the |of the |\d+ )?(nodes|of them)( are| is)? (reporting|online|alive|up)|every "
+                           r"node is (reporting|online|up)|no nodes? (are |is )?(silent|offline|missing|down)|"
+                           r"none (are|is) (silent|offline|missing))\b")
+
+
+def must_report_silent(hive, q, answer):
+    """ "Is every node reporting?" - "All nodes are reporting" with three silent."""
+    if not REPORTING_Q.search(q) or not re.search(r"(?i)\b(every|all|any|anything|everything)\b", q):
+        return answer
+    st = hive.call("GET", "/api/state")
+    silent = [x for x in st.get("silent") or [] if x.get("last_heard")]
+    if not silent:
+        return answer
+    names = ", ".join("node %s (last heard %s ago)" % (x["id"], ago(x.get("age"))) for x in silent)
+    if ALL_REPORTING.search(answer) or not any(re.search(r"\bnode %s\b" % x["id"], answer) for x in silent):
+        keep = re.sub(r"(?im)^[^\n]*" + ALL_REPORTING.pattern[4:] + r"[^\n]*\n?", "", answer).strip() \
+            if ALL_REPORTING.search(answer) else answer
+        return ("Not every node is reporting: %d %s silent - %s.\n\n%s" % (
+            len(silent), "are" if len(silent) > 1 else "is", names, keep)).strip()
+    return answer
 
 
 def relay_hint(hive):
@@ -1573,10 +1603,7 @@ def temp_extremes(hive, q):
 TOPIC_HINTS = [
     (RESERVOIR_Q, reservoir_hint),
     (re.compile(r"(?i)\b(relays?|range ?nodes?|repeaters?|hops?|mesh)\b"), relay_hint),
-    (re.compile(r"(?i)\b(reporting|online|offline|silent|gone quiet|went quiet|heard from|missing|alive|dead|"
-                r"responding|working)\b[^.?!]*\b(nodes?|everything|all|any|every|relay)\b|"
-                r"\b(nodes?|everything|all|any|every|relays?)\b[^.?!]*\b(reporting|online|offline|silent|"
-                r"gone quiet|went quiet|heard from|missing|alive|dead|responding|working)\b"), reporting_hint),
+    (REPORTING_Q, reporting_hint),
     (re.compile(r"(?i)\bdew ?point"), dew_point),
     (re.compile(r"(?i)\brain"), lambda hive: next(
         ("Rain amounts: call slot_history with node %s, slot 14 and the hours asked about (a week = 168); it "
@@ -2180,6 +2207,10 @@ def ask(hive, messages, q, on_tool=None):
         # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with
         # (once after a refused -50 ml: "Let's try -200 ml. Would you like me to proceed?").
         answer = no_card_offers(answer)
+    try:
+        answer = must_report_silent(hive, q, answer)
+    except RuntimeError:
+        pass
     return plain_math(must_say(hive, q, answer))
 
 
@@ -2229,6 +2260,13 @@ def must_say(hive, q, answer):
     ranked = soil_ranking(st, named, q)
     if ranked:
         answer = fix_comparison(answer, ranked)
+    if NEXT_WATER_Q.search(q):
+        for n in named:
+            if has_pump(hive, n.get("kind")):
+                below = t_watering_advice(hive, str(n["id"])).get("automatic watering starts when soil falls below")
+                if below and not re.search(r"(?<![\d.])%s(\.0)? ?%%" % re.escape(below.split()[0].split(".")[0]), answer):
+                    answer = answer.rstrip() + "\n\nAutomatic watering starts when %s's soil falls below %s." % (
+                        n.get("name") or "node %s" % n["id"], below)
     add = []
     # "What were the daily highs this week?": the week's table was in the focus facts, the
     # model asked for today instead (just after midnight: nothing yet) and said there was no data.
