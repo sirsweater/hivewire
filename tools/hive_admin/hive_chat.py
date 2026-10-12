@@ -1890,7 +1890,10 @@ def claims_change(text, pending=False):
         sentence = next((x for x in sentence if m.group(0) in x), m.group(0))
         if re.search(r"(?i)success", m.group(0)) and PAST_MARK.search(sentence):
             continue
-        if pending and re.search(r"(?i)\b(confirm\w*|approv\w*|awaiting|pending|waiting|card)\b", sentence):
+        # ("has been confirmed" can't vouch for itself)
+        if pending and re.search(r"(?i)\b(confirm(ation)?|press|approval|awaiting|pending|waiting|card)\b",
+                                 sentence.replace(m.group(0), " ")) and not re.search(r"(?i)\b(confirmed|approved)\b",
+                                                                                      sentence):
             continue
         return True
     return False
@@ -2110,6 +2113,14 @@ def ask(hive, messages, q, on_tool=None):
                 messages.append({"role": "user", "content": "[From the hive, not the person: you said you "
                                  "would check - call the tool now, then answer the person.]"})
                 continue
+            if not nudged and not asking and not writes and claims_change(msg.get("content")):
+                # After a declined card, "water the larkspur 30 ml" got "has been confirmed" - copied from
+                # its last answer, with no tool called and so no card. Once: make the call.
+                nudged = True
+                messages.append({"role": "user", "content": "[From the hive, not the person: you called no tool, "
+                                 "so nothing was proposed and there is no card. Call the tool for what they asked "
+                                 "now.]"})
+                continue
             break
         for call in msg["tool_calls"]:
             if asking and call["function"].get("name") in WRITES:
@@ -2136,6 +2147,13 @@ def ask(hive, messages, q, on_tool=None):
         answer = (msg.get("content") or "").strip() or "Sorry - I couldn't come up with an answer to that."
     sent = [r for _, r in writes if isinstance(r, dict) and r.get("sent")]
     cards = [r.get("summary") for _, r in writes if isinstance(r, dict) and r.get("awaiting_approval")]
+    if cards and not sent:
+        # "The request ... has been confirmed. Please press Confirm": it means the card is ready.
+        answer = re.sub(r"(?i)\b(has been|have been|is|was) (confirmed|approved|submitted|sent|set up|created|prepared|"
+                        r"initiated|queued|processed|acknowledged)\b(?! (to|on) (the )?node)(?! (to you|for (your )?(confirmation|approval)))",
+                        "is ready - it goes out only when you press Confirm", answer)
+        answer = re.sub(r"(?i)(is ready - it goes out only when you press Confirm)([^.!?\n]*[.!?])\s*([^.!?\n]*\b(press|click|"
+                        r"hit|tap)\w* (the )?confirm\b[^.!?\n]*[.!?])", r"\1\2", answer)
     if not sent and claims_change(answer, pending=bool(cards)):
         # It says it changed something; the tools say nothing was sent. Ask once
         # more, then fall back to the tools' own words.

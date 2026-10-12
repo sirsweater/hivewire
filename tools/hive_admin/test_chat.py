@@ -242,6 +242,21 @@ check(out["answer"].startswith("Nothing has been sent yet - press Confirm on the
       out["answer"] and len(out["pending"]) == 1, "...a real claim falls back to 'press Confirm', not the tool's note",
       out["answer"])
 
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=40),
+             say("The request to water it with 40 ml has been confirmed. Please press the Confirm button to send it.")]
+out = conv.ask(hive, "water node %d 40 ml" % pump["id"])
+check("has been confirmed" not in out["answer"] and "is ready - it goes out only when you press Confirm" in out["answer"],
+      "'has been confirmed' for a card still waiting is reworded", out["answer"])
+conv.decline(out["pending"][0]["id"])
+script[:] = [say("The request to water it with 30 ml has been confirmed."), tool("water_now", node=str(pump["id"]), ml=30),
+             say("Press Confirm on the card to water it 30 ml.")]
+out = conv.ask(hive, "water node %d 30 ml" % pump["id"])
+check(len(out["pending"]) == 1 and "30 ml" in out["pending"][0]["summary"],
+      "after a declined card, a new request answered with a claim and no tool is sent back to make the card", out)
+for p_ in out["pending"]:
+    conv.decline(p_["id"])
+
 # A card declined on the page is logged, and a proposal in the log isn't read as a pump run.
 conv = C.Conversation()
 script[:] = [tool("water_now", node=str(pump["id"]), ml=20), say("Water it?")]
