@@ -916,7 +916,7 @@ def confirm(summary, path=None, body=None):
 def write(hive, summary, path, body):
     decision = confirm(summary, path, body)
     if decision == "pending":
-        return {"sent": False, "awaiting_approval": True,
+        return {"sent": False, "awaiting_approval": True, "summary": summary.split("\n")[0],
                 "reason": "NOT sent yet: it is shown to the person with a Confirm button and goes out only if "
                           "they press it. Tell them what it will do and to press Confirm if they want it."}
     if not decision:
@@ -1877,9 +1877,10 @@ CLAIM = re.compile(r"(?i)(?<!can )(?<!could )(?<!shall )(?<!should )(?<!may )(?<
 NEGATED = re.compile(r"(?i)\b(no|not|never|nothing|none|neither|nor|without)\b|n't\b")
 
 
-def claims_change(text):
+def claims_change(text, pending=False):
     """CLAIM outside a negated clause: "no watering has been sent from the hive" is a
-    true answer about the past, and it once had a correct answer replaced."""
+    true answer about the past, and it once had a correct answer replaced. With a card
+    waiting (`pending`), "it has been sent for your confirmation" describes it truly."""
     for m in CLAIM.finditer(text or ""):
         clause = re.split(r"[.;:!?,\n]|\b(?:but|and|so)\b", text[max(0, m.start() - 60):m.start()])[-1]
         if NEGATED.search(clause):
@@ -1888,6 +1889,8 @@ def claims_change(text):
         sentence = re.split(r"(?<=[.!?\n])\s*", text[max(0, m.start() - 120):m.end() + 80])
         sentence = next((x for x in sentence if m.group(0) in x), m.group(0))
         if re.search(r"(?i)success", m.group(0)) and PAST_MARK.search(sentence):
+            continue
+        if pending and re.search(r"(?i)\b(confirm\w*|approv\w*|awaiting|pending|waiting|card)\b", sentence):
             continue
         return True
     return False
@@ -2132,17 +2135,25 @@ def ask(hive, messages, q, on_tool=None):
         messages.append(msg)
         answer = (msg.get("content") or "").strip() or "Sorry - I couldn't come up with an answer to that."
     sent = [r for _, r in writes if isinstance(r, dict) and r.get("sent")]
-    if not sent and claims_change(answer):
+    cards = [r.get("summary") for _, r in writes if isinstance(r, dict) and r.get("awaiting_approval")]
+    if not sent and claims_change(answer, pending=bool(cards)):
         # It says it changed something; the tools say nothing was sent. Ask once
         # more, then fall back to the tools' own words.
         messages.append({"role": "user", "content": "[Check from the hive, not the person: NO change was sent "
-                         "this turn. Rewrite your answer without claiming one.]"})
+                         "this turn%s. Rewrite your answer without claiming one.]" % (
+                             " - it waits for the person to press Confirm on the card" if cards else "")})
         msg = ollama_chat(messages, read_only=True)
         messages.append(msg)
         answer = (msg.get("content") or "").strip()
-        if claims_change(answer):
-            why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
-            answer = "Nothing was changed%s." % (": " + why if why else "")
+        if claims_change(answer, pending=bool(cards)):
+            if cards:
+                # On the Pi this once came out as the instruction meant for the model
+                # ("NOT sent yet: ... Tell them what it will do").
+                answer = "Nothing has been sent yet - press Confirm on the card to send it: %s." % "; ".join(
+                    c for c in cards if c)
+            else:
+                why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
+                answer = "Nothing was changed%s." % (": " + why if why else "")
     says = [r["say"] for _, r in writes if isinstance(r, dict) and r.get("say")]
     if says and not any(isinstance(r, dict) and (r.get("sent") or r.get("awaiting_approval")) for _, r in writes):
         # A refusal whose outcome is fixed: its own words, not the model's retelling.

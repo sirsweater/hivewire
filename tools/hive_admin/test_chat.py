@@ -226,6 +226,22 @@ cfg = h.out[0]
 check(cfg["enabled"] and cfg["key_set"] and "sekrit" not in json.dumps(cfg), "the API key is stored but never sent back")
 check(os.stat(os.path.join(tmp, "config.json")).st_mode & 0o077 == 0, "config.json (holding the key) is private")
 
+# With a card waiting (the Pi's path; evals decline at once): describing the card isn't a claim,
+# and the fallback never shows the model's own instructions.
+conv = C.Conversation()
+ok_text = "The watering of 20 ml has been sent for your confirmation."
+script[:] = [tool("water_now", node=str(pump["id"]), ml=20), say(ok_text)]
+out = conv.ask(hive, "water node %d 20 ml" % pump["id"])
+check(out["answer"] == ok_text and len(out["pending"]) == 1, "with a card waiting, 'sent for your confirmation' stands",
+      out["answer"])
+conv = C.Conversation()
+script[:] = [tool("water_now", node=str(pump["id"]), ml=20), say("I've watered it with 20 ml."),
+             say("Done! I've watered it.")]
+out = conv.ask(hive, "water node %d 20 ml" % pump["id"])
+check(out["answer"].startswith("Nothing has been sent yet - press Confirm on the card") and "Tell them" not in
+      out["answer"] and len(out["pending"]) == 1, "...a real claim falls back to 'press Confirm', not the tool's note",
+      out["answer"])
+
 # A card declined on the page is logged, and a proposal in the log isn't read as a pump run.
 conv = C.Conversation()
 script[:] = [tool("water_now", node=str(pump["id"]), ml=20), say("Water it?")]
