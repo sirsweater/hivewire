@@ -125,6 +125,23 @@ class Store:
                 "SELECT ts, value FROM readings WHERE node=? AND slot=? AND ts BETWEEN ? AND ? "
                 "ORDER BY ts", (node, slot, t0, t1))]
 
+    def raw_extremes(self, node, slot, since, held_s=60):
+        """The lowest and highest values a slot HELD (for at least held_s, or is
+        holding now) since a time, with when: a soil probe's wettest and driest
+        readings, for calibrating its 100% and 0% ends. A one-off glitch that
+        the next report overwrote within a minute doesn't count."""
+        out = {}
+        with self.db() as c:
+            rows = c.execute(
+                "SELECT ts, value, LEAD(ts) OVER (ORDER BY ts) FROM readings "
+                "WHERE node=? AND slot=? AND ts>=? ORDER BY ts", (node, slot, since)).fetchall()
+        held = [(t, v) for t, v, nxt in rows if v is not None and (nxt is None or nxt - t >= held_s)]
+        if held:
+            lo = min(held, key=lambda r: (r[1], -r[0]))
+            hi = max(held, key=lambda r: (r[1], r[0]))
+            out = {"min": {"value": lo[1], "at": lo[0]}, "max": {"value": hi[1], "at": hi[0]}, "n": len(held)}
+        return out
+
     def state_at(self, node, ts):
         """{slot: value} in force at a moment: the last row at or before it."""
         with self.db() as c:
@@ -2032,6 +2049,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             rows = [dict(zip(keys, r)) for r in app.rollup.series(node, slot, t0, t1, res)]
             return self.send_json({"rows": rows, "res": res, "from": t0, "to": t1,
                                    "raw_cutoff": app.rollup.raw_cutoff()})
+        if path == "/api/extremes":
+            # A probe's wettest and driest held readings (raw), e.g. to set its
+            # wet point from the lowest reading a soak produced.
+            nid, slot = int(q["node"]), int(q.get("slot", 3))
+            days = max(1, min(90, int(q.get("days") or 30)))
+            return self.send_json(dict(app.store.raw_extremes(nid, slot, now() - days * 86400), days=days))
         if path == "/api/fieldcap":
             # The last soak in this node's soil history: its peak, and where the
             # drain levelled off (this pot's field capacity), as potcare.py reads it.

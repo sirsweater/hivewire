@@ -503,6 +503,20 @@ for q, hit in (("turn on seed mode for the larkspur", True), ("stop seed mode on
     check(bool(a and "admin page" in a and "Seed mode card" in a) == hit, "seed mode / field capacity request %r: %s"
           % (q, "admin page" if hit else "answered"), a)
 
+# --- a probe's wettest and driest held readings ----------------------------------
+_t0 = int(H.now()) - 3000
+app.store.add_readings([(_t0, 77, 3, 1800), (_t0 + 600, 77, 3, 950), (_t0 + 1200, 77, 3, 900),
+                        (_t0 + 1205, 77, 3, 1000), (_t0 + 1800, 77, 3, 2650), (_t0 + 2400, 77, 3, 925)])
+x = app.store.raw_extremes(77, 3, _t0 - 10)
+check(x["min"]["value"] == 925 and x["max"]["value"] == 2650,
+      "the wettest and driest HELD readings are found; a 5-second 900 glitch isn't the wettest", x)
+h = H._Capture(app, None)
+h.route_get("/api/extremes", {"node": "77", "slot": "3", "days": "1"})
+check(h.out[0].get("min", {}).get("value") == 925 and h.out[0]["days"] == 1, "...through the extremes route", h.out)
+with app.store.db() as _c:
+    _c.execute("DELETE FROM readings WHERE node=77")
+app._silent_cache = (0, {})
+
 # --- who's reporting, as lists; no tool names handed to the person -----------------
 f = C.focus_facts(hive, "is every node reporting?")
 check("REPORTING NOW:" in f and "node %d" % pump["id"] in f.split("NOT REPORTING")[0],

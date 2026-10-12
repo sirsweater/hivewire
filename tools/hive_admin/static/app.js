@@ -1058,7 +1058,8 @@ views.settings = async (el) => {
         <td>${soil ? `<div class="row"><input data-k="soil_dry" type="number" value="${c.soil_dry ?? ""}" placeholder="2800" style="width:80px">
           <input data-k="soil_wet" type="number" value="${c.soil_wet ?? ""}" placeholder="1200" style="width:80px"></div>
           <div class="row small" style="margin-top:6px"><span class="muted">now ${n.slots[3] ?? "—"}</span>
-          <button type="button" data-cal="soil_dry">Use as dry</button><button type="button" data-cal="soil_wet">Use as wet</button></div>` : '<span class="muted">—</span>'}</td>
+          <button type="button" data-cal="soil_dry">Use as dry</button><button type="button" data-cal="soil_wet">Use as wet</button></div>
+          <div class="row small" style="margin-top:6px" data-extremes="${n.id}"><span class="muted">checking the last 30 days…</span></div>` : '<span class="muted">—</span>'}</td>
         <td>${n.slots[5] ? `<div class="row"><input data-k="batt_scale" type="number" step="0.001" min="0.8" max="1.25" value="${c.batt_scale ?? ""}" placeholder="1.000" style="width:90px"></div>
           <div class="row small" style="margin-top:6px"><span class="muted">reads ${(n.slots[5] / 1000).toFixed(2)} V</span>
           <button type="button" data-battfull>It is fully charged</button>
@@ -1066,6 +1067,18 @@ views.settings = async (el) => {
         <td><input data-k="hidden" type="checkbox" ${c.hidden ? "checked" : ""}></td>
         <td><button class="primary" data-save>Save</button></td></tr>`;
     }).join("");
+  // Each probe's wettest and driest readings it held in the last 30 days (lower raw = wetter):
+  // a soak can read wetter than the cup of water it was calibrated in, and the lowest is its 100%.
+  tbl.querySelectorAll("[data-extremes]").forEach(async (div) => {
+    try {
+      const x = await api(`/api/extremes?node=${div.dataset.extremes}&slot=3&days=30`);
+      if (!x.min) { div.innerHTML = '<span class="muted">no readings in the last 30 days</span>'; return; }
+      const when = (t) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      div.innerHTML = `<span class="muted">wettest ${x.min.value} (${when(x.min.at)}) · driest ${x.max.value} (${when(x.max.at)})</span>
+        <button type="button" data-ext="soil_wet" data-v="${x.min.value}">Wettest as wet</button>
+        <button type="button" data-ext="soil_dry" data-v="${x.max.value}">Driest as dry</button>`;
+    } catch (err) { div.innerHTML = ""; }
+  });
   tbl.onclick = async (e) => {
     const tr = e.target.closest("tr[data-id]");
     if (!tr) return;
@@ -1083,6 +1096,10 @@ views.settings = async (el) => {
       const v = parseFloat(prompt("Battery voltage measured at the cell, in volts:", "4.20"));
       if (v >= 2.5 && v <= 4.5) battSet(v);
       else if (!isNaN(v)) toast("That is not a LiPo voltage (2.5-4.5 V)");
+    }
+    if (e.target.dataset.ext) {
+      $(`[data-k="${e.target.dataset.ext}"]`, tr).value = e.target.dataset.v;
+      toast("Set — press Save to keep it");
     }
     if (e.target.dataset.cal) {
       const raw = (nodes.find((n) => n.id === nid) || {}).slots?.[3];
