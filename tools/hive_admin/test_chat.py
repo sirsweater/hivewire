@@ -184,7 +184,20 @@ check(not out["pending"] and "node number" in last_tool_result(conv)["reason"], 
 script[:] = [tool("update_node", node=str(pump["id"]), name="Larkspur"), say("Rename it?")]
 out = conv.ask(hive, "rename node %d to Larkspur" % pump["id"])
 check(len(out["pending"]) == 1, "...a new name goes to the card as usual", out)
+script[:] = [tool("update_node", node=str(nopump["id"]), name="rhubarb"), say("Renamed.")]
+out = conv.ask(hive, "rename node %d to rhubarb" % pump["id"])
+check(not out["pending"] and "nothing to change" in last_tool_result(conv)["reason"],
+      "...and a rename to the name it already has (the wrong node) is refused", out)
 app.cfg.set_node(nopump["id"], {"name": None})
+r = [(69.0, "Larkspur"), (79.0, "Rhubarb")]
+t = C.fix_comparison("Rhubarb is currently drier than Larkspur. Rhubarb's soil is 79.0%, Larkspur's 69.0%.", r)
+check(t.startswith("Larkspur is the drier one: 69% against Rhubarb's 79%") and "currently drier" not in t
+      and "79.0%" in t, "a drier/wetter claim that turns the readings round is replaced", t)
+check(C.fix_comparison("Larkspur is drier (69.0%) than the Rhubarb.", r) == "Larkspur is drier (69.0%) than the Rhubarb.",
+      "...a right one is left alone")
+_pn = dict(pump, slots=dict(pump.get("slots") or {}, **{"43": 250}))
+t = C.pump_time(_pn, 95, None, "how long would it take to deliver 500 ml?")
+check(t and "5.3 min (316 s)" in t and "refuse" in t, "pump time is worked out, and an amount over the cap is flagged", t)
 
 # --- the HTTP routes, through a real handler ---------------------------------
 h = H._Capture(app, {"url": "ftp://nope", "model": "m"})

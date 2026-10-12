@@ -1105,6 +1105,10 @@ def t_update_node(hive, node, name=None, location=None, notes=None):
         if twin:
             return {"sent": False, "reason": "NOT sent: node %s is already called %s. Two nodes with one name "
                     "can't be told apart; ask for a different name." % (twin["id"], twin["name"])}
+        if (n.get("name") or "").strip().lower() == name.lower():
+            # The model renamed node 5 (already "Rhubarb") to "Rhubarb" when asked to rename the larkspur.
+            return {"sent": False, "reason": "NOT sent: node %s is already called %s, so there's nothing to change. "
+                    "If the person meant another node, check which one they named." % (n["id"], n["name"])}
         if re.fullmatch(r"(?i)(node\s*)?#?\d+", name) or not name:
             return {"sent": False, "reason": "NOT sent: %s would be read as a node number, not a name; ask "
                     "for a name with letters in it." % (repr(name) if name else "an empty name")}
@@ -1628,6 +1632,75 @@ def temperatures(hive, n):
                                               if soil and not soil.startswith("NO") else "")
 
 
+PUMP_TIME_Q = re.compile(r"(?i)\bhow long\b[^?]*\b(pump|deliver|give|put out|take)|\bhow many (seconds|minutes|mins|secs)\b")
+
+
+def pump_time(n, flow, ml, q):
+    """ "How long would the larkspur's pump take to deliver 200 ml?" - answered (OpenAI route)
+    with "I don't have the pump flow rate". Amount / flow, worked out here."""
+    if not ml:
+        m = re.search(r"(?i)(\d+(?:\.\d+)?)\s*(ml|millilit\w*)\b", q)
+        ml = float(m.group(1)) if m else None
+    if not ml or not flow:
+        return None
+    secs = ml / float(flow) * 60
+    cap = (n.get("slots") or {}).get("43")
+    return ("PUMP TIME for %s: %g ml at its pump flow of %s ml/min = %.1f min (%d s), worked out here.%s" % (
+        n.get("name") or "node %s" % n["id"], ml, flow, secs / 60, round(secs),
+        (" That's over its %s ml per-watering cap: the node would refuse one watering that big (E306)." % cap)
+        if cap and ml > float(cap) else ""))
+
+
+def soil_ranking(st, named, q):
+    """[(soil %, name)] driest first, for a drier/wetter question about two or more plants."""
+    pool = named if len(named) >= 2 else [n for n in st.get("nodes", []) if not n.get("hidden")] \
+        if re.search(r"(?i)\b(driest|wettest|most (dry|wet|moist)|least (dry|wet)|which (plant|pot|one)s?\b"
+                     r"[^?]*\b(dri|dry|wet|moist))", q) else []
+    if not re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|most (dry|wet|moist|"
+                     r"wet)|least (dry|wet)|compare|which .*\b(dry|wet|moist|dri))", q):
+        return []
+    soils = [(n.get("derived") or {}).get("soil") for n in pool]
+    ranked = sorted(((v, n.get("name") or "node %s" % n["id"]) for v, n in zip(soils, pool) if v is not None))
+    return ranked if len(ranked) >= 2 else []
+
+
+DRY_WORD = r"(drier|dryer|driest|less wet|less moist)"
+WET_WORD = r"(wetter|wettest|moister|damper|more (wet|moist))"
+
+
+def fix_comparison(answer, ranked):
+    """ "Rhubarb is currently drier than Larkspur" at 79 % against 69 %: the ranking sat beside the
+    question. A sentence that turns it round is replaced with the reading's own order."""
+    dry, wet = ranked[0][1], ranked[-1][1]
+    names = [nm for _, nm in ranked]
+    out, wrong = [], False
+    parts = re.split(r"((?<=[.!?])\s+|\n+)", answer)       # separators kept; "79.0%" isn't split
+    for sent, sep in zip(parts[::2], parts[1::2] + [""]):
+        bad = False
+        for m in re.finditer(r"(?i)\b(%s|%s)\b" % (DRY_WORD, WET_WORD), sent):
+            before = sent[:m.start()]
+            pos = [(before.lower().rfind(nm.lower()), nm) for nm in names if before.lower().rfind(nm.lower()) >= 0]
+            if not pos:
+                continue
+            at, subj = max(pos)
+            if re.search(r"(?i)\b(not|no|isn't|aren't|never)\b|n't\b", before[at:]):
+                continue
+            is_dry = re.fullmatch(DRY_WORD, m.group(0), re.I)
+            if (is_dry and subj == wet) or (not is_dry and subj == dry):
+                bad = True
+        if bad:
+            wrong = True
+        else:
+            out.append(sent + sep)
+    if not wrong:
+        return answer
+    v = {nm: val for val, nm in ranked}
+    fact = ("%s is the drier one: %.0f%% against %s's %.0f%% (a higher reading is wetter)." % (dry, v[dry], wet, v[wet])
+            if len(ranked) == 2 else "By the reading, %s is the driest (%.0f%%) and %s the wettest (%.0f%%)." % (
+                dry, v[dry], wet, v[wet]))
+    return (fact + "\n\n" + "".join(out).strip()).strip()
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -1672,6 +1745,10 @@ def focus_facts(hive, q):
                 "Dry soil: thirst is likely; a watering is the first thing to try." if thirsty else
                 "The soil is moist, so this is NOT thirst - don't suggest more water or more frequent watering. "
                 "Think heat or strong sun, root rot from overwatering, poor drainage, or transplant shock."))
+        if has_pump(hive, kind) and PUMP_TIME_Q.search(q):
+            t = pump_time(n, pump_flow(hive, n), asked[0] if asked else None, q)
+            if t:
+                out.append(t)
         if has_pump(hive, kind) and BUDGET.search(q):
             b = water_budget(hive, n)
             if b:
@@ -1713,17 +1790,11 @@ def focus_facts(hive, q):
                     out.append(t)
     # "Which plant is the wettest?" names none: rank them all. Left to itself the model
     # called the Cactus at 52% wetter than the Rhubarb at 79%, because it's further over its band.
-    pool = named if len(named) >= 2 else [n for n in st.get("nodes", []) if not n.get("hidden")] \
-        if re.search(r"(?i)\b(driest|wettest|most (dry|wet|moist)|least (dry|wet)|which (plant|pot|one)s?\b"
-                     r"[^?]*\b(dri|dry|wet|moist))", q) else []
-    if re.search(r"(?i)\b(drier|dryer|wetter|driest|wettest|more (dry|wet|water)|less (dry|wet)|most (dry|wet|moist|"
-                 r"wet)|least (dry|wet)|compare|which .*\b(dry|wet|moist|dri))", q):
-        soils = [(n.get("derived") or {}).get("soil") for n in pool]
-        ranked = sorted(((v, n.get("name") or "node %s" % n["id"]) for v, n in zip(soils, pool) if v is not None))
-        if len(ranked) >= 2:
-            out.append("Soil right now, driest first: %s. So %s is the driest and %s the wettest (by the reading; "
-                       "each plant's own target band is a separate question)." % (
-                           ", ".join("%s %.0f%%" % (nm, v) for v, nm in ranked), ranked[0][1], ranked[-1][1]))
+    ranked = soil_ranking(st, named, q)
+    if ranked:
+        out.append("Soil right now, driest first: %s. So %s is the driest and %s the wettest (by the reading; "
+                   "each plant's own target band is a separate question)." % (
+                       ", ".join("%s %.0f%%" % (nm, v) for v, nm in ranked), ranked[0][1], ranked[-1][1]))
     try:
         t = temp_extremes(hive, q)
     except RuntimeError:
@@ -2076,6 +2147,9 @@ def must_say(hive, q, answer):
             answer = re.sub(r"(?i)[^.!?\n]*\b%s\b(\s*\(node %d\))?[^.!?\n]{0,40}\b(does not have a pump|doesn't have a "
                             r"pump|has no pump|cannot be watered|can't be watered)\b[^.!?\n]*[.!?]?\s*"
                             % (re.escape(n["name"]), n["id"]), "", answer).strip()
+    ranked = soil_ranking(st, named, q)
+    if ranked:
+        answer = fix_comparison(answer, ranked)
     add = []
     # "What were the daily highs this week?": the week's table was in the focus facts, the
     # model asked for today instead (just after midnight: nothing yet) and said there was no data.
