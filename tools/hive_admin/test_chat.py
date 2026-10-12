@@ -180,6 +180,12 @@ check(not out["pending"] and "already called Rhubarb" in last_tool_result(conv)[
       "a name another node already has is refused", out)
 check(out["answer"].startswith("Rhubarb (node %d) is already called Rhubarb" % nopump["id"]) and "Renamed" not in out["answer"],
       "...and the answer is the refusal's own words (it said 'both nodes are named Rhubarb')", out["answer"])
+app.cfg.set_node(pump["id"], {"name": "Larkspur"})
+script[:] = [tool("update_node", node=str(nopump["id"]), name="Larkspur"), say("Renamed.")]
+out = conv.ask(hive, "rename the larkspur to Rhubarb")
+check(out["answer"].startswith("Rhubarb (node %d) is already called Rhubarb, so Larkspur" % nopump["id"]),
+      "...told in the person's terms even when the model swaps the two", out["answer"])
+app.cfg.set_node(pump["id"], {"name": None})
 script[:] = [tool("update_node", node=str(pump["id"]), name="7"), say("Renamed.")]
 out = conv.ask(hive, "rename node %d to 7" % pump["id"])
 check(not out["pending"] and "node number" in last_tool_result(conv)["reason"], "...and so is a bare number", out)

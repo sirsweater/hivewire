@@ -1104,12 +1104,21 @@ def t_update_node(hive, node, name=None, location=None, notes=None):
                      and (x.get("name") or "").strip().lower() == name.lower()), None)
         if twin:
             # The model then said "both nodes are currently named Rhubarb": the answer is this one.
+            # Told in the person's own terms - the model once swapped them (node 5 to "Larkspur").
+            owner, other = twin, n
+            m = re.search(r"(?i)\brename\s+(?:the\s+)?(.+?)\s+(?:to|as)\s+[\"'“]?([^\"'”.?!]+)", SAID[-1] if SAID else "")
+            if m:
+                holder = next((x for x in st.get("nodes", []) + (st.get("silent") or [])
+                               if (x.get("name") or "").strip().lower() == m.group(2).strip().lower()), None)
+                subj, _ = resolve_node(hive, m.group(1).strip(), st)
+                if holder and subj and holder["id"] != subj["id"]:
+                    owner, other = holder, subj
             return {"sent": False, "reason": "NOT sent: node %s is already called %s. Two nodes with one name "
                     "can't be told apart; ask for a different name." % (twin["id"], twin["name"]),
                     "say": "%s (node %s) is already called %s, so %s (node %s) can't have that name too - two nodes "
                            "with one name couldn't be told apart here. Nothing was changed. What else would you like "
-                           "to call it?" % (twin["name"], twin["id"], twin["name"], n.get("name") or n.get("kind"),
-                                            n["id"])}
+                           "to call it?" % (owner["name"], owner["id"], owner["name"],
+                                            other.get("name") or other.get("kind"), other["id"])}
         if (n.get("name") or "").strip().lower() == name.lower():
             # The model renamed node 5 (already "Rhubarb") to "Rhubarb" when asked to rename the larkspur.
             return {"sent": False, "reason": "NOT sent: node %s is already called %s, so there's nothing to change. "
