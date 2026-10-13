@@ -488,6 +488,7 @@ def facts(hive, meta, n):
 # Write tools only act on a node the person named: a small model left to pick
 # one ("water it") picks the first plant it sees.
 SAID = []
+LAST_ANSWER = []        # the last answer given: what "it" / "its" points back to
 
 
 COMMON_WORDS = {"water", "waters", "watered", "watering", "whether", "what", "later", "station",
@@ -2964,6 +2965,13 @@ def focus_facts(hive, q):
         quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
     finally:
         SAID[:] = keep
+    if not named and LAST_ANSWER and re.search(r"(?i)\b(it|its|it's|that one|this one|that plant|the plant)\b", q):
+        # "Which plant is the wettest?" / "and is its automatic watering on?": "its" is the plant just named -
+        # it had said "on" for the Cactus, which has no pump.
+        was = [n for n in st.get("nodes", []) if not n.get("hidden") and n.get("name") and
+               re.search(r"(?i)\b%s\b" % re.escape(n["name"]), LAST_ANSWER[0])]
+        if len(was) == 1:
+            named = was
     out += [silent_line(x, hive) for x in quiet]
     pairs = amounts_by_node(hive, q)
     if pairs is None:
@@ -3025,7 +3033,7 @@ def focus_facts(hive, q):
         elif has_pump(hive, kind) and PAST_WATERING.search(q):
             out.append(watering_record(hive, n) + " If the message assumes a watering this record doesn't show, "
                        "say plainly that it didn't happen.")
-        if re.search(r"(?i)\bpump|auto(matic|[- ]?)water|watering schedule", q) and not has_pump(hive, kind):
+        if re.search(r"(?i)\bpump|auto(matic)?[- ]?water|watering schedule", q) and not has_pump(hive, kind):
             out.append("NOTE: %s has NO pump, so no automatic watering either. If the question assumes it has "
                        "one, say that first." % (n.get("name") or "node %s" % n["id"]))
         soil = derived(hive, n).get("Soil moisture")
@@ -3338,6 +3346,7 @@ def ask(hive, messages, q, on_tool=None):
     messages[0] = system_with_snapshot(hive)
     if len(messages) == 1:
         SAID.clear()            # a new conversation
+        LAST_ANSWER.clear()
     parts = split_questions(q)
     if len(parts) == 2:
         # Two questions in one message: each answered in turn (a fixed reply had answered only the second).
@@ -3657,7 +3666,9 @@ def ask(hive, messages, q, on_tool=None):
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
         pass
-    return no_repeats(fix_fahrenheit(plain_math(must_say(hive, q, answer))))
+    answer = no_repeats(fix_fahrenheit(plain_math(must_say(hive, q, answer))))
+    LAST_ANSWER[:] = [answer]
+    return answer
 
 
 def no_card_offers(answer):
@@ -3700,6 +3711,13 @@ def must_say(hive, q, answer):
         named = [n for n in st.get("nodes", []) if not n.get("hidden") and named_by_person(n)]
     finally:
         SAID[:] = keep
+    # "The automatic watering for node 6 (Cactus) is currently on" - it has no pump.
+    for n in st.get("nodes", []):
+        if n.get("name") and not n.get("hidden") and not has_pump(hive, n.get("kind")):
+            nm = re.escape(n["name"])
+            answer = re.sub(r"(?i)[^.!?\n]*(\b%s\b[^.!?\n]{0,40}\bautomatic watering\b|\bautomatic watering\b[^.!?\n]{0,40}\b%s\b)"
+                            r"[^.!?\n]*\b(on|enabled|active|running|turned on)\b[^.!?\n]*[.!?]?" % (nm, nm),
+                            "%s has no pump, so it has no automatic watering." % n["name"], answer)
     # "The Rhubarb (node 5) does not have a pump" - it does; the model mixed it up with the Cactus.
     for n in st.get("nodes", []):
         if n.get("name") and has_pump(hive, n.get("kind")):

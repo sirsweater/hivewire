@@ -1009,5 +1009,15 @@ _f = C.fix_fahrenheit("The soil is 26.8 °C.\n26.8 × 9/5 + 32 = 70.24\nSo about
 check("80.2°F" in _f and "70.2" not in _f, "a wrong °F figure is corrected and its working dropped", _f)
 check(C.fix_fahrenheit("It is 28 °C (82 °F).") == "It is 28 °C (82 °F).", "...a right one is left alone")
 
+# "its" in a follow-up is the plant just named; a node with no pump has no automatic watering.
+C.LAST_ANSWER[:] = ["%s (node %d) is the wettest." % (nopump.get("name") or "x", nopump["id"])]
+_ff = C.focus_facts(hive, "and is its automatic watering on?")
+check(not nopump.get("name") or "has NO pump" in _ff, "'its' resolves to the plant the last answer named", _ff[-300:])
+C.LAST_ANSWER[:] = []
+if nopump.get("name"):
+    _a = C.must_say(hive, "is its automatic watering on?", "The automatic watering for node %d (%s) is currently on. Fine." % (
+        nopump["id"], nopump["name"]))
+    check("has no pump" in _a and "is currently on" not in _a, "...and 'automatic watering on' for it is corrected", _a)
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
