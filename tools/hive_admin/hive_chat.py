@@ -1612,7 +1612,10 @@ def temp_extremes(hive, q):
     m = DAY_WORD.search(q)
     day = (m.group(1).lower() if m else "today")
     if day in ("this week", "last 7 days", "past week"):
-        r = t_slot_history(hive, str(wx["id"]), sid, hours=168)
+        # From midnight 6 days ago: a window starting mid-day gave a first "day" of a few evening hours.
+        lt = time.localtime()
+        start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - 6, 0, 0, 0, 0, 0, -1))
+        r = t_slot_history(hive, str(wx["id"]), sid, hours=int((time.time() - start) // 3600))
         if r.get("by_day"):
             return ("AIR TEMPERATURE at the %s, by day (high / low): %s." % (
                 wx.get("name") or "weather station", "; ".join("%s %s / %s" % (d["day"], d["max"], d["min"])
@@ -2786,6 +2789,24 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = weather_now_reply(hive, st, q)
         except RuntimeError:
             fixed = None
+    if not fixed and not COMMAND.search(q) and QUESTIONISH.search(q) and not re.search(
+            r"(?i)\b(soil|pot|probe|humid\w*|wind\w*|rain\w*|gust\w*|batter\w*|signal)\b", q):
+        # Answered here: given the week's table, the model wrote its own (four made-up days, wrong weekdays).
+        try:
+            t = temp_extremes(hive, q)
+        except RuntimeError:
+            t = None
+        m = re.match(r"AIR TEMPERATURE at the (.+?), by day \(high / low\): (.+)\.$", t or "")
+        m2 = re.match(r"AIR TEMPERATURE at the (.+?), (.+?): high (.+?), low (.+?), average (.+?) \(from its hourly "
+                      r"readings; use these numbers\)\.(.*)$", t or "")
+        if m:
+            fixed = "Daily highs and lows at the %s:\n%s" % (m.group(1), "\n".join(
+                "- %s: high %s, low %s" % tuple(re.match(r"(\w+ \d+ \w+) (.+?) / (.+)$", d).groups())
+                for d in m.group(2).split("; ") if re.match(r"(\w+ \d+ \w+) (.+?) / (.+)$", d)))
+        elif m2:
+            fixed = "At the %s, %s: high %s, low %s, average %s.%s" % m2.groups()
+        elif t and t.startswith("AIR TEMPERATURE") and "only began" in t:
+            fixed = t.replace("AIR TEMPERATURE at the", "At the", 1)
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
         # Answered here: given the numbers, the model said "warmer by 1.0 °C" and dropped both readings.
         try:
