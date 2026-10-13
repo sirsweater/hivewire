@@ -1797,7 +1797,8 @@ def temperatures(hive, n):
 
 
 NEXT_WATER_Q = re.compile(r"(?i)\b(when|how soon|how long (until|before))\b[^?]*\b(water|watered|watering)\b[^?]*"
-                          r"\b(next|again)\b|\bnext (automatic )?watering\b|\bwhen will\b[^?]*\bneed (water|watering)\b")
+                          r"\b(next|again)\b|\bnext (automatic )?watering\b|\bwhen will\b[^?]*\bneed (water|watering)\b|"
+                          r"\b(will|is) (it|they|\w+) (going to )?need (water|watering)\b")
 
 
 def next_watering(hive, n):
@@ -2768,6 +2769,64 @@ def alerts_reply(hive):
                 "admin page)", "; ".join(names)))
 
 
+FOLLOW_WHEN = re.compile(r"(?i)^\W*(and |what about |how about |same for )?(tomorrow|tonight|this weekend|the weekend|later|"
+                         r"the day after|next few days)\W*$")
+
+
+def followup_question(q):
+    """ "What's the weather like?" / "and tomorrow?": the short follow-up asks the same about another time."""
+    m = FOLLOW_WHEN.match(q)
+    if not m or len(SAID) < 2:
+        return None
+    prev = SAID[-2]
+    if WEATHER_Q.search(prev) or FORECAST_Q.search(prev) or re.search(r"(?i)\b(hot|cold|warm|temp\w*|weather)\b", prev):
+        return "what's the forecast for %s?" % m.group(2).lower()
+    return None
+
+
+DRY_RATE_Q = re.compile(r"(?i)\b(dries|dry|drying|dried|loses water|drains?)\b[^?]*\b(fastest|quickest|slowest|fast|quick|"
+                        r"rate|how (fast|quickly))\b|\bhow (fast|quickly)\b[^?]*\b(dry|dries|drying)\b")
+
+
+def dry_rate_reply(hive, st):
+    """ "Which one dries fastest?" was guessed from today's levels. The fall in each pot's reading over the
+    last 3 days (risings - waterings, soaks - left out)."""
+    rows = []
+    for n in st.get("nodes", []):
+        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
+            continue
+        pts = soil_series(hive, n, 96)
+        if len(pts) < 24:
+            continue
+        # day by day: an hourly sum counted a probe's +-3 point jitter as drying
+        per = {}
+        for ts, avg, _, _ in pts:
+            per.setdefault(int(ts // 86400), []).append(avg)
+        daily = [sum(v) / len(v) for _, v in sorted(per.items()) if len(v) >= 6]
+        if len(daily) < 2:
+            continue
+        drop = sum(a - b for a, b in zip(daily, daily[1:]) if b < a)
+        rows.append((drop / (len(daily) - 1), n.get("name") or "node %s" % n["id"]))
+    if not rows:
+        return None
+    rows.sort(reverse=True)
+    lines = "\n".join("- %s: %s" % (nm, "about %.1f points a day" % r if r >= 0.5 else "hardly drying (under half a point a day)")
+                      for r, nm in rows)
+    if rows[0][0] < 0.5:
+        return ("Over the last few days none of them has dried measurably - each day's average reading held or rose "
+                "(waterings and soaks left out):\n%s\n\nWet pots in mild weather dry slowly; a pot sitting in water "
+                "barely dries at all." % lines)
+    return ("Drying over the last few days (the fall in each day's average reading, waterings left out):\n%s\n\n"
+            "So %s dries fastest right now. Heat, sun and wind speed it up; a pot sitting in water barely dries "
+            "at all." % (lines, rows[0][1]))
+
+
+DELETE_Q = re.compile(r"(?i)\b(delete|erase|wipe|clear|purge|remove)\b[^?]*\b(history|readings|data|records|log|logs)\b")
+DELETE_REPLY = ("This chat can't delete anything, and nothing in the hive deletes a node's readings - the admin page "
+                "has no button for it either. History stays in the hive's database on the Pi. If a node is retired, "
+                "\"Hide (retired)\" on the admin page takes it off the lists; its history is kept. Nothing was changed.")
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -2950,6 +3009,16 @@ def sun_reply(hive, q):
                 time.strftime("%H:%M", time.localtime(sett)), span // 3600, span % 3600 // 60))
 
 
+def pronoun_nodes(st, q):
+    """ "Which plant is the wettest?" / "and is its automatic watering on?": "its" is the one plant the last
+    answer named (it had said "on" for the Cactus, which has no pump)."""
+    if not LAST_ANSWER or not re.search(r"(?i)\b(it|its|it's|that one|this one|that plant|the plant)\b", q):
+        return []
+    was = [n for n in st.get("nodes", []) if not n.get("hidden") and n.get("name") and
+           re.search(r"(?i)\b%s\b" % re.escape(n["name"]), LAST_ANSWER[0])]
+    return was if len(was) == 1 else []
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -2965,13 +3034,8 @@ def focus_facts(hive, q):
         quiet = [x for x in st.get("silent") or [] if named_by_person(x)]
     finally:
         SAID[:] = keep
-    if not named and LAST_ANSWER and re.search(r"(?i)\b(it|its|it's|that one|this one|that plant|the plant)\b", q):
-        # "Which plant is the wettest?" / "and is its automatic watering on?": "its" is the plant just named -
-        # it had said "on" for the Cactus, which has no pump.
-        was = [n for n in st.get("nodes", []) if not n.get("hidden") and n.get("name") and
-               re.search(r"(?i)\b%s\b" % re.escape(n["name"]), LAST_ANSWER[0])]
-        if len(was) == 1:
-            named = was
+    if not named:
+        named = pronoun_nodes(st, q)
     out += [silent_line(x, hive) for x in quiet]
     pairs = amounts_by_node(hive, q)
     if pairs is None:
@@ -3254,7 +3318,8 @@ def scrub_tool_talk(answer):
     # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
     out = re.sub(r"(?im)^[ \t>*_`-]*(%s)\b[^\n]{0,60}$\n?" % names, "", out)
     # "I can check the current status using a tool. Would you like me to do that?" - it can just check.
-    out = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(using|run|use|with|call) (a|the|that|this|my|one of my|another) tools?\b[^.!?\n]*[.!?]?"
+    out = re.sub(r"(?i)\b(set_slot|node_action|update_node)\s+(?=slot\s*\d+)", "", out)
+    out = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(using|run|use|with|call) (a|the|that|this|my|one of my|another)( \w+)? tools?\b[^.!?\n]*[.!?]?"
                  r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?", "", out)
     return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", out)).strip() if out.strip() and out != answer else answer
 
@@ -3358,7 +3423,7 @@ def ask(hive, messages, q, on_tool=None):
     except RuntimeError:
         st = {}
     nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
-    q2 = corrected_request(nodes, q)
+    q2 = corrected_request(nodes, q) or followup_question(q)
     if q2:
         q = q2
         SAID[-1] = q
@@ -3478,6 +3543,13 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = last_heard_reply(hive, st, named4)
             elif is_question(q) and FEELS_Q.search(q):
                 fixed = feels_reply(hive, st)
+        except RuntimeError:
+            fixed = None
+    if not fixed and DELETE_Q.search(q):
+        fixed = DELETE_REPLY
+    if not fixed and DRY_RATE_Q.search(q) and is_question(q) and not COMMAND.search(q):
+        try:
+            fixed = dry_rate_reply(hive, st)
         except RuntimeError:
             fixed = None
     if not fixed and ALERTS_Q.search(q) and is_question(q) and not COMMAND.search(q):
@@ -3662,6 +3734,10 @@ def ask(hive, messages, q, on_tool=None):
         # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with
         # (once after a refused -50 ml: "Let's try -200 ml. Would you like me to proceed?").
         answer = no_card_offers(answer)
+    if not REQUEST.search(q) and not re.search(r"(?i)\b(reboot|restart|reset)\b", q):
+        # "The cactus is dying!!!" got "Would you like to reboot the node?" - not what helps a plant.
+        answer = re.sub(r"(?im)^[ \t]*[-*]?[ \t]*\**reboot\**[^\n]*\?[ \t]*$\n?", "", answer)
+        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(would you like|shall i|should i|do you want)\b[^.!?\n]*\breboot\w*\b[^.!?\n]*\?", "", answer)
     try:
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
@@ -3682,6 +3758,8 @@ def no_card_offers(answer):
          r"[\"'“]y[\"'”]\s*(\(yes\))?\s*or\s*[\"'“]n[\"'”])[^.!?\n]*[.!?]?", ""),
         # once after a refused -50 ml: "Let's try a smaller amount, say -200 ml."
         (r"(?i)[ \t]*[^.!?\n]*\b(try|say|suggest|instead|how about)\b[^.!?\n]*(?<![\w.])-\d+ ?ml\b[^.!?\n]*[.!?]?", ""),
+        # "confirm with a 'y' and I will proceed", 'Please confirm by saying "Water now"' with no card
+        (r"(?i)[ \t]*[^.!?\n]*\b(confirm|reply|respond|answer|type)\b[^.!?\n]*\b(with a|by saying|by typing|saying)\b[^.!?\n]*[.!?]?", ""),
         # " If so, I will need your confirmation before proceeding." with no card
         (r"(?i)[ \t]*[^.!?\n]*\b(need your (confirmation|approval|go-ahead)|confirm(ation)? before proceeding|if so, (i|we) "
          r"(will|can|could))\b[^.!?\n]*[.!?]?", ""),
@@ -3693,6 +3771,8 @@ def no_card_offers(answer):
         out = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", re.sub(pat, repl, answer))).strip()
         if out:
             answer = out
+    if answer.count("```") % 2:
+        answer = answer[:answer.rindex("```")].rstrip()     # a code fence left open at the end: debris
     return answer
 
 
@@ -3711,6 +3791,8 @@ def must_say(hive, q, answer):
         named = [n for n in st.get("nodes", []) if not n.get("hidden") and named_by_person(n)]
     finally:
         SAID[:] = keep
+    if not named:
+        named = pronoun_nodes(st, q)
     # "The automatic watering for node 6 (Cactus) is currently on" - it has no pump.
     for n in st.get("nodes", []):
         if n.get("name") and not n.get("hidden") and not has_pump(hive, n.get("kind")):

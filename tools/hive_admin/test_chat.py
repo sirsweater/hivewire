@@ -1019,5 +1019,20 @@ if nopump.get("name"):
         nopump["id"], nopump["name"]))
     check("has no pump" in _a and "is currently on" not in _a, "...and 'automatic watering on' for it is corrected", _a)
 
+# Round 5: follow-ups, typed confirmations, delete requests.
+_keep = C.SAID[:]
+C.SAID[:] = ["what's the weather like?", "and tomorrow?"]
+check(C.followup_question("and tomorrow?") == "what's the forecast for tomorrow?", "'and tomorrow?' after weather is a forecast question")
+C.SAID[:] = ["how wet is the larkspur?", "and tomorrow?"]
+check(C.followup_question("and tomorrow?") is None, "...not after a soil question")
+C.SAID[:] = _keep
+check("confirm" not in C.no_card_offers("It is wet. If you're sure, please confirm with a 'y' and I will proceed."),
+      "a typed 'y' confirmation with no card goes")
+check("```" not in C.no_card_offers("Fine.\n```json"), "...and a code fence left open at the end")
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "delete all the history for node %d" % pump["id"])
+check("can't delete" in out["answer"] and not fake_llm.calls, "a request to delete history is answered plainly", out["answer"])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
