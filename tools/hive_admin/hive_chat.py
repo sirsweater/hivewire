@@ -2482,9 +2482,152 @@ def dew_reply(hive, st, q):
     return "%s For %s: %s" % (head, label, verdict)
 
 
+# --- round 4 (real-world phrasing) ------------------------------------------------------
+def is_question(q):
+    """ "temp outside in F", "rhubarb?": short and no verb, but a question all the same."""
+    return bool(QUESTIONISH.search(q)) or (len(q.split()) <= 6 and not COMMAND.search(q) and not REQUEST.search(q))
+
+
+SPLIT_Q = re.compile(r"(?i)\s*(?:\?\s+|,?\s+(?:and|also|plus)\s+(?=(?:is|are|was|will|what|what's|how|when|where|which|why|"
+                     r"does|do|did|can|could|should|has|have)\b))")
+
+
+def split_questions(q):
+    """ "How wet is the cactus and is it going to rain tomorrow?" got only the forecast."""
+    if not QUESTIONISH.search(q) or COMMAND.search(q) or REQUEST.search(q):
+        return [q]
+    parts = [x.strip(" ,") for x in SPLIT_Q.split(q) if x and x.strip(" ,")]
+    parts = [x if x.endswith("?") else x + "?" for x in parts]
+    return parts if len(parts) == 2 and all(len(x.split()) >= 3 for x in parts) else [q]
+
+
+DRY_CHANGE_Q = re.compile(r"(?i)\b(dried|dry|drying|wetter|lost|gained|changed?|dropped|rose)\b[^?]*\b(most|least|fastest|"
+                          r"more|less)\b[^?]*\b(since|over|in the last|from) (yesterday|this morning|last night|a day|24 ?h\w*)\b|"
+                          r"\bsince yesterday\b[^?]*\b(dri|dry|wet|change)")
+
+
+def dry_change_reply(hive, st):
+    """ "Which plant dried out the most since yesterday?" compared yesterday's levels and named the Cactus,
+    which had got wetter (a soak). The change from this time yesterday to now, worked out here."""
+    rows = []
+    for n in st.get("nodes", []):
+        soil = (n.get("derived") or {}).get("soil")
+        if n.get("hidden") or soil is None:
+            continue
+        pts = soil_series(hive, n, 27)
+        then = min(pts, key=lambda p: abs(p[0] + 1800 - (time.time() - 86400)), default=None) if pts else None
+        if then is None:
+            continue
+        rows.append((soil - then[1], n.get("name") or "node %s" % n["id"], then[1], soil))
+    if not rows:
+        return None
+    rows.sort()
+    drier = [r for r in rows if r[0] <= -1]
+    lines = ["- %s: %.0f %% then, %.0f %% now (%s)" % (nm, a, b, "%+.0f points - %s" % (d, "drier" if d < 0 else "wetter")
+                                                    if abs(d) >= 1 else "about the same")
+             for d, nm, a, b in rows]
+    head = ("%s dried out the most since this time yesterday." % drier[0][1] if drier else
+            "None of them dried out since this time yesterday.")
+    return head + "\n" + "\n".join(lines)
+
+
+IF_NEEDED = re.compile(r"(?i)\bif (it|they|she|he|the \w+)( really)? needs?( it)?\b|\bonly if\b|\bif (it's|it is|they're|they are) "
+                       r"(dry|thirsty)\b|\bif needed\b|\bif necessary\b")
+
+
+def if_needed_reply(hive, nodes, q):
+    """ "Give the larkspur a little water if it needs it" proposed 50 ml at 88 %. Checked first, here."""
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+    finally:
+        SAID[:] = keep
+    if not named:
+        return None
+    out = []
+    for n in named:
+        soil, band = (n.get("derived") or {}).get("soil"), (cfg.get(str(n["id"])) or {}).get("plant_band")
+        if soil is None or not band or soil < band[0]:
+            return None             # it may need it: the normal path proposes a card
+        out.append("%s doesn't need water: its soil is %.0f %%, %s its %s-%s %% target" % (
+            n.get("name") or "node %s" % n["id"], soil, "above" if soil > band[1] else "inside", band[0], band[1]))
+    return "; ".join(out) + ". So I haven't proposed a watering."
+
+
+LAST_HEARD_Q = re.compile(r"(?i)\b(last|latest)\b[^?]*\b(report\w*|heard|check\w* in|seen|update\w*|sent|reading)\b|"
+                          r"\bwhen did\b[^?]*\b(report|check in|send|update)\b|\bhow long since\b[^?]*\b(heard|report)")
+
+
+def last_heard_reply(hive, st, named):
+    out = []
+    for n in named:
+        age = n.get("age")
+        if age is None:
+            continue
+        out.append("%s last reported %s ago (%s)" % (n.get("name") or "node %s" % n["id"], ago(age),
+                                                    time.strftime("%H:%M:%S", time.localtime(time.time() - age))))
+    for x in st.get("silent") or []:
+        if named_by_person(x):
+            out.append(silent_line(x, hive))
+    return ("; ".join(out) + ". Nodes report about once a minute.") if out else None
+
+
+RESERVOIR_DRY_Q = re.compile(r"(?i)\b(what (would|will|happens?)|if)\b[^?]*\b(reservoir|tank|bucket)\b[^?]*\b(dry|empty|run(s)? out|ran out)\b")
+RESERVOIR_DRY_FACT = (
+    "IF A RESERVOIR RUNS DRY (from the firmware - use this, add nothing): every watering stops by itself after its "
+    "set amount (worked out from the pump's flow), so the pump never runs on forever. With a float switch fitted, "
+    "the node sees the empty reservoir and doesn't start (or stops) the watering: error E307 'An output's supply is "
+    "empty'. With NO float switch (Rhubarb and Larkspur now), the pump runs its dose dry - no water reaches the "
+    "plant, and running dry is hard on most small pumps; 15 minutes later the node sees no rise in the soil and "
+    "raises E1001 'A watering never reached the soil', and automatic watering locks out until someone checks it.")
+
+
+FEELS_Q = re.compile(r"(?i)\bfeels? (like|colder|warmer|hotter|cooler)\b|\bfeels?[- ]like\b|\bheat index\b|\bwind ?chill\b|"
+                     r"\bapparent temperature\b")
+
+
+def feels_reply(hive, st):
+    wx = weather_node(st)
+    if not wx:
+        return None
+    r = readings(hive, wx)
+    pick = lambda lbl: next((v for k, v in r.items() if k.startswith(lbl + " (")), None)  # noqa: E731
+    try:
+        t, rh = float(str(pick("Air temperature")).split()[0]), float(str(pick("Humidity")).split()[0])
+    except (TypeError, ValueError):
+        return None
+    try:
+        w = float(str(pick("Wind (2-min average)")).split()[0])
+    except (TypeError, ValueError):
+        w = 0.0
+    if t >= 26.7 and rh >= 40:
+        f = t * 9 / 5.0 + 32
+        hi = (-42.379 + 2.04901523 * f + 10.14333127 * rh - 0.22475541 * f * rh - 6.83783e-3 * f * f -
+              5.481717e-2 * rh * rh + 1.22874e-3 * f * f * rh + 8.5282e-4 * f * rh * rh - 1.99e-6 * f * f * rh * rh)
+        fl = (hi - 32) * 5 / 9.0
+        how = "the heat index (heat plus humidity)"
+    elif t <= 10 and w > 4.8:
+        fl = 13.12 + 0.6215 * t - 11.37 * w ** 0.16 + 0.3965 * t * w ** 0.16
+        how = "the wind chill"
+    else:
+        fl, how = t, None
+    if how is None or abs(fl - t) < 1:
+        return ("It feels about the same as it is: %s at %.0f %% humidity with %.0f km/h of wind." % (c_f(t), rh, w))
+    return ("It's %s at the weather station but feels like about %s - that's %s. %s" % (
+        c_f(t), c_f(fl), how, "So warmer, not colder." if fl > t else "So colder than the thermometer says."))
+
+
+BEST_TIME_Q = re.compile(r"(?i)\b(best|good|right|ideal) time\b[^?]*\bwater|\bwhen (should|is it best to) (i )?water\b(?![^?]*\b(the|my)\b)")
+BEST_TIME_FACT = ("WATERING TIME: the general advice is early morning, so the water soaks in before the heat and the "
+                  "leaves dry by evening. The hive's automatic watering has NO clock or schedule: each node waters "
+                  "when its soil falls below its start point, at any hour. Don't mention adjusting a schedule.")
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
-    if not QUESTIONISH.search(q) or COMMAND.search(q):
+    if not is_question(q) or COMMAND.search(q):
         return out
     plants = [n for n in named if n.get("kind") != "WeatherNode"]
     if WARMER_Q.search(q):
@@ -2505,6 +2648,10 @@ def hive_wide_facts(hive, st, named, q):
         t = uptime_fact(hive, st, named)
         if t:
             out.append(t)
+    if RESERVOIR_DRY_Q.search(q):
+        out.append(RESERVOIR_DRY_FACT)
+    if BEST_TIME_Q.search(q):
+        out.append(BEST_TIME_FACT)
     if URGENT_Q.search(q) and not named:
         t = urgent_fact(hive, st)
         if t:
@@ -2559,6 +2706,15 @@ def c_f(c):
     return "%.0f °C (%.0f °F)" % (c, c * 9 / 5.0 + 32)
 
 
+def c_range(a, b):
+    """ "24-25 °C (76-77 °F)": one rounding for each scale ("25 °C (76 °F)" read as an error)."""
+    ca, cb = round(a), round(b)
+    fa, fb = round(a * 9 / 5.0 + 32), round(b * 9 / 5.0 + 32)
+    c = "%d °C" % ca if ca == cb else "%d-%d °C" % (ca, cb)
+    f = "%d °F" % fa if fa == fb else "%d-%d °F" % (fa, fb)
+    return "%s (%s)" % (c, f)
+
+
 def forecast_reply(hive, q):
     fc = hive.call("GET", "/api/forecast") or {}
     models = fc.get("models") or {}
@@ -2586,10 +2742,9 @@ def forecast_reply(hive, q):
                 ", ".join(wet), "s" if len(wet) == 1 else "", max(rains),
                 ", ".join(m for m in per if m not in wet)))
     if his and label.startswith("tonight"):
-        out.append("**Temperature:** falling to a low of %s to %s." % (c_f(min(los)), c_f(max(los))))
+        out.append("**Temperature:** falling to a low of %s." % c_range(min(los), max(los)))
     elif his:
-        out.append("**Temperature:** high %s to %s, low %s to %s." % (c_f(min(his)), c_f(max(his)), c_f(min(los)),
-                                                                     c_f(max(los))))
+        out.append("**Temperature:** high %s, low %s." % (c_range(min(his), max(his)), c_range(min(los), max(los))))
     if his:
         if re.search(r"(?i)freez|frost|cold", q) or min(los) < 3:
             out.append("**Frost:** %s" % ("below freezing in %d of %d models - protect tender plants." % (
@@ -2943,6 +3098,8 @@ def scrub_tool_talk(answer):
                      r"use|using)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
+    # "(can be watered with `water_now`)"
+    out = re.sub(r"\s*\([^()\n]*`?\b(%s)\b`?[^()\n]*\)" % names, "", out)
     # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
     out = re.sub(r"(?im)^[ \t>*_`-]*(%s)\b[^\n]{0,60}$\n?" % names, "", out)
     # "I can check the current status using a tool. Would you like me to do that?" - it can just check.
@@ -3020,11 +3177,28 @@ def corrected_request(nodes, q):
     return out if out != prev else None
 
 
+def no_repeats(answer):
+    """A sentence said twice goes the second time ("The hive can't tell whether this reservoir is empty or full"
+    came out twice when a guarantee repeated what the answer already said)."""
+    seen, out = set(), []
+    for part in re.split(r"(?<=[.!?])(\s+)", answer):
+        key = re.sub(r"\W+", " ", part).strip().lower()
+        if len(key) > 25 and key in seen:
+            continue
+        seen.add(key)
+        out.append(part)
+    return re.sub(r"[ \t]{2,}", " ", "".join(out)).strip()
+
+
 def ask(hive, messages, q, on_tool=None):
     """One question: refresh the snapshot, then let the model call tools until it answers."""
     messages[0] = system_with_snapshot(hive)
     if len(messages) == 1:
         SAID.clear()            # a new conversation
+    parts = split_questions(q)
+    if len(parts) == 2:
+        # Two questions in one message: each answered in turn (a fixed reply had answered only the second).
+        return "\n\n".join(ask(hive, messages, x, on_tool) for x in parts)
     SAID.append(q)
     # "water it" with no plant named anywhere: a small model picks one. Don't let it.
     try:
@@ -3058,7 +3232,7 @@ def ask(hive, messages, q, on_tool=None):
             fixed = forecast_reply(hive, q)
         except RuntimeError:
             fixed = None
-    if not fixed and not COMMAND.search(q) and QUESTIONISH.search(q):
+    if not fixed and not COMMAND.search(q) and is_question(q):
         keep = SAID[:]
         SAID[:] = [q]
         try:
@@ -3077,7 +3251,7 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = weather_now_reply(hive, st, q)
         except RuntimeError:
             fixed = None
-    if not fixed and not COMMAND.search(q) and QUESTIONISH.search(q) and not re.search(
+    if not fixed and not COMMAND.search(q) and is_question(q) and not re.search(
             r"(?i)\b(soil|pot|probe|humid\w*|wind\w*|rain\w*|gust\w*|batter\w*|signal)\b", q):
         # Answered here: given the week's table, the model wrote its own (four made-up days, wrong weekdays).
         try:
@@ -3095,7 +3269,7 @@ def ask(hive, messages, q, on_tool=None):
             fixed = "At the %s, %s: high %s, low %s, average %s.%s" % m2.groups()
         elif t and t.startswith("AIR TEMPERATURE") and "only began" in t:
             fixed = t.replace("AIR TEMPERATURE at the", "At the", 1)
-    if not fixed and not COMMAND.search(q) and QUESTIONISH.search(q):
+    if not fixed and not COMMAND.search(q) and is_question(q):
         keep = SAID[:]
         SAID[:] = [q]
         try:
@@ -3136,6 +3310,24 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = "%s's pump would take about %s (%d seconds) to deliver %s ml, at its set flow of %s ml/min.%s" % (
                     name, ("%d min %d s" % (secs // 60, secs % 60)) if secs >= 60 else "%d s" % secs, secs, ml, fl,
                     cap)
+    if not fixed and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            named4 = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        try:
+            if REQUEST.search(q) and IF_NEEDED.search(q) and re.search(r"(?i)\bwater\w*|\bpump\w*|\bml\b|\bcups?\b", q):
+                fixed = if_needed_reply(hive, nodes, q)
+            elif is_question(q) and DRY_CHANGE_Q.search(q) and not [x for x in named4 if x.get("kind") != "WeatherNode"][1:]:
+                fixed = dry_change_reply(hive, st)
+            elif is_question(q) and LAST_HEARD_Q.search(q) and named4 and not re.search(r"(?i)\bwater", q):
+                fixed = last_heard_reply(hive, st, named4)
+            elif is_question(q) and FEELS_Q.search(q):
+                fixed = feels_reply(hive, st)
+        except RuntimeError:
+            fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
         # Answered here: given the numbers, the model said "warmer by 1.0 °C" and dropped both readings.
         try:
@@ -3312,15 +3504,15 @@ def ask(hive, messages, q, on_tool=None):
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
         pass
-    return plain_math(must_say(hive, q, answer))
+    return no_repeats(plain_math(must_say(hive, q, answer)))
 
 
 def no_card_offers(answer):
     """Offers and promises with no card waiting for a Confirm: nothing will happen, so they go
     (each step kept only if something is left)."""
     steps = [
-        (r"(?i)\s*\b(do you want (me )?to (proceed|go ahead)|shall i (proceed|go ahead)|should i (proceed|go ahead)|"
-         r"would you like (me )?to (proceed|go ahead))\b[^.?!\n]*\?", ""),
+        (r"(?i)\s*\b(do you (want|wish) (me )?to (proceed|go ahead)|shall i (proceed|go ahead)|should i (proceed|go ahead)|"
+         r"would you like (me )?to (proceed|go ahead)|do you wish to proceed|proceed\?)\b[^.?!\n]*\?", ""),
         # The Confirm button is the approval; a typed y/n isn't one.
         (r"(?i)[ \t]*[^.!?\n]*\b(confirm|reply|answer|respond)\b[^.!?\n]*(\(?\by/n\b\)?|\byes/no\b|"
          r"[\"'“]y[\"'”]\s*(\(yes\))?\s*or\s*[\"'“]n[\"'”])[^.!?\n]*[.!?]?", ""),

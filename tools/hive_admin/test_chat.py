@@ -977,5 +977,15 @@ out = conv.ask(hive, "did it water?")
 check(out["answer"].startswith("No - you pressed Decline") and "pump 50 ml on Larkspur (node 7)" in out["answer"]
       and not fake_llm.calls, "after Decline, 'did it water?' says so, without the model", out["answer"])
 
+# Round 4: two questions in one, short questions, repeats, ranges.
+check(C.split_questions("how wet is the cactus and is it going to rain tomorrow?") ==
+      ["how wet is the cactus?", "is it going to rain tomorrow?"], "two questions in one are split")
+check(len(C.split_questions("water the larkspur 100 ml and the rhubarb 2 cups")) == 1, "...a two-plant request isn't")
+check(C.is_question("temp outside in F") and not C.is_question("water the larkspur"), "short verb-less questions count")
+check(C.no_repeats("This sentence is long enough to count. Other. This sentence is long enough to count.")
+      == "This sentence is long enough to count. Other.", "a sentence said twice is kept once")
+check(C.c_range(24.4, 24.6) == "24-25 °C (76 °F)" and C.c_range(32.6, 34.2) == "33-34 °C (91-94 °F)",
+      "temperature ranges round each scale once")
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
