@@ -909,5 +909,13 @@ check("No such" not in C.focus_facts(hive, "how much does 10 ml raise node %d's 
 t = C.temp_extremes(hive, "did it freeze last night?")
 check(t is None or "freeze" in t or "froze" in t, "a freeze question gets a yes/no from the low", t)
 
+# Sunrise/sunset from the station's location: London on midsummer day is 03:43 / 20:21 UTC.
+import time as _t  # noqa: E402
+_r = C.sun_times(51.48, 0.0, _t.strptime("2026-06-21", "%Y-%m-%d"))
+_utc = [_t.strftime("%H:%M", _t.gmtime(x)) for x in _r]
+check(_utc[0] in ("03:42", "03:43", "03:44") and _utc[1] in ("20:20", "20:21", "20:22"),
+      "sunrise and sunset worked out to the minute", _utc)
+check(C.SUN_Q.search("what time is sunset today?") and not C.SUN_Q.search("water the larkspur"), "...asked as sunset")
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

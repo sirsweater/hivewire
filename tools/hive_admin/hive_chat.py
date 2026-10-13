@@ -2198,6 +2198,46 @@ def forecast_reply(hive, q):
         "\n".join("- " + x for x in out)))
 
 
+SUN_Q = re.compile(r"(?i)\b(sunrise|sunset|sun ?(rise|set|up|down)|dawn|dusk|daylight|day length|hours of (sun|light)|"
+                   r"when does it get (dark|light))\b")
+
+
+def sun_times(lat, lon, day):
+    """Sunrise and sunset (epoch s) for a local date: the NOAA sunrise equation, to about a minute."""
+    import math
+    noon = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, 12, 0, 0, 0, 0, -1))
+    jd = noon / 86400.0 + 2440587.5
+    n = round(jd - 2451545.0 + 0.0008)
+    js = n - lon / 360.0
+    m = math.radians((357.5291 + 0.98560028 * js) % 360)
+    c = 1.9148 * math.sin(m) + 0.02 * math.sin(2 * m) + 0.0003 * math.sin(3 * m)
+    lam = math.radians((math.degrees(m) + c + 180 + 102.9372) % 360)
+    jt = 2451545.0 + js + 0.0053 * math.sin(m) - 0.0069 * math.sin(2 * lam)
+    dec = math.asin(math.sin(lam) * math.sin(math.radians(23.4397)))
+    cos_w = (math.sin(math.radians(-0.833)) - math.sin(math.radians(lat)) * math.sin(dec)) / (
+        math.cos(math.radians(lat)) * math.cos(dec))
+    if not -1 <= cos_w <= 1:
+        return None
+    w = math.degrees(math.acos(cos_w)) / 360.0
+    return (jt - w - 2440587.5) * 86400, (jt + w - 2440587.5) * 86400
+
+
+def sun_reply(hive, q):
+    loc = (hive.call("GET", "/api/config") or {}).get("forecast") or {}
+    if loc.get("lat") is None or loc.get("lon") is None:
+        return None
+    day = time.localtime(time.time() + (86400 if re.search(r"(?i)\btomorrow\b", q) else 0))
+    t = sun_times(float(loc["lat"]), float(loc["lon"]), day)
+    if not t:
+        return None
+    rise, sett = t
+    span = int(sett - rise)
+    return ("%s at the garden: sunrise %s, sunset %s - %d h %02d min of daylight (worked out from the station's "
+            "location; it doesn't count trees or buildings)." % (
+                "Tomorrow" if re.search(r"(?i)\btomorrow\b", q) else "Today", time.strftime("%H:%M", time.localtime(rise)),
+                time.strftime("%H:%M", time.localtime(sett)), span // 3600, span % 3600 // 60))
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -2531,6 +2571,11 @@ def ask(hive, messages, q, on_tool=None):
     if FORECAST_Q.search(q) and not COMMAND.search(q):
         try:
             fixed = forecast_reply(hive, q)
+        except RuntimeError:
+            fixed = None
+    if not fixed and SUN_Q.search(q) and not COMMAND.search(q):
+        try:
+            fixed = sun_reply(hive, q)
         except RuntimeError:
             fixed = None
     fixed = fixed or next((a for pat, a in FIXED_REPLIES if pat.search(q)), None)
