@@ -966,5 +966,16 @@ script[:] = [say("No - you declined the card for %s, so nothing was pumped." % (
 out = conv.ask(hive, "did node %d get watered?" % pump["id"])
 check("you declined" in out["answer"], "a decline that really happened earlier isn't cut", out["answer"])
 
+# "Did it water?" right after Decline on the page: what happened, not a guessed reason.
+conv = C.Conversation()
+conv.messages.append({"role": "user", "content": "water it"})
+conv.messages.append({"role": "assistant", "content": "The card is ready."})
+conv.messages.append({"role": "user", "content": "[From the page, not typed: the person declined this, it was NOT sent: "
+                      "pump 50 ml on Larkspur (node 7)]"})
+fake_llm.calls.clear()
+out = conv.ask(hive, "did it water?")
+check(out["answer"].startswith("No - you pressed Decline") and "pump 50 ml on Larkspur (node 7)" in out["answer"]
+      and not fake_llm.calls, "after Decline, 'did it water?' says so, without the model", out["answer"])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

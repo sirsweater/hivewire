@@ -2977,6 +2977,10 @@ def plain_math(text):
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
+DID_IT_Q = re.compile(r"(?i)^\W*(so\s+)?(did|was|has|have)\s+(it|that|they|those|the \w+|anything)\b[^?]{0,30}\b(water\w*|work\w*|go|gone|"
+                      r"send|sent|run|ran|happen\w*|through|done|pump\w*)\b|^\W*did (it|that) (work|go through)\W*$")
+
+
 CORRECTION = re.compile(r"(?i)^\W*(sorry|oops|no|nope|wait|actually|my bad|whoops)?\W*(i meant|i mean|meant|i said the "
                         r"wrong|wrong (one|plant|node)|not the [\w ]+?[,.]? ?(i meant |the |it's |its )?|make (it|that) the)\b")
 
@@ -3033,6 +3037,20 @@ def ask(hive, messages, q, on_tool=None):
         q = q2
         SAID[-1] = q
     fixed = None
+    if DID_IT_Q.search(q) and not COMMAND.search(q):
+        # After Decline on the page: "did it water?" got "not sent because the soil was too wet" - a made-up
+        # reason. The page's own notes since the last answer say what happened.
+        last_a = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=0)
+        notes = [str(m.get("content")) for m in messages[last_a - 1 if last_a else 0:] if m.get("role") == "user"
+                 and str(m.get("content", "")).startswith("[From the page, not typed: the person declined")]
+        confirmed = [m for m in messages[last_a - 1 if last_a else 0:] if m.get("role") == "user"
+                     and "pressed Confirm" in str(m.get("content", ""))]
+        asked = [n.get("name") for n in nodes if n.get("name") and re.search(r"(?i)\b%s\b" % re.escape(n["name"]), q)]
+        if asked:           # "did the larkspur get watered?" after declining only the Rhubarb's card
+            notes = [x for x in notes if any(re.search(r"(?i)\b%s\b" % re.escape(a), x) for a in asked)]
+        if notes and not confirmed:
+            fixed = "No - you pressed Decline, so nothing was sent: %s." % "; ".join(
+                re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
     if FORECAST_Q.search(q) and not COMMAND.search(q) and not (
             re.search(r"(?i)\b(were|was|did|has|have|had|been|yesterday|last (night|week)|so far|ago)\b", q) and
             not re.search(r"(?i)\b(will|going to|gonna|tomorrow|tonight|forecast)\b", q)):
