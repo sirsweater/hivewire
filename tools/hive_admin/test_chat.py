@@ -672,7 +672,7 @@ check(t and "soil temperature 19.9 °C" in t and "NO air temperature" in t, "no 
       "named as such", t)
 check(t and t in C.focus_facts(hive, "how hot is it at node %d?" % pump["id"]), "...beside a temperature question")
 sl.update({1: 2230, 6: 1 | 2 | 8})
-check("air 22.3 °C; soil 19.9 °C" in C.temperatures(hive, C.resolve_node(hive, str(pump["id"]))[0]),
+check("air 22.3 °C (72.1 °F); soil 19.9 °C (67.8 °F)" in C.temperatures(hive, C.resolve_node(hive, str(pump["id"]))[0]),
       "with an air sensor, both", C.temperatures(hive, C.resolve_node(hive, str(pump["id"]))[0]))
 for k, v in keep.items():
     if v is None:
@@ -1003,6 +1003,11 @@ fake_llm.calls.clear()
 out = conv.ask(hive, "what alerts do I get?")
 check("E307" in out["answer"] and "E104" in out["answer"] and not fake_llm.calls, "the alert rules come from the admin's code",
       out["answer"][:200])
+
+# A wrong Fahrenheit conversion is corrected, its working dropped.
+_f = C.fix_fahrenheit("The soil is 26.8 °C.\n26.8 × 9/5 + 32 = 70.24\nSo about **70.2°F**.")
+check("80.2°F" in _f and "70.2" not in _f, "a wrong °F figure is corrected and its working dropped", _f)
+check(C.fix_fahrenheit("It is 28 °C (82 °F).") == "It is 28 °C (82 °F).", "...a right one is left alone")
 
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

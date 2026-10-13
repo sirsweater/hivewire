@@ -1743,6 +1743,34 @@ PAST_WATERING = re.compile(r"(?i)\b(you|the hive|it|bot)\b[^.?!]{0,40}\b(watered
 TEMP_Q = re.compile(r"(?i)\b(temp|temps|temperature|hot|cold|warm|heat|chilly|freez\w*|frost)\b")
 
 
+def with_f(v):
+    """ "26.8 °C" -> "26.8 °C (80.2 °F)": the model once turned 26.8 °C into 70.2 °F."""
+    m = re.match(r"\s*(-?\d+(?:\.\d+)?) ?°C\s*$", str(v or ""))
+    return "%s (%.1f °F)" % (v, float(m.group(1)) * 9 / 5.0 + 32) if m else v
+
+
+def fix_fahrenheit(answer):
+    """A °F figure that matches none of the answer's own °C figures is replaced with the right one."""
+    cs = [float(x) for x in re.findall(r"(-?\d+(?:\.\d+)?) ?°C", answer)]
+    if not cs:
+        return answer
+    fs = [c * 9 / 5.0 + 32 for c in cs]
+
+    def one(m):
+        v = float(m.group(1))
+        if any(abs(v - f) <= 1.0 for f in fs):
+            return m.group(0)
+        # the °C figure written closest before it is the one it converts
+        before = [float(x) for x in re.findall(r"(-?\d+(?:\.\d+)?) ?°C", answer[:m.start()])]
+        c = before[-1] if before else cs[0]
+        return "%.1f%s" % (c * 9 / 5.0 + 32, m.group(2))
+    out = re.sub(r"(-?\d+(?:\.\d+)?)(\s?°\s?F\b|\s?degrees F(ahrenheit)?\b)", one, answer)
+    if out != answer:
+        # its working ("26.8 × 9/5 + 32 = 70.24") was wrong too: the lines go
+        out = "\n".join(ln for ln in out.split("\n") if not re.search(r"9\s*/\s*5|×\s*1\.8|\*\s*1\.8|Fahrenheit\s*=", ln))
+    return out
+
+
 def temperatures(hive, n):
     """Which temperatures a node really has: a node with no air sensor got its soil probe's
     reading reported as the air temperature."""
@@ -1759,11 +1787,11 @@ def temperatures(hive, n):
             if wx else None
         return ("TEMPERATURE at %s: %s. There is NO air temperature at this node (no air sensor fitted) - say "
                 "that, and call the number the soil temperature.%s" % (
-                    name, "soil temperature %s (probe in the pot)" % soil if soil and not soil.startswith("NO")
+                    name, "soil temperature %s (probe in the pot)" % with_f(soil) if soil and not soil.startswith("NO")
                     else "no temperature reading at all",
                     " The air temperature at the %s is %s." % (wx.get("name") or "weather station", wx_air)
                     if wx_air and not wx_air.startswith("NO") else ""))
-    return "TEMPERATURE at %s: air %s%s." % (name, air, "; soil %s (probe in the pot)" % soil
+    return "TEMPERATURE at %s: air %s%s." % (name, with_f(air), "; soil %s (probe in the pot)" % with_f(soil)
                                               if soil and not soil.startswith("NO") else "")
 
 
@@ -3629,7 +3657,7 @@ def ask(hive, messages, q, on_tool=None):
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
         pass
-    return no_repeats(plain_math(must_say(hive, q, answer)))
+    return no_repeats(fix_fahrenheit(plain_math(must_say(hive, q, answer))))
 
 
 def no_card_offers(answer):
