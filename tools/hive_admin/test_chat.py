@@ -1062,5 +1062,16 @@ out = conv.ask(hive, "did it work?")
 check(out["answer"].startswith("No - you declined it") and "pump 100 ml on Larkspur (node 7)" in out["answer"] and not fake_llm.calls,
       "'did it work?' after a tool's own refusal says so plainly", out["answer"])
 
+# Round 7: a new board, a morning, a trip.
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "I just added a new soil node, how do I name it?")
+check("Flash" in out["answer"] and "setid" in out["answer"] and not fake_llm.calls, "a new board's number: the Flash page, not an invented id")
+check(C.MORNING_Q.search("good morning! anything I need to know?") and not C.MORNING_Q.search("is everything ok?"),
+      "a morning greeting gets the briefing; 'is everything ok?' doesn't")
+check(C.AWAY_Q.search("I'm going away for a week, will the plants be ok?"), "a trip question is recognised")
+_fs = C.must_say(hive, "how is it?", "Automatic watering is on, but the node has no float switch to prevent overwatering.")
+check("only detects an empty reservoir" in _fs, "a float switch isn't described as stopping overwatering", _fs)
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

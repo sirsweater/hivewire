@@ -2941,6 +2941,166 @@ def soil_temp_reply(hive, n):
     return "%s's soil (the probe in the pot) is %s right now." % (n.get("name") or "node %s" % n["id"], with_f(v))
 
 
+# --- round 7: an ordinary morning (new functions, 2026-10-13) -----------------------------------
+def plant_rates(hive, st):
+    """{nid: points a day the day-average soil reading fell over the last ~4 days (rises left out)}."""
+    out = {}
+    for n in st.get("nodes", []):
+        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
+            continue
+        pts = soil_series(hive, n, 96)
+        per = {}
+        for ts, avg, _, _ in pts:
+            per.setdefault(int(ts // 86400), []).append(avg)
+        daily = [sum(v) / len(v) for _, v in sorted(per.items()) if len(v) >= 6]
+        if len(daily) >= 2:
+            out[n["id"]] = sum(a - b for a, b in zip(daily, daily[1:]) if b < a) / (len(daily) - 1)
+    return out
+
+
+MORNING_Q = re.compile(r"(?i)\b(good morning|^morning\b|anything (i need|i should|to) know|what'?s new|catch me up|briefing|"
+                       r"daily (summary|update)|morning (report|update|summary))\b")
+NIGHT_Q = re.compile(r"(?i)\bhow was (the|last) night\b|\bwhat happened (last night|overnight)\b|\bovernight\b[^?]*\bhow\b|"
+                     r"\bhow did (it|the garden|everything) do (last night|overnight)\b")
+
+
+def night_summary(hive, st):
+    t0, t1, _ = day_window("last night")
+    bits = []
+    wx = weather_node(st)
+    if wx:
+        sid = slot_by_label(hive, wx["kind"], "Air temperature")
+        if sid is not None:
+            h = t_slot_history(hive, str(wx["id"]), sid, day="last night")
+            if h.get("overall"):
+                bits.append("the air got down to %s (high %s)" % (h["overall"]["min"], h["overall"]["max"]))
+        mm = rain_total(hive, st, t0, t1)
+        if mm is not None:
+            bits.append("rain %.1f mm" % mm)
+    soil = []
+    for n in st.get("nodes", []):
+        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
+            continue
+        pts = [p for p in soil_series(hive, n, 30) if t0 <= p[0] < t1]
+        if len(pts) >= 2:
+            d = pts[-1][1] - pts[0][1]
+            soil.append("%s %.0f%% -> %.0f%%" % (n.get("name") or "node %s" % n["id"], pts[0][1], pts[-1][1]))
+    ev = t_recent_events(hive, day="last night")
+    evs = ev.get("events") if isinstance(ev.get("events"), list) else []
+    waters = [e for e in evs if re.search(r"(?i)\bpump|water", e.get("text", "")) and "chat proposed" not in e.get("text", "")]
+    return ("Last night (18:00-08:00): %s. Soil: %s. %s" % (
+        "; ".join(bits) or "no weather readings", ", ".join(soil) or "no readings",
+        "Waterings: %s." % "; ".join("%s %s" % (e["at"], e["text"]) for e in waters[:4]) if waters else "No waterings."))
+
+
+def morning_reply(hive, st):
+    """ "Good morning! anything I need to know?" - the night, today's forecast, the plants, anything to look at."""
+    lines = ["**Good morning.** %s" % night_summary(hive, st)]
+    try:
+        fc = forecast_reply(hive, "what's the forecast for the rest of today?")
+    except RuntimeError:
+        fc = None
+    if fc:
+        lines.append("**Today**: " + " ".join(x.strip("- ") for x in fc.split("\n")[2:] if x.strip()).replace("**", ""))
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    need, ok = [], []
+    for n in st.get("nodes", []):
+        soil, band = (n.get("derived") or {}).get("soil"), (cfg.get(str(n["id"])) or {}).get("plant_band")
+        if n.get("hidden") or soil is None or not band:
+            continue
+        nm = n.get("name") or "node %s" % n["id"]
+        (need if soil < band[0] else ok).append("%s %.0f%% (band %s-%s%s)" % (nm, soil, band[0], band[1],
+                                                                            ", too wet" if soil > band[1] else ""))
+    lines.append("**Plants**: %s%s" % ("NEED WATER: %s. " % "; ".join(need) if need else "none need water. ", "; ".join(ok)))
+    look = []
+    silent = [x.get("name") or "node %s" % x["id"] for x in st.get("silent") or [] if (x.get("age") or 0) < 7 * 86400]
+    if silent:
+        look.append("not reporting: %s" % ", ".join(silent))
+    p = t_list_problems(hive)
+    if p["active_now"] != "none":
+        look.append("active problems: %s" % p["active_now"])
+    lines.append("**Needs a look**: %s." % ("; ".join(look) if look else "nothing - every node is reporting and no problems are active"))
+    return "\n".join(lines)
+
+
+AWAY_Q = re.compile(r"(?i)\b(going away|go away|away for|on vacation|on holiday|out of town|leaving for|be gone|be away|"
+                    r"while i'?m (away|gone)|trip)\b")
+
+
+def away_reply(hive, st, q):
+    """ "I'm going away for a week, will the plants be ok?" got invented JSON and settings it can't change. Each
+    plant: how fast it's drying, when it would reach the low end of its band, and who waters it then."""
+    m = re.search(r"(?i)\b(\d+|a|one|two|three|four|five|six|seven|ten|fourteen)\s+(day|days|week|weeks)\b", q)
+    days = 7
+    if m:
+        k = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "ten": 10,
+             "fourteen": 14}.get(m.group(1).lower(), None) or int(m.group(1))
+        days = k * (7 if m.group(2).startswith("week") else 1)
+    rates = plant_rates(hive, st)
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    res = reservoirs(hive)
+    lines = []
+    for n in st.get("nodes", []):
+        soil, band = (n.get("derived") or {}).get("soil"), (cfg.get(str(n["id"])) or {}).get("plant_band")
+        if n.get("hidden") or soil is None or not band:
+            continue
+        nm = n.get("name") or "node %s" % n["id"]
+        r = rates.get(n["id"], 0)
+        reach = (soil - band[0]) / r if r >= 0.3 else None
+        when = ("already below its band" if soil < band[0] else
+                "not drying measurably, so it should stay above %s%% the whole time" % band[0] if reach is None else
+                "drying about %.1f points a day, it won't get near %s%% in %d days" % (r, band[0], days) if reach > days * 2 else
+                "about %.0f days to fall to %s%% at %.1f points a day" % (reach, band[0], r))
+        pump = has_pump(hive, n.get("kind"))
+        auto = (n.get("slots") or {}).get("49")
+        issue = known_issue(n["id"])
+        if not pump:
+            who = "no pump - if it gets there, only a hand watering helps" if reach is not None and reach < days else "no pump, but it shouldn't need one"
+        elif issue and "NOT TRUSTED" in issue.upper():
+            who = "its pump isn't trusted (a known fault), so don't count on it waterring itself" .replace("waterring", "watering")
+        elif auto == 0:
+            who = "automatic watering is OFF, so nothing will water it"
+        else:
+            cap = (n.get("slots") or {}).get("44")
+            who = "automatic watering will water it when it gets there (up to %s ml a day)%s" % (
+                cap or "its daily limit", "; the hive can't see its reservoir level (no float switch), so fill it before "
+                "you go" if res.get(nm) == "no float switch" else "")
+        lines.append("- **%s**: %.0f%% now (band %s-%s%%), %s; %s." % (nm, soil, band[0], band[1], when, who))
+    if not lines:
+        return None
+    return ("For %d days away:\n%s\n\n(Drying rates are from the last few days; hot or windy weather speeds them up.)" % (
+        days, "\n".join(lines)))
+
+
+NEW_NODE_Q = re.compile(r"(?i)\b(new|added|add|another|second|third)\b[^?]*\b(node|board|sensor|probe)\b[^?]*\b(name|number|id|"
+                        r"set up|setup|add|join|show up|appear)\b|\bwhat (number|id) did (it|the new)")
+NEW_NODE_REPLY = (
+    "A new board gets its node number when it's flashed: on the admin page's **Flash** tab (it gives the board its "
+    "number as it writes the image), or by sending `setid <n>` over its USB serial. Until then it runs a generic "
+    "image and won't join the hive (error E401 \"Board has no node number yet\"). Once it has a number and is in "
+    "range, it shows up here and on the admin page within a minute or two - then you can name it, e.g. \"rename "
+    "node 8 to Basil\". This chat can't give a board its number.")
+
+
+WEEK_VS_Q = re.compile(r"(?i)\b(this|past) week\b[^?]*\b(than|vs\.?|versus|compared (to|with))\b[^?]*\b(last|previous) week\b|"
+                       r"\b(wetter|drier|dryer)\b[^?]*\bthan last week\b")
+
+
+def week_vs_reply(hive, n):
+    pts = soil_series(hive, n, 14 * 24)
+    t1 = time.time()
+    a = [p[1] for p in pts if p[0] >= t1 - 7 * 86400]
+    b = [p[1] for p in pts if t1 - 14 * 86400 <= p[0] < t1 - 7 * 86400]
+    nm = n.get("name") or "node %s" % n["id"]
+    if not a or not b:
+        return "%s doesn't have two full weeks of readings to compare yet." % nm
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    d = ma - mb
+    return ("%s's soil averaged %.0f%% this week against %.0f%% the week before - %s (range this week %.0f-%.0f%%, "
+            "last week %.0f-%.0f%%)." % (nm, ma, mb, "wetter by %.0f points" % d if d >= 2 else "drier by %.0f points" % -d
+                                          if d <= -2 else "about the same", min(a), max(a), min(b), max(b)))
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -2998,7 +3158,8 @@ def hive_wide_facts(hive, st, named, q):
 # --- forecasts ---------------------------------------------------------------------
 # The admin stores four public models' next 48 h (forecasts.py) to score them. The chat said
 # "I can't see forecasts". The reply is worked out here, across the models, no model wording.
-FORECAST_Q = re.compile(r"(?i)\b(will it|is it going to|gonna|should I expect|chance of|any)\b[^?]{0,30}\b(rain|snow|"
+FORECAST_Q = re.compile(r"(?i)\b(today'?s|today) (weather|forecast)\b|\bweather (for |like )?(later )?today\b|\bplan for today'?s? weather\b|"
+                        r"\b(will it|is it going to|gonna|should I expect|chance of|any)\b[^?]{0,30}\b(rain|snow|"
                         r"freeze|frost|storm|wind|windy|hot|cold|warm)\w*|\bforecast\b|\b(rain|weather|wind|temperature|"
                         r"high|low)s? (for )?(tomorrow|tonight|this week(end)?|next week|later)\b|\b(tomorrow|tonight)'?s? "
                         r"(weather|high|low|rain|forecast)\b|\bhow (hot|cold|warm|windy) will it\b")
@@ -3722,6 +3883,27 @@ def ask(hive, messages, q, on_tool=None):
             fixed = None if plant_q else errors_reply(hive, st, en)
         except RuntimeError:
             fixed = None
+    if not fixed and not COMMAND.search(q) and not REQUEST.search(q):
+        try:
+            if NEW_NODE_Q.search(q):
+                fixed = NEW_NODE_REPLY
+            elif AWAY_Q.search(q) and re.search(r"(?i)\b(ok|okay|fine|survive|be alright|need|water|dry)\b", q):
+                fixed = away_reply(hive, st, q)
+            elif NIGHT_Q.search(q):
+                fixed = night_summary(hive, st)
+            elif MORNING_Q.search(q) and len(q.split()) <= 10:
+                fixed = morning_reply(hive, st)
+            elif WEEK_VS_Q.search(q):
+                keep = SAID[:]
+                SAID[:] = [q]
+                try:
+                    wn = [n for n in nodes if named_by_person(n) and (n.get("derived") or {}).get("soil") is not None]
+                finally:
+                    SAID[:] = keep
+                if len(wn) == 1:
+                    fixed = week_vs_reply(hive, wn[0])
+        except RuntimeError:
+            fixed = None
     if not fixed and AUTO_SWITCH_Q.search(q):
         fixed = auto_switch_reply(nodes, q)
     if not fixed and is_question(q) and SOIL_TEMP_NOW_Q.search(q) and not DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) \
@@ -3985,6 +4167,11 @@ def must_say(hive, q, answer):
         SAID[:] = keep
     if not named:
         named = pronoun_nodes(st, q)
+    # "Automatic watering is on, but the node has no float switch to prevent overwatering": a float switch only says
+    # whether the reservoir has water.
+    answer = re.sub(r"(?i)[^.!?\n]*\bfloat switch\b[^.!?\n]*\b(overwater\w*|over-water\w*|too much water|flood\w*)\b[^.!?\n]*[.!?]?",
+                    "It has no float switch, so the hive can't tell when its reservoir runs empty (a float switch only "
+                    "detects an empty reservoir; it doesn't limit how much is watered).", answer)
     # "The automatic watering for node 6 (Cactus) is currently on" - it has no pump.
     for n in st.get("nodes", []):
         if n.get("name") and not n.get("hidden") and not has_pump(hive, n.get("kind")):
