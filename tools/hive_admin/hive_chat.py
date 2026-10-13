@@ -935,8 +935,12 @@ def write(hive, summary, path, body):
                           "they press it. Tell them what it will do and to press Confirm if they want it."}
     if not decision:
         # "The person declined... due to concerns": said to the person, about them, with a guessed reason.
+        # Still came out as "You didn't want to water it because its soil is 87%": a fixed outcome, fixed words.
         return {"sent": False, "reason": "NOT sent: the person you're talking to answered no. Tell them, as "
-                "'you', that nothing was sent; don't guess why they said no."}
+                "'you', that nothing was sent; don't guess why they said no.",
+                "say": "Nothing was sent - you answered no to: %s.%s" % (
+                    summary.split("\n")[0], "".join(" (The card noted: %s.)" % ln.strip(" !") for ln in
+                                                     summary.split("\n")[1:] if ln.strip().startswith("!")))}
     return {"sent": True, "reply": hive.call("POST", path, body=body)}
 
 
@@ -2177,6 +2181,7 @@ def forecast_reply(hive, q):
     elif his:
         out.append("**Temperature:** high %s to %s, low %s to %s." % (c_f(min(his)), c_f(max(his)), c_f(min(los)),
                                                                      c_f(max(los))))
+    if his:
         if re.search(r"(?i)freez|frost|cold", q) or min(los) < 3:
             out.append("**Frost:** %s" % ("below freezing in %d of %d models - protect tender plants." % (
                 sum(x <= 0 for x in los), len(los)) if min(los) <= 0 else "possible on plants - the lowest model "
@@ -2403,6 +2408,9 @@ def claims_change(text, pending=False):
         sentence = next((x for x in sentence if m.group(0) in x), m.group(0))
         if re.search(r"(?i)success", m.group(0)) and PAST_MARK.search(sentence):
             continue
+        # "It has been watered 0 times this week" answers a question about the record.
+        if not re.match(r"(?i)i\b|done", m.group(0)) and (PAST_MARK.search(sentence) or HISTORY_MARK.search(sentence)):
+            continue
         # ("has been confirmed" can't vouch for itself)
         if pending and re.search(r"(?i)\b(confirm(ation)?|press|approval|awaiting|pending|waiting|card)\b",
                                  sentence.replace(m.group(0), " ")) and not re.search(r"(?i)\b(confirmed|approved)\b",
@@ -2415,6 +2423,10 @@ def claims_change(text, pending=False):
 PAST_MARK = re.compile(r"(?i)\b(yesterday|last (night|week|month|time)|ago|earlier|previous(ly)?|on (mon|tue|wed|thu|fri|"
                        r"sat|sun)\w*|on (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|(jan|feb|mar|apr|may|jun|jul|"
                        r"aug|sep|oct|nov|dec)\w* \d|\d{4}-\d\d-\d\d|according to|the log)\b")
+
+
+HISTORY_MARK = re.compile(r"(?i)\b(\d+|once|twice|zero|no|several|many) times?\b|\bthis (week|month)\b|\b(in|over|during) "
+                          r"the (last|past) (\d+|few|seven|7) (days|hours|weeks)\b|\bso far\b")
 
 
 # A request for a change, as opposed to a question: an imperative verb at the start
@@ -2568,11 +2580,28 @@ def ask(hive, messages, q, on_tool=None):
         st = {}
     nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
     fixed = None
-    if FORECAST_Q.search(q) and not COMMAND.search(q):
+    if FORECAST_Q.search(q) and not COMMAND.search(q) and not (
+            re.search(r"(?i)\b(were|was|did|has|have|had|been|yesterday|last (night|week)|so far|ago)\b", q) and
+            not re.search(r"(?i)\b(will|going to|gonna|tomorrow|tonight|forecast)\b", q)):
         try:
             fixed = forecast_reply(hive, q)
         except RuntimeError:
             fixed = None
+    if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
+        # Answered here: given the numbers, the model said "warmer by 1.0 °C" and dropped both readings.
+        try:
+            t = warmer_fact(hive, st, q)
+        except RuntimeError:
+            t = None
+        m = re.match(r"COMPARED WITH YESTERDAY \((.+?) at the (.+?)\): now (.+?); yesterday at this time \(the hour "
+                     r"from (\d\d:\d\d)\) it averaged (.+?) - so (higher|lower|the same)(?: by (.+?))?\.$", t or "")
+        if m:
+            lbl, where, now_v, hr, then_v, how, by = m.groups()
+            word = {"Air temperature": ("warmer", "cooler"), "Humidity": ("more humid", "less humid"),
+                    "Wind (2-min average)": ("windier", "calmer")}.get(lbl, ("higher", "lower"))
+            fixed = ("%s: %s now, against %s yesterday at this time (the %s hour's average) - %s by %s." % (
+                "%s at the %s" % (lbl, where), now_v, then_v, hr, word[0] if how == "higher" else word[1], by)
+                if how != "the same" else "%s at the %s: %s now - the same as yesterday at this time." % (lbl, where, now_v))
     if not fixed and SUN_Q.search(q) and not COMMAND.search(q):
         try:
             fixed = sun_reply(hive, q)
