@@ -634,7 +634,16 @@ def t_list_problems(hive):
                             for e in (p.get("events") or [])[:10]]}
 
 
+def asked_window(day):
+    """ "What happened overnight?" was looked up as yesterday 00:00-24:00. The person's own words win."""
+    said = SAID[-1] if SAID else ""
+    if re.search(r"(?i)\b(overnight|last night)\b", said) and str(day or "").lower() not in ("last night", "overnight"):
+        return "last night"
+    return day
+
+
 def t_slot_history(hive, node, slot, hours=24, day=None):
+    day = asked_window(day)
     n, err = resolve_node(hive, node)
     if not n:
         return {"error": err}
@@ -777,6 +786,7 @@ def explain_event(hive, text, who):
 
 
 def t_recent_events(hive, hours_back=24, day=None, include_routine=False, include_uploads=False, node=None):
+    day = asked_window(day)
     t1 = int(time.time())
     if day:
         try:
@@ -865,7 +875,7 @@ def pumped_slot(hive, kind):
 # "How much water did it get this week": the 24-hour count summed hour by hour counts
 # each watering 24 times over.
 WATER_TOTAL = re.compile(r"(?i)\bhow (much|many)\b[^?]{0,50}\b(water(ed|ing|ings)?|pumped|ml)\b[^?]{0,40}"
-                         r"\b(week|days?|month|since|so far|in total|altogether|total)\b|"
+                         r"\b(week|days?|month|since|so far|in total|altogether|total|ever|all[- ]time|done)\b|"
                          r"\btotal\b[^?]{0,30}\b(water|pumped|watering)")
 
 
@@ -878,7 +888,21 @@ def watering_total(hive, n, q):
     days = (int(m.group(1)) if m.group(1).isdigit() else WORD_NUM.get(m.group(1).lower(), 7)) if m else \
         30 if re.search(r"(?i)\bmonth\b", q) else 7
     days = max(1, min(30, days))
+    ever = bool(re.search(r"(?i)\b(in total|ever|all[- ]time|altogether|since (it|records|the start|it started)|"
+                          r"lifetime)\b", q)) and not m
+    if ever:
+        # "How many ml has the pump done in total?" got the last 7 days.
+        days = 365
     runs = pump_runs(hive, n, sid, days)
+    if ever:
+        t1 = int(time.time())
+        pts = (hive.call("GET", "/api/series", {"node": n["id"], "slot": sid, "from": t1 - days * 86400, "to": t1})
+               or {}).get("points") or []
+        since = time.strftime("%b %d", time.localtime(pts[0][0])) if pts else "the start of its record"
+        return ("WATER TOTAL for %s (node %s), its whole record (since %s - nothing before that is kept): %d ml in %d "
+                "watering%s. (Worked out from each rise in the pumped-in-24-h count.)" % (
+                    n.get("name") or n.get("kind"), n["id"], since, sum(ml for _, ml in runs), len(runs),
+                    "" if len(runs) == 1 else "s")) + uncounted(n)
     when = lambda t: time.strftime("%b %d %H:%M", time.localtime(t))  # noqa: E731
     return ("WATER TOTAL for %s (node %s), last %d days: %d ml in %d watering%s%s. (Worked out from each rise "
             "in the pumped-in-24-h count; don't add up that count yourself.)" % (
@@ -941,8 +965,15 @@ def write(hive, summary, path, body):
         return {"sent": False, "reason": "NOT sent: the person you're talking to answered no. Tell them, as "
                 "'you', that nothing was sent; don't guess why they said no.",
                 "say": "Nothing was sent - you answered no to: %s.%s" % (
-                    summary.split("\n")[0], "".join(" (The card noted: %s.)" % ln.strip(" !") for ln in
+                    summary.split("\n")[0], "".join(" (The card noted: %s.)" % card_note(ln) for ln in
                                                      summary.split("\n")[1:] if ln.strip().startswith("!")))}
+
+
+def card_note(line):
+    """A card's warning, short: the known-issue paragraph was repeated whole, ending in "..)"."""
+    t = line.strip(" !")
+    t = re.split(r"(?<=[a-z0-9)])\.\s", t)[0] if len(t) > 140 else t
+    return t.rstrip(". ")
     return {"sent": True, "reply": hive.call("POST", path, body=body)}
 
 
@@ -2256,6 +2287,201 @@ def hand_watering_fact(hive, n):
                 name, time.strftime("%a %d %b %H:%M", time.localtime(t)), a, b))
 
 
+# --- round 3 (follow-ups and premises): more answers worked out in code -----------------
+RAIN_PREMISE = re.compile(r"(?i)\b(since|because|as|given( that)?|after( all)?( the)?|with( all)?( the)?)\b[^?.]{0,25}\b(it )?"
+                          r"(rained|raining|rain|storm\w*|downpour|showers?)\b|\bit (rained|poured|stormed)\b")
+
+
+def rain_total(hive, st, t0, t1):
+    wx = weather_node(st)
+    sid = slot_by_label(hive, wx["kind"], "Rain gauge tips") if wx else None
+    if sid is None:
+        return None
+    rows = (hive.call("GET", "/api/rollup", {"node": wx["id"], "slot": int(sid), "res": "hour", "from": t0, "to": t1})
+            or {}).get("rows") or []
+    up = (hive.kinds().get(wx["kind"]) or {}).get("weather_upload") or {}
+    mm = next((sc for s_, how, sc in up.values() if s_ == int(sid) and how == "sum"), None) or 0.2794
+    return sum((x.get("sum") or 0) for x in rows) * mm if rows else 0.0
+
+
+def soil_verdicts(hive, st):
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    out, need = [], []
+    for n in st.get("nodes", []):
+        soil, band = (n.get("derived") or {}).get("soil"), (cfg.get(str(n["id"])) or {}).get("plant_band")
+        if n.get("hidden") or soil is None or not band:
+            continue
+        nm = n.get("name") or "node %s" % n["id"]
+        word = "too wet" if soil > band[1] else "dry - needs water" if soil < band[0] else "fine"
+        if soil < band[0]:
+            need.append(nm)
+        out.append("%s %.0f %% (band %s-%s %%, %s)" % (nm, soil, band[0], band[1], word))
+    return out, need
+
+
+def rain_premise_reply(hive, st, q):
+    """ "Since it rained a lot yesterday, should I skip watering?" - it hadn't rained, and the answer
+    was "no rain, so it is safe to skip watering"."""
+    m = DAY_WORD.search(q)
+    day = m.group(1).lower() if m else "yesterday"
+    if day in ("this week", "last 7 days", "past week"):
+        t1 = int(time.time())
+        t0, label = t1 - 7 * 86400, "in the last 7 days"
+    else:
+        try:
+            t0, t1, label = day_window(day)
+        except ValueError:
+            return None
+        label = {"today": "today", "yesterday": "yesterday"}.get(label, label)
+    mm = rain_total(hive, st, t0, t1)
+    if mm is None:
+        return None
+    verdicts, need = soil_verdicts(hive, st)
+    rain = ("Actually it didn't rain %s - the weather station recorded %.1f mm. So rain is no reason to skip "
+            "watering." % (label, mm) if mm < 0.5 else
+            "Yes - the weather station recorded %.1f mm %s%s." % (mm, label, "" if mm >= 5 else
+                                                                    ", which is light: it barely wets a pot"))
+    soil = ("Go by the soil instead: %s. %s" % ("; ".join(verdicts), "Needs water: %s." % ", ".join(need) if need else
+                                                 "None needs water right now.")) if verdicts else ""
+    return (rain + " " + soil).strip() + (" Pots under cover get no rain at all." if mm >= 0.5 else "")
+
+
+BATTERY_LIFE_Q = re.compile(r"(?i)\bbatter(y|ies)\b[^?]*\b(die|dies|dead|last|run out|runs out|empty|drain\w*|days|weeks|"
+                            r"how long|charg\w*|left)\b|\bhow long\b[^?]*\bbatter(y|ies)\b")
+
+
+def battery_reply(hive, n):
+    """ "How many days until the rhubarb's battery dies?" got "no battery reading" (it reads 84 %)."""
+    name = n.get("name") or "node %s" % n["id"]
+    d = derived(hive, n)
+    pct_sid = slot_by_label(hive, n.get("kind"), "Battery (node's own %)")
+    if pct_sid is None:
+        return None
+    t1 = int(time.time())
+    pts = [(t, v) for t, v in ((hive.call("GET", "/api/series", {"node": n["id"], "slot": int(pct_sid),
+                                                                 "from": t1 - 7 * 86400, "to": t1}) or {}).get("points") or [])
+           if v is not None]
+    now = d.get("Battery") or ("%s %%" % (n.get("slots") or {}).get(pct_sid))
+    volts = d.get("Battery voltage")
+    head = "%s's battery reads %s%s." % (name, now, " (%s)" % volts if volts else "")
+    if len(pts) < 2 or pts[-1][0] - pts[0][0] < 86400:
+        return head + " There isn't a day of history yet to tell how fast it drains."
+    days = (pts[-1][0] - pts[0][0]) / 86400.0
+    a, b = pts[0][1], pts[-1][1]
+    rate = (a - b) / days
+    trend = "Over the last %.0f days the node's own estimate went from %s %% to %s %%" % (days, a, b)
+    if rate <= 0.2:
+        return head + " %s - it's holding steady (charging, or using very little), so there's no sign of it running out." % trend
+    left = b / rate
+    return head + " %s, about %.1f points a day; at that rate it would be flat in roughly %s." % (
+        trend, rate, "%.0f days" % left if left < 60 else "%.0f months" % (left / 30))
+
+
+PERCENT_Q = re.compile(r"(?i)\bwhat does\b[^?]*\b(\d+ ?%|percent|percentage|the %|soil moisture)\b[^?]*\b(mean|stand for|"
+                       r"measure)\b|\bwhat (is|are) (the )?(soil )?(moisture )?(percent(age)?s?|%)\b[^?]*\b(measur|mean)|"
+                       r"\bhow is (the )?(soil )?(moisture|%|percent\w*) (worked out|calculated|measured)\b")
+
+
+def percent_reply(hive, st, named, q=""):
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    nodes = [n for n in (named or st.get("nodes", [])) if (n.get("derived") or {}).get("soil") is not None]
+    cal = []
+    for n in nodes:
+        c = cfg.get(str(n["id"])) or {}
+        if c.get("soil_dry") is not None and c.get("soil_wet") is not None:
+            cal.append("%s: 0 %% = raw %s (in air), 100 %% = raw %s (in water), now %.0f %%" % (
+                n.get("name") or "node %s" % n["id"], c["soil_dry"], c["soil_wet"], n["derived"]["soil"]))
+    m = re.search(r"(\d+(?:\.\d+)?) ?%", q)
+    v = float(m.group(1)) if m else (nodes[0]["derived"]["soil"] if nodes else 60.0)
+    ex = "%.0f" % v
+    feel = ("very wet soil" if v >= 80 else "moist soil" if v >= 50 else "drying soil" if v >= 25 else "dry soil")
+    return ("The soil percentage is the probe's own scale, not the share of water in the soil: 0 % is what the probe "
+            "reads held in dry air and 100 % what it reads standing in water, with a straight line in between (a "
+            "lower raw number is wetter). So, for example, " + ex + " % means the probe reads " + ex + " % of the way "
+            "from air to water - " + feel + " around the probe, which sits several centimetres down; the surface dries first. "
+            "Each plant's target band is on this same scale." +
+            (("\n\nCalibration points: " + "; ".join(cal) + ".") if cal else ""))
+
+
+CALIB_Q = re.compile(r"(?i)\b(calibrat\w*|accurate|reading (right|wrong|correctly)|probe (right|wrong|ok|working))\b")
+
+
+def calibration_reply(hive, n):
+    """ "Is the larkspur's probe calibrated right?" got "yes, 88 % is within its band" (it isn't, and
+    that isn't what calibration means)."""
+    c = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
+    dry, wet = c.get("soil_dry"), c.get("soil_wet")
+    name = n.get("name") or "node %s" % n["id"]
+    sid = (((hive.kinds().get(n.get("kind")) or {}).get("derived") or {}).get("soil") or {}).get("from")
+    if dry is None or wet is None or sid is None:
+        return "%s's probe has no calibration yet: set its dry (air) and wet (water) points on the admin page." % name
+    raw = (n.get("slots") or {}).get(str(sid))
+    try:
+        ex = hive.call("GET", "/api/extremes", {"node": n["id"], "slot": int(sid), "days": 7}) or {}
+    except RuntimeError:
+        ex = {}
+    lo, hi = (ex.get("min") or {}).get("value"), (ex.get("max") or {}).get("value")
+    out = ["%s's probe is calibrated with dry (air) = raw %s and wet (water) = raw %s; it reads raw %s now (%s)." % (
+        name, dry, wet, raw, derived(hive, n).get("Soil moisture"))]
+    if lo is not None and lo < wet:
+        out.append("This week it held a reading of raw %s, wetter than its water point, so it pegs at 100 %% then: "
+                   "the wet point may be set too dry. \"Wettest as wet\" on the admin page's Settings fixes that." % lo)
+    elif hi is not None and hi > dry:
+        out.append("This week it held raw %s, drier than its air point, so it pegs at 0 %% then: the dry point may be "
+                   "off. \"Driest as dry\" on the admin page's Settings fixes that." % hi)
+    else:
+        out.append("This week its held readings stayed between raw %s and %s, inside its two points, so the "
+                   "calibration is consistent." % (lo, hi) if lo is not None else
+                   "There's no week of held readings to check it against yet.")
+        out.append("Calibration only fixes the ends of the scale: it can't tell whether the soil is as wet as it "
+                   "reads. To check, push a finger or a skewer 5-8 cm down next to the probe.")
+    return " ".join(out)
+
+
+DEW_Q = re.compile(r"(?i)\b(will there be|is there going to be|any|expect|chance of|will it be)\b[^?]{0,20}\b(dew|fog|foggy|mist|"
+                   r"misty|condensation)\b|\b(dew|fog)\b[^?]{0,20}\b(tonight|tomorrow|morning)\b")
+
+
+def dew_point_value(hive, st):
+    wx = weather_node(st)
+    if not wx:
+        return None
+    r = readings(hive, wx)
+    pick = lambda lbl: next((v for k, v in r.items() if k.startswith(lbl + " (")), None)  # noqa: E731
+    t, rh = pick("Air temperature"), pick("Humidity")
+    try:
+        t, rh = float(str(t).split()[0]), float(str(rh).split()[0])
+    except (TypeError, ValueError):
+        return None
+    if not 0 < rh <= 100:
+        return None
+    g = math.log(rh / 100.0) + 17.62 * t / (243.12 + t)
+    return 243.12 * g / (17.62 - g), t, rh
+
+
+def dew_reply(hive, st, q):
+    dp = dew_point_value(hive, st)
+    if not dp:
+        return None
+    td, t, rh = dp
+    fc = (hive.call("GET", "/api/forecast") or {}).get("models") or {}
+    t0, t1, label = forecast_window("tonight" if not re.search(r"(?i)\btomorrow\b", q) else q)
+    lows = [min(v for ts, v in m.get("temp") or [] if t0 <= ts < t1) for m in fc.values()
+            if any(t0 <= ts < t1 for ts, v in m.get("temp") or [])]
+    head = ("Dew forms when the air cools to its dew point. Right now the air is %s at %.0f %% humidity, so the dew "
+            "point is %s." % (c_f(t), rh, c_f(td)))
+    if not lows:
+        return head + " There's no forecast low to compare it with yet."
+    lo = min(lows)
+    gap = lo - td
+    verdict = ("dew is likely - the forecast low of %s is at or below the dew point." % c_f(lo) if gap <= 0.5 else
+               "dew is possible, especially on grass and leaves - the forecast low of %s is within about %.0f °C of "
+               "the dew point." % (c_f(lo), gap) if gap <= 2.5 else
+               "dew is unlikely - the forecast low of %s stays about %.0f °C above the dew point (unless the air dries "
+               "or cools more than forecast)." % (c_f(lo), gap))
+    return "%s For %s: %s" % (head, label, verdict)
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not QUESTIONISH.search(q) or COMMAND.search(q):
@@ -2713,7 +2939,8 @@ def scrub_tool_talk(answer):
     chat's own, not the person's. Such sentences go, with a "do that?" question after one."""
     names = "|".join(re.escape(t) for t in TOOLS)
     pat = re.compile(r"(?i)[ \t]*[^.!?\n]*\b(you can use|you could use|use the|I will call|I'll call|call the|"
-                     r"run the|try the|using the|with the|via the|through the|I can call|I could call|I can run|I could run|call that|run that)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
+                     r"run the|try the|using the|with the|via the|through the|I can call|I could call|I can run|I could run|call that|run that|"
+                     r"use|using)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
     # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
@@ -2750,6 +2977,45 @@ def plain_math(text):
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 
 
+CORRECTION = re.compile(r"(?i)^\W*(sorry|oops|no|nope|wait|actually|my bad|whoops)?\W*(i meant|i mean|meant|i said the "
+                        r"wrong|wrong (one|plant|node)|not the [\w ]+?[,.]? ?(i meant |the |it's |its )?|make (it|that) the)\b")
+
+
+def corrected_request(nodes, q):
+    """ "water the rhubarb 50 ml" / "sorry I meant the larkspur": the model answered with a made-up
+    "you answered no to... Larkspur". The earlier request, redone for the node meant."""
+    # "no, the cactus": a short reply that only names another node
+    short = re.match(r"(?i)^\W*(no|nope|sorry|oops|whoops|actually)\W+(the |node )?[\w ]{1,25}\W*$", q) and len(q.split()) <= 5
+    if not (CORRECTION.search(q) or short) or len(SAID) < 2:
+        return None
+    keep = SAID[:]
+    try:
+        SAID[:] = [q]
+        new = [n for n in nodes if named_by_person(n)]
+        prev = None
+        for x in reversed(keep[:-1]):          # the last message that named a node, question or request
+            SAID[:] = [x]
+            old = [n for n in nodes if named_by_person(n)]
+            if old:
+                prev = x
+                break
+        if not prev:
+            return None
+    finally:
+        SAID[:] = keep
+    # "not the rhubarb, the larkspur": the one to drop is named too
+    new = [n for n in new if n not in old] or new
+    if len(new) != 1 or len(old) != 1 or new[0]["id"] == old[0]["id"]:
+        return None
+    o, n = old[0], new[0]
+    name = n.get("name") or "node %d" % n["id"]
+    out = prev
+    if o.get("name"):
+        out = re.sub(r"(?i)\b%s\b" % re.escape(o["name"]), name, out)
+    out = re.sub(r"(?i)\bnode\s*#?%d\b" % o["id"], name, out)
+    return out if out != prev else None
+
+
 def ask(hive, messages, q, on_tool=None):
     """One question: refresh the snapshot, then let the model call tools until it answers."""
     messages[0] = system_with_snapshot(hive)
@@ -2762,6 +3028,10 @@ def ask(hive, messages, q, on_tool=None):
     except RuntimeError:
         st = {}
     nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
+    q2 = corrected_request(nodes, q)
+    if q2:
+        q = q2
+        SAID[-1] = q
     fixed = None
     if FORECAST_Q.search(q) and not COMMAND.search(q) and not (
             re.search(r"(?i)\b(were|was|did|has|have|had|been|yesterday|last (night|week)|so far|ago)\b", q) and
@@ -2807,6 +3077,27 @@ def ask(hive, messages, q, on_tool=None):
             fixed = "At the %s, %s: high %s, low %s, average %s.%s" % m2.groups()
         elif t and t.startswith("AIR TEMPERATURE") and "only began" in t:
             fixed = t.replace("AIR TEMPERATURE at the", "At the", 1)
+    if not fixed and not COMMAND.search(q) and QUESTIONISH.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            named3 = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        try:
+            if RAIN_PREMISE.search(q) and re.search(r"(?i)\b(water|skip|need)\w*", q):
+                fixed = rain_premise_reply(hive, st, q)
+            elif BATTERY_LIFE_Q.search(q) and len(named3) == 1:
+                fixed = battery_reply(hive, named3[0])
+            elif PERCENT_Q.search(q):
+                fixed = percent_reply(hive, st, [n for n in named3 if n.get("kind") != "WeatherNode"], q)
+            elif CALIB_Q.search(q) and len(named3) == 1 and (named3[0].get("derived") or {}).get("soil") is not None \
+                    and not re.search(r"(?i)\b(pump|flow)\b", q):
+                fixed = calibration_reply(hive, named3[0])
+            elif DEW_Q.search(q):
+                fixed = dew_reply(hive, st, q)
+        except RuntimeError:
+            fixed = None
     if not fixed and PUMP_TIME_Q.search(q) and not COMMAND.search(q) and not REQUEST.search(q):
         # Answered here: 200 ml at 95 ml/min came back as "2 minutes and 16 seconds".
         keep = SAID[:]
@@ -2974,6 +3265,12 @@ def ask(hive, messages, q, on_tool=None):
             else:
                 why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
                 answer = "Nothing was changed%s." % (": " + why if why else "")
+    if not any(isinstance(r, dict) and "you answered no" in str(r.get("say", "")) for _, r in writes):
+        # "You answered no to: pump 50 ml on Larkspur" when no card was shown this turn: copied from
+        # an earlier turn's refusal. Those sentences go.
+        cut = re.sub(r"(?i)[^.!?\n]*\b(you answered no|you (declined|said no)|you decided not)\b[^.!?\n]*[.!?]?\s*", "", answer).strip()
+        if cut != answer:
+            answer = cut or "Nothing was sent this time - no card was shown."
     says = [r["say"] for _, r in writes if isinstance(r, dict) and r.get("say")]
     if says and not any(isinstance(r, dict) and (r.get("sent") or r.get("awaiting_approval")) for _, r in writes):
         # A refusal whose outcome is fixed: its own words, not the model's retelling.

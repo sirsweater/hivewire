@@ -930,5 +930,32 @@ if _flow:
           out["answer"])
 C.pump_flow = _pf
 
+# Round 3: corrections, overnight, card notes, made-up refusals.
+_nodes = [{"id": 5, "name": "Rhubarb"}, {"id": 7, "name": "Larkspur"}]
+_keep = C.SAID[:]
+for _prev, _q, _want in [("water the rhubarb 50 ml", "sorry I meant the larkspur", "water the Larkspur 50 ml"),
+                         ("how wet is the rhubarb?", "no, the larkspur", "how wet is the Larkspur?"),
+                         ("give node 5 a cup", "oops I meant node 7", "give Larkspur a cup"),
+                         ("water the rhubarb 50 ml", "no thanks", None), ("water the rhubarb 50 ml", "thanks", None)]:
+    C.SAID[:] = [_prev, _q]
+    check(C.corrected_request(_nodes, _q) == _want, "correction %r after %r -> %r" % (_q, _prev, _want),
+          C.corrected_request(_nodes, _q))
+C.SAID[:] = ["what happened overnight?"]
+check(C.asked_window("yesterday") == "last night" and C.asked_window(None) == "last night",
+      "'overnight' looks at last night whatever day the model passes")
+C.SAID[:] = ["what happened yesterday?"]
+check(C.asked_window("yesterday") == "yesterday", "...and only then")
+C.SAID[:] = _keep
+_long = ("    ! KNOWN ISSUE: PUMP NOT TRUSTED: on 2026-10-05 the pump ran continuously while the firmware said it was off "
+         "(pin 4 low, state idle, survived a reboot). Likely the MOSFET module failed shorted. Cause not yet found.")
+check(C.card_note(_long).endswith("survived a reboot)") and C.card_note("  ! soil is already 79.0 % against a 30-55 % target")
+      == "soil is already 79.0 % against a 30-55 % target", "a card's warning is cut to its first sentence, no '..'")
+conv = C.Conversation()
+fake_llm.calls.clear()
+script[:] = [say("You answered no to: pump 50 ml on node %d. The soil is fine." % pump["id"])]
+out = conv.ask(hive, "how is node %d doing?" % pump["id"])
+check("answered no" not in out["answer"] and "soil is fine" in out["answer"],
+      "a refusal no tool gave this turn is cut from the answer", out["answer"])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
