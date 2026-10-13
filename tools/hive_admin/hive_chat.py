@@ -3098,8 +3098,9 @@ def scrub_tool_talk(answer):
                      r"use|using)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
-    # "(can be watered with `water_now`)"
+    # "(can be watered with `water_now`)", "**Tool: `water_now`**"
     out = re.sub(r"\s*\([^()\n]*`?\b(%s)\b`?[^()\n]*\)" % names, "", out)
+    out = re.sub(r"(?i)\*{0,2}\s*tool:?\s*`?(%s)`?\s*\*{0,2}:?\s*" % names, "", out)
     # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
     out = re.sub(r"(?im)^[ \t>*_`-]*(%s)\b[^\n]{0,60}$\n?" % names, "", out)
     # "I can check the current status using a tool. Would you like me to do that?" - it can just check.
@@ -3518,6 +3519,9 @@ def no_card_offers(answer):
          r"[\"'“]y[\"'”]\s*(\(yes\))?\s*or\s*[\"'“]n[\"'”])[^.!?\n]*[.!?]?", ""),
         # once after a refused -50 ml: "Let's try a smaller amount, say -200 ml."
         (r"(?i)[ \t]*[^.!?\n]*\b(try|say|suggest|instead|how about)\b[^.!?\n]*(?<![\w.])-\d+ ?ml\b[^.!?\n]*[.!?]?", ""),
+        # " If so, I will need your confirmation before proceeding." with no card
+        (r"(?i)[ \t]*[^.!?\n]*\b(need your (confirmation|approval|go-ahead)|confirm(ation)? before proceeding|if so, (i|we) "
+         r"(will|can|could))\b[^.!?\n]*[.!?]?", ""),
         # "I will set the pump flow to 1 ml/min" with no card
         (r"(?i)[ \t]*[^.!?\n]*\bI('ll| will| am going to|'m going to) (now |go ahead and )?(set|water|change|turn|"
          r"start|send|update|adjust|reboot|rename|stop)\b[^.!?\n]*[.!?]?", ""),
