@@ -1038,5 +1038,12 @@ check("can't delete" in out["answer"] and not fake_llm.calls, "a request to dele
 check(C.TREND_Q.search("show me the larkspur's soil over the week") and not C.TREND_Q.search("how wet is the larkspur?"),
       "trend questions are recognised")
 
+# Errors from the nodes' own counts, in code.
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "what errors have there been this week?")
+check(out["answer"].startswith("Each node counts its own errors") and not fake_llm.calls, "the errors question is answered from the counts",
+      out["answer"][:200])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

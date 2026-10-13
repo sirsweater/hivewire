@@ -2870,6 +2870,27 @@ def trend_reply(hive, n, q):
         "; its band is %s-%s %%" % tuple(band) if band else ""))
 
 
+def errors_reply(hive, st, named):
+    """ "What errors have there been this week?" - given each node's count it still said "no specific errors"
+    (it had read the event log). Written from the nodes' own counts and the hive's problem log."""
+    t = errors_fact(hive, st, named)
+    m = re.match(r"ERRORS, from each node's own count \(.*?\)\. WITH ERRORS: (.*?)\. NO ERRORS: (.*?) - don't give these any "
+                 r"error\. Problems active now: (.*?)\. Errors in the hive's log: (.*)\.$", t or "", re.S)
+    if not m:
+        return None
+    with_, without, active, log = m.groups()
+    lines = ["Each node counts its own errors since it last started:"]
+    if with_ != "none":
+        lines += ["- %s" % x.strip() for x in with_.split("; ")]
+    if without != "none":
+        lines.append("- No errors: %s." % without)
+    lines.append("Problems active right now: %s. In the hive's own log: %s." % (active, log))
+    if "E104" in with_:
+        lines.append("E104 means the link to the hive dipped below -90 dBm at times - worth a closer relay if it keeps "
+                     "climbing, harmless otherwise.")
+    return "\n".join(lines)
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3617,6 +3638,21 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = trend_reply(hive, tn[0], q)
             except RuntimeError:
                 fixed = None
+    if not fixed and ERRORS_Q.search(q) and is_question(q) and not COMMAND.search(q) and not re.search(
+            r"(?i)\bE\d{3}\b|\berror code\b|\bwhat does\b|\bmean\b", q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            en = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        plant_q = any((n.get("derived") or {}).get("soil") is not None for n in en) and not re.search(
+            r"(?i)\b(errors?|faults?|warnings?|codes?)\b", q)
+        try:
+            # ("any problems with the larkspur?" is about the plant too - its soil - so the model answers that one)
+            fixed = None if plant_q else errors_reply(hive, st, en)
+        except RuntimeError:
+            fixed = None
     if not fixed and DELETE_Q.search(q):
         fixed = DELETE_REPLY
     if not fixed and DRY_RATE_Q.search(q) and is_question(q) and not COMMAND.search(q):
