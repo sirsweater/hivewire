@@ -918,6 +918,8 @@ check(_utc[0] in ("03:42", "03:43", "03:44") and _utc[1] in ("20:20", "20:21", "
 check(C.SUN_Q.search("what time is sunset today?") and not C.SUN_Q.search("water the larkspur"), "...asked as sunset")
 
 # Pump time is arithmetic: answered in code, the model never asked (it once said 2 min 16 s for 126 s).
+_pf = C.pump_flow
+C.pump_flow = lambda h, n: 95 if n["id"] == pump["id"] else _pf(h, n)   # the simulated pump reports no flow
 _flow = C.pump_flow(hive, pump)
 if _flow:
     conv = C.Conversation()
@@ -926,6 +928,7 @@ if _flow:
     out = conv.ask(hive, "how long would node %d's pump take to deliver 200 ml?" % pump["id"])
     check(not fake_llm.calls and "(%d seconds)" % _secs in out["answer"], "pump time worked out in code, no model call",
           out["answer"])
+C.pump_flow = _pf
 
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
