@@ -3419,8 +3419,10 @@ def focus_facts(hive, q):
         w = ["%s = slot %s" % (sp.get("label"), sid) for sid, sp in
              ((hive.kinds().get(kind) or {}).get("slots") or {}).items()
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
+        # (not when the same message asks for water: "it's bone dry... water it 200 ml" then got no card at all)
         if FEELS_DRY.search(q) and not re.match(r"(?i)\s*(is|are|does|do|how|what|which|when)\b", q) and \
-                (n.get("derived") or {}).get("soil") is not None and not SYMPTOM.search(q):
+                (n.get("derived") or {}).get("soil") is not None and not SYMPTOM.search(q) and not (
+                    REQUEST.search(q) and re.search(r"(?i)\b(water|pump|give)\b|\bml\b|\bcups?\b", q)):
             sv = f.get("soil_vs_target", "")
             if not (sv.startswith("TOO DRY") or sv.endswith("near the dry end")):
                 out.append("FEELS DRY TO THE PERSON, but the probe reads %s (%s). The surface dries first; the probe "
