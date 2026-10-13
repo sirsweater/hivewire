@@ -342,6 +342,16 @@ VAGUE_AMOUNT = re.compile(r"(?i)\b(a few|few|several|some|a bit of|a little|a lo
                           % "|".join(u for u, _, _ in UNITS[:-2]))
 
 
+def nice_qty(n):
+    """1/3, 1 1/2, 2 - not 0.333333 (a card read "pump 79 ml (0.333333 US cup)")."""
+    from fractions import Fraction
+    f = Fraction(n).limit_denominator(8)
+    if abs(float(f) - n) > 0.01 or f.denominator not in (2, 3, 4, 8):
+        return "%g" % n
+    whole, rest = divmod(f.numerator, f.denominator)
+    return ("%d %d/%d" % (whole, rest, f.denominator)) if whole else "%d/%d" % (rest, f.denominator)
+
+
 def vague_amount(q):
     """ "a few cups" with no amount in ml beside it, or None."""
     m = VAGUE_AMOUNT.search(q)
@@ -392,7 +402,7 @@ def stated_ml(q, flow=None):
                     break
                 found.add((int(round(n * per * flow)), "%g %s at %s ml/min" % (n, name, flow)))
             else:
-                found.add((int(round(n * per)), "%g %s%s" % (n, name, "s" if n > 1 and not name.endswith("oz") else "")))
+                found.add((int(round(n * per)), "%s %s%s" % (nice_qty(n), name, "s" if n > 1 and not name.endswith("oz") else "")))
             break
     return found.pop() if len(found) == 1 else None
 
@@ -442,7 +452,7 @@ def amounts_by_node(hive, q):
         unit = next(((per, name) for pat, per, name in UNITS if re.fullmatch(pat, m.group(2), re.I)), None)
         if unit and unit[0] > 1.0:          # volumes only; pump time needs each node's own flow
             v = amount_number(m.group(1)) + ((0.5 if "half" in m.group(3).lower() else 0.25) if m.group(3) else 0)
-            amounts.append((m.start(), v * unit[0], "%g %s%s" % (v, unit[1], "s" if v > 1 and not
+            amounts.append((m.start(), v * unit[0], "%s %s%s" % (nice_qty(v), unit[1], "s" if v > 1 and not
                                                                unit[1].endswith("oz") else "")))
     amounts.sort()
     ids = list(dict.fromkeys(i for _, i in mentions))
@@ -1067,6 +1077,12 @@ def t_water_now(hive, node, ml):
                 % vague_amount(said)}
     spec = hive.slot_spec(kind, 40)
     cap = (n.get("slots") or {}).get("43")
+    if cap and ml > int(cap) and ml >= 1:
+        # (10 litres had come back as "the maximum allowed per watering is 5000 ml" - the input range, not the cap)
+        return {"sent": False, "reason": "%d ml is over %s's per-watering limit of %s ml; the node would refuse it "
+                "(E306)" % (ml, name, cap), "say": "%d ml is more than %s's limit of %s ml per watering, so the node "
+                "would refuse it (E306) - nothing was sent. Ask for %s ml or less, or raise the limit (Max per "
+                "watering) first." % (ml, name, cap, cap)}
     if not 1 <= ml <= spec.get("max", 0):
         return {"sent": False, "reason": "amount must be 1..%s ml" % spec.get("max")}
     if cap and ml > cap:
@@ -3325,6 +3341,15 @@ FLOW_WRONG = re.compile(r"(?i)\bflow\b[^.?!]*\b(wrong|off|incorrect|inaccurate|n
 # wrong often enough (going along with a fake "override", answering a forecast
 # question with past rain) that a fixed reply is the reliable one.
 FIXED_REPLIES = [
+    # Other assistants' jobs ("what should I cook for dinner?" got "soup, since your plants are too wet").
+    (re.compile(r"(?i)^(?!.*\b(water\w*|pump\w*|stop|reboot|rename|set|soil|node|probe|sensor)\b).*\b(cook|recipe|dinner|lunch|"
+                r"breakfast|bake|baking|meal)\b"),
+     "Recipes are the kitchen assistant's job (the `recipes` bot on the devbox) - this chat runs the garden's sensors "
+     "and pumps."),
+    (re.compile(r"(?i)\bwhen (should|do|can|could) (i|we) (plant|sow|transplant|start)\b|\bcompanion plant|\bwhat (can|should) "
+                r"(i|we) (plant|grow|sow)\b|\bhow far apart\b|\bdays to harvest\b"),
+     "Planting dates, spacing and companions are the plant assistant's job (the `plants` bot on the devbox, which has "
+     "this garden's frost dates) - this chat runs the garden's sensors and pumps."),
     (re.compile(r"(?i)(system override|maintenance mode|approval (is )?(disabled|off)|developer mode|admin mode|"
                 r"ignore (all |your |the )?(previous|prior|above) (instructions|rules))"),
      "There's no override or maintenance mode here, and approval can't be switched off from a chat message: "
@@ -3658,6 +3683,10 @@ def ask(hive, messages, q, on_tool=None):
             fixed = "At the %s - %s" % ((weather_node(st) or {}).get("name") or "weather station", " ".join(
                 h.replace(" (use these numbers)", "").replace("Wind (2-min average)", "Wind (2-minute average)")
                 .replace("Gust (10 min)", "Gusts") for h in hist))
+            if re.search(r"(?i)\bmph\b|miles", q):
+                # "today's strongest gust in mph" came back in km/h
+                fixed = re.sub(r"(\d+(?:\.\d+)?) km/h", lambda m_: "%.1f mph (%s km/h)" % (float(m_.group(1)) * 0.621371,
+                                                                                         m_.group(1)), fixed)
             if "Gust" in fixed or "Wind" in fixed:
                 fixed += " (A gust is the strongest 10-minute burst; the wind figure is a 2-minute average.)"
     if not fixed and TREND_Q.search(q) and not COMMAND.search(q):

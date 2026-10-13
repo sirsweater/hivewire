@@ -1045,5 +1045,11 @@ out = conv.ask(hive, "what errors have there been this week?")
 check(out["answer"].startswith("Each node counts its own errors") and not fake_llm.calls, "the errors question is answered from the counts",
       out["answer"][:200])
 
+# Other assistants' questions are pointed there; a garden request that mentions dinner isn't.
+check(any(p.search("what should I cook for dinner?") for p, a in C.FIXED_REPLIES) and
+      not any(p.search("water node 7 after dinner") and "kitchen" in a for p, a in C.FIXED_REPLIES),
+      "recipe questions go to the kitchen assistant, watering requests don't")
+check(C.nice_qty(1 / 3.0) == "1/3" and C.nice_qty(0.4) == "0.4", "amounts on a card read 1/3, not 0.333333")
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
