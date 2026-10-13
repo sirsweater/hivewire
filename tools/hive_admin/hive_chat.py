@@ -4356,6 +4356,14 @@ class Conversation:
 
     def ask(self, hive, q):
         global confirm
+        live = {k: v for k, v in self.pending.items() if time.time() - v["t"] <= self.PENDING_TTL}
+        if live and DID_IT_Q.search(q) and not COMMAND.search(q):
+            # "Did it work?" with the card still waiting got "no events... it was not sent or did not result in any action"
+            answer = "Not yet - %s waiting for you to press Confirm: %s. Nothing goes out until you do." % (
+                "this card is" if len(live) == 1 else "these cards are",
+                "; ".join(v["summary"].split("\n")[0] for v in live.values()))
+            self.messages += [{"role": "user", "content": q}, {"role": "assistant", "content": answer}]
+            return {"answer": answer, "pending": []}
         with Conversation.LOCK:
             new = []
 

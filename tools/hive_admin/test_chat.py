@@ -1089,5 +1089,13 @@ script[:] = [say("Done.")]
 out = conv.ask(hive, "start seed mode on node %d, 10 ml every 12 hours" % pump["id"])
 check("admin page" in out["answer"] and "is off on every node" not in out["answer"], "...a request to start seed mode gets the admin-page answer", out["answer"])
 
+# "Did it work?" while the card still waits for Confirm (the Pi's web chat).
+conv = C.Conversation()
+conv.pending["w9"] = {"summary": "pump 30 ml on Larkspur (node 7)\n    ! soil is wet", "path": "/x", "body": {}, "t": __import__("time").time()}
+fake_llm.calls.clear()
+out = conv.ask(hive, "did it work?")
+check(out["answer"].startswith("Not yet") and "pump 30 ml on Larkspur (node 7)" in out["answer"] and not fake_llm.calls,
+      "'did it work?' with a card still waiting says it's waiting for Confirm", out["answer"])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
