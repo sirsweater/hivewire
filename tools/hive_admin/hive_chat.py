@@ -687,7 +687,9 @@ def t_slot_history(hive, node, slot, hours=24, day=None):
         label = "Soil moisture (calibrated %)"
     out = {"node": node, "slot": slot, "label": label, "window": window,
            "resolution": res, "overall": {"min": f(min(x["min"] for x in rows)),
-                                          "max": f(max(x["max"] for x in rows))}}
+                                          "max": f(max(x["max"] for x in rows)),
+                                          # "what was the average yesterday?": the mean of the hourly averages
+                                          "average": f(sum(x["avg"] for x in rows) / float(len(rows)))}}
     # "Yesterday's high" out of a 48-hour window: the overall max may be today's,
     # and the thinned-out points can skip the hour it happened in.
     days = {}
@@ -1404,8 +1406,9 @@ def reservoir_hint(hive):
     r = reservoirs(hive)
     if not r:
         return None
+    # ("say exactly that" came back word for word in the answer)
     return ("RESERVOIRS: %s. \"no float switch\" means the hive CANNOT tell whether that reservoir is empty or "
-            "full - say exactly that, and never call it empty, full or low. \"EMPTY\" means its float switch "
+            "full, or how much is in it; never call it empty, full or low. \"EMPTY\" means its float switch "
             "reports no water." % "; ".join("%s: %s" % kv for kv in r.items()))
 
 
@@ -1532,6 +1535,7 @@ def relay_hint(hive):
 
 # Hints keyed on what the question is about, placed beside it like focus_facts.
 TEMP_EXTREME = re.compile(r"(?i)\b(high|highs|low|lows|max(imum)?|min(imum)?|hottest|coldest|warmest|coolest|peak|"
+                          r"average|mean|avg|how (warm|hot|cold|cool) did|"
                           r"freez\w*|froze|frost\w*|"
                           r"how (hot|cold|warm|cool|chilly)\b[^?]{0,20}\b(get|got|was|did|were|been))\b")
 DAY_WORD = re.compile(r"(?i)\b(today|yesterday|last night|overnight|this week|last 7 days|past week|"
@@ -1590,6 +1594,9 @@ def firmware_fact(hive, st, named):
 def temp_extremes(hive, q):
     """A day's high and low air temperature, worked out here: asked "what was the high
     yesterday?", the model searched the event log and then said the station has no thermometer."""
+    if TEMP_EXTREME.search(q) and re.search(r"(?i)\bsoil\b", q) and (TEMP_WORD.search(q) or re.search(
+            r"(?i)how (warm|hot|cold|cool)", q)):
+        return soil_temp_extremes(hive, q)
     if not TEMP_EXTREME.search(q) or re.search(r"(?i)\bsoil\b", q) or not (
             TEMP_WORD.search(q) or (re.search(r"(?i)\b(high|low)\b", q) and DAY_WORD.search(q)
                                     and not OTHER_READING.search(q))):
@@ -1621,8 +1628,33 @@ def temp_extremes(hive, q):
         frost = (" It went below 0 °C, so yes, it froze." if low <= 0 else
                  " The low stayed above 0 °C, so it did NOT freeze%s." % (
                      " (but under 3 °C, frost is possible on plants and surfaces)" if low < 3 else ""))
-    return ("AIR TEMPERATURE at the %s, %s: high %s, low %s (from its hourly readings; use these numbers).%s" % (
-        wx.get("name") or "weather station", r.get("window", day), r["overall"]["max"], r["overall"]["min"], frost))
+    return ("AIR TEMPERATURE at the %s, %s: high %s, low %s, average %s (from its hourly readings; use these "
+            "numbers).%s" % (wx.get("name") or "weather station", r.get("window", day), r["overall"]["max"],
+                             r["overall"]["min"], r["overall"]["average"], frost))
+
+
+def soil_temp_extremes(hive, q):
+    """ "How warm did the rhubarb's soil get today?" got the reading now."""
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in hive.call("GET", "/api/state").get("nodes", []) if not n.get("hidden") and named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    m = DAY_WORD.search(q)
+    day = m.group(1).lower() if m else "today"
+    if day in ("this week", "last 7 days", "past week"):
+        day = "today"
+    out = []
+    for n in named:
+        sid = slot_by_label(hive, n.get("kind"), "Soil temperature")
+        if sid is None:
+            continue
+        r = t_slot_history(hive, str(n["id"]), sid, day=day)
+        if "overall" in r:
+            out.append("%s: high %s, low %s, average %s" % (n.get("name") or "node %s" % n["id"], r["overall"]["max"],
+                                                           r["overall"]["min"], r["overall"]["average"]))
+    return ("SOIL TEMPERATURE (probe in the pot), %s: %s. Use these numbers." % (day, "; ".join(out))) if out else None
 
 
 TOPIC_HINTS = [
@@ -2079,6 +2111,148 @@ def warmer_fact(hive, st, q):
                                              "higher" if d > 0 else "lower" if d < 0 else "the same", abs(d), unit))
 
 
+# --- answered in code: plain lookups the model kept getting wrong (probe set hive2) ----------
+NOW_WORD = re.compile(r"(?i)\b(now|right now|currently|at the moment|outside|out there|today)\b|\bis it\b|"
+                      r"\bwhich way\b|\bhow (humid|windy|hot|cold|warm)\b")
+
+
+def weather_now_reply(hive, st, q):
+    """Current conditions at the station, for the parts the question asks about. "Which way is the
+    wind blowing?" got "calm" at 1.9 km/h from the east."""
+    wx = weather_node(st)
+    if not wx or DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) or FORECAST_Q.search(q):
+        return None
+    r = readings(hive, wx)
+    pick = lambda lbl: next((v for k, v in r.items() if k.startswith(lbl + " (")), None)  # noqa: E731
+    ok = lambda v: v is not None and not str(v).startswith(("NO READING", "invalid"))  # noqa: E731
+    num = lambda v: float(str(v).split()[0])  # noqa: E731
+    mph = bool(re.search(r"(?i)\bmph\b|miles", q))
+    spd = lambda v: "%.1f mph" % (num(v) * 0.621371) if mph else v  # noqa: E731
+    parts = []
+    if re.search(r"(?i)\bhumid", q) and ok(pick("Humidity")):
+        parts.append("humidity is %s" % pick("Humidity"))
+    if re.search(r"(?i)\b(temp\w*|hot|cold|warm|cool|degrees|fahrenheit|celsius)\b", q) and ok(pick("Air temperature")):
+        c = num(pick("Air temperature"))
+        parts.append("the air is %.1f °C (%.0f °F)" % (c, c * 9 / 5.0 + 32))
+    if re.search(r"(?i)\bwind\w*|breez\w*|gust\w*|which way\b", q):
+        w, g, d = pick("Wind (2-min average)"), pick("Gust (10 min)"), pick("Wind direction")
+        if ok(w):
+            calm = num(w) < 1
+            parts.append("the wind is %s%s%s" % (
+                "calm (%s)" % spd(w) if calm else spd(w) + " (2-minute average)",
+                ", gusting to %s in the last 10 minutes" % spd(g) if ok(g) else "",
+                ", from the %s" % re.search(r"from the (\w+)", str(d)).group(1) + " (%s)" % str(d).split()[0]
+                if ok(d) and re.search(r"from the (\w+)", str(d)) and not calm else ""))
+    if re.search(r"(?i)\brain\w*|drizzl|pouring|wet out", q) and ok(pick("Rain, last hour")):
+        rv = pick("Rain, last hour")
+        parts.append("%s - %s in the last hour" % ("it is NOT raining" if num(rv) == 0 else "it IS raining", rv))
+    if not parts:
+        return None
+    s = "; ".join(parts)
+    return "At the %s right now, %s." % (wx.get("name") or "weather station", s)
+
+
+RAIN_RECORD_Q = re.compile(r"(?i)\b(when|last time)\b[^?]*\brain\w*|\brain\w*\b[^?]*\b(this|last|past) (month|year|"
+                           r"\d+ days)|\bhow much rain\b[^?]*\b(month|year|since|so far|total)\b")
+
+
+def rain_record_reply(hive, st, q):
+    wx = weather_node(st)
+    if not wx:
+        return None
+    sid = slot_by_label(hive, wx["kind"], "Rain gauge tips")
+    if sid is None:
+        return None
+    t1 = int(time.time())
+    rows = (hive.call("GET", "/api/rollup", {"node": wx["id"], "slot": int(sid), "res": "day", "from": t1 - 400 * 86400,
+                                             "to": t1}) or {}).get("rows") or []
+    if not rows:
+        return None
+    up = (hive.kinds().get(wx["kind"]) or {}).get("weather_upload") or {}
+    mm = next((sc for s_, how, sc in up.values() if s_ == int(sid) and how == "sum"), None) or 0.2794
+    first = time.strftime("%b %d", time.localtime(rows[0]["ts"]))
+    wet = [x for x in rows if (x.get("sum") or 0) > 0]
+    lt = time.localtime()
+    month0 = time.mktime((lt.tm_year, lt.tm_mon, 1, 0, 0, 0, 0, 0, -1))
+    month = sum((x.get("sum") or 0) for x in rows if x["ts"] >= month0) * mm
+    if not wet:
+        return ("The %s hasn't recorded any rain since its records begin (%s) - %d days with none. So none this "
+                "month either." % (wx.get("name") or "weather station", first, len(rows)))
+    last = wet[-1]
+    return ("The last rain at the %s was on %s: %.1f mm that day. This month so far: %.1f mm. (Records begin %s.)" % (
+        wx.get("name") or "weather station", time.strftime("%a %b %d", time.localtime(last["ts"])),
+        last["sum"] * mm, month, first))
+
+
+URGENT_Q = re.compile(r"(?i)\b(needs?|wants?)\b[^?]*\bwater\w*\b[^?]*\b(most|first|urgent\w*|soonest)\b|\b(thirstiest|most "
+                      r"urgent\w*)\b|\bwhich (plant|pot|one)s?\b[^?]*\bneeds? (water|watering)\b|\bdoes anything need "
+                      r"(water|watering)\b")
+
+
+def urgent_fact(hive, st):
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    rows = []
+    for n in st.get("nodes", []):
+        soil, band = (n.get("derived") or {}).get("soil"), (cfg.get(str(n["id"])) or {}).get("plant_band")
+        if n.get("hidden") or soil is None or not band:
+            continue
+        rows.append((soil - band[0], "%s (node %s): soil %.0f %%, band %s-%s %%, %s; %s" % (
+            n.get("name") or n["kind"], n["id"], soil, band[0], band[1],
+            "BELOW its band - needs water" if soil < band[0] else "above its band - too wet" if soil > band[1]
+            else "inside its band", "has a pump" if has_pump(hive, n.get("kind")) else "NO pump (water it by hand)")))
+    if not rows:
+        return None
+    rows.sort()
+    needy = [r for d, r in rows if d < 0]
+    return ("WHO NEEDS WATER (closest to its dry limit first): %s. %s" % (
+        "; ".join(r for _, r in rows), "Needs water now: %s." % ", ".join(r.split(":")[0] for r in needy) if needy else
+        "NONE needs water now - every plant is at or above the low end of its band."))
+
+
+PREDICT_Q = re.compile(r"(?i)\b(what will|what would|how (wet|high|much) will|where will)\b[^?]*\b(soil|read|reading|be|"
+                       r"moisture)\b|\bif I (water|give|add|pump)\b[^?]*\b(what|how|will)\b")
+
+
+def predict_reply(hive, n, q):
+    a = t_watering_advice(hive, str(n["id"]))
+    name = n.get("name") or "node %s" % n["id"]
+    soil = (n.get("derived") or {}).get("soil")
+    m = re.search(r"(?i)(\d+(?:\.\d+)?)\s*(ml|millilit\w*)\b", q)
+    gain = a.get("soil rise per 10 ml")
+    if soil is None:
+        return None
+    if gain and m:
+        rise = float(gain.split()[0]) * float(m.group(1)) / 10.0
+        return ("From what adaptive watering has learned, 10 ml raises %s's soil about %s, so %s ml would take it from "
+                "%.0f %% to about %.0f %% once it soaks in (a reading can't go past 100 %%). %s" % (
+                    name, gain, m.group(1), soil, min(100, soil + rise), a.get("plant's target band") and
+                    "Its target is %s." % a["plant's target band"] or ""))
+    band = a.get("plant's target band")
+    return ("I can't predict that yet: adaptive watering learns how far a watering lifts %s's soil from its automatic "
+            "waterings, and it has %s. Right now the soil reads %.0f %%%s, so more water would mostly drain through "
+            "rather than raise it much." % (
+                name, re.sub(r"^learning: (\d+ of \d+) automatic waterings seen", r"seen \1 automatic waterings",
+                             a.get("why") or "not seen enough yet"), soil,
+                " - already above its %s target" % band if band and soil > float(band.split("-")[1].split()[0]) else
+                " (target %s)" % band if band else "")) if soil >= 70 else (
+        "I can't predict that yet: adaptive watering hasn't learned how far a watering lifts %s's soil (it learns "
+        "from automatic waterings). The soil reads %.0f %% now%s." % (name, soil, " (target %s)" % band if band else ""))
+
+
+def hand_watering_fact(hive, n):
+    """The Cactus has no pump; "when was it last watered?" can only be a jump in its soil."""
+    pts = soil_series(hive, n, 24 * 14)
+    jumps = [(b[0], a[1], b[1]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10]
+    name = n.get("name") or "node %s" % n["id"]
+    if not jumps:
+        return ("HAND WATERING for %s: it has NO pump, so the hive never waters it. No jump in its soil reading (a sign "
+                "of a hand watering) in the last 14 days." % name)
+    t, a, b = jumps[-1]
+    return ("HAND WATERING for %s: it has NO pump, so the hive never waters it. The last jump in its soil reading - "
+            "a hand watering - was in the hour from %s (local time), from %.0f %% to %.0f %%." % (
+                name, time.strftime("%a %d %b %H:%M", time.localtime(t)), a, b))
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not QUESTIONISH.search(q) or COMMAND.search(q):
@@ -2102,6 +2276,10 @@ def hive_wide_facts(hive, st, named, q):
         t = uptime_fact(hive, st, named)
         if t:
             out.append(t)
+    if URGENT_Q.search(q) and not named:
+        t = urgent_fact(hive, st)
+        if t:
+            out.append(t)
     if ADAPTIVE_Q.search(q) and not WHY_NO_WATER_Q.search(q):
         out.append(ADAPTIVE_FACT)
     cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
@@ -2118,6 +2296,8 @@ def hive_wide_facts(hive, st, named, q):
             t = why_no_water(hive, n)
             if t:
                 out.append(t)
+        if not has_pump(hive, n.get("kind")) and PAST_WATERING.search(q):
+            out.append(hand_watering_fact(hive, n))
         if has_pump(hive, n.get("kind")) and PER_ML_Q.search(q):
             out.append(per_ml_fact(hive, n))
     return out
@@ -2585,6 +2765,25 @@ def ask(hive, messages, q, on_tool=None):
             not re.search(r"(?i)\b(will|going to|gonna|tomorrow|tonight|forecast)\b", q)):
         try:
             fixed = forecast_reply(hive, q)
+        except RuntimeError:
+            fixed = None
+    if not fixed and not COMMAND.search(q) and QUESTIONISH.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            named_now = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        plants_named = [n for n in named_now if n.get("kind") != "WeatherNode"]
+        try:
+            if RAIN_RECORD_Q.search(q) and not plants_named:
+                fixed = rain_record_reply(hive, st, q)
+            elif PREDICT_Q.search(q) and len(plants_named) == 1:
+                fixed = predict_reply(hive, plants_named[0], q)
+            elif WEATHER_Q.search(re.sub(r"(?i)\bweather (station|node)\b", "", q)) and NOW_WORD.search(q) and \
+                    not plants_named and not re.search(r"(?i)\b(firmware|battery|signal|uptime|reboot|pressure|"
+                                                       r"barometer|average|high|low|max|min)\b", q):
+                fixed = weather_now_reply(hive, st, q)
         except RuntimeError:
             fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
