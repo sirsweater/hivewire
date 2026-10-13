@@ -4010,6 +4010,7 @@ def ask(hive, messages, q, on_tool=None):
         return a
     messages.append({"role": "user", "content": q + focus_facts(hive, q)})
     msg, writes, nudged = {}, [], False
+    done_writes = set()
     asking = not REQUEST.search(q)      # a question gets read-only tools
     if SYMPTOM.search(q) and not re.search(r"(?i)\b(water|pump|reboot|restart|reset|set|rename|stop|turn|give)\b", q):
         # "the cactus is dying!!! do something" isn't a request for any one action: it had tried a reboot
@@ -4034,10 +4035,17 @@ def ask(hive, messages, q, on_tool=None):
                 continue
             break
         for call in msg["tool_calls"]:
+            key = (call["function"].get("name"), json.dumps(call["function"].get("arguments"), sort_keys=True, default=str))
             if asking and call["function"].get("name") in WRITES:
                 result = {"sent": False, "reason": "the person asked a question, not for a change - answer it"}
+            elif call["function"].get("name") in WRITES and key in done_writes:
+                # the same card twice in one turn ("water the larkspur 50 ml and the cactus 50 ml" proposed the
+                # Larkspur's twice after the Cactus turned out to have no pump)
+                result = {"sent": False, "reason": "already asked for this exact change this turn - don't ask again"}
             else:
                 result = run_tool(hive, call)
+            if call["function"].get("name") in WRITES:
+                done_writes.add(key)
             if call["function"].get("name") in WRITES:
                 writes.append((call["function"]["name"], result))
             if on_tool:
@@ -4112,6 +4120,9 @@ def ask(hive, messages, q, on_tool=None):
         # "The cactus is dying!!!" got "Would you like to reboot the node?" - not what helps a plant.
         answer = re.sub(r"(?im)^[ \t]*[-*]?[ \t]*\**reboot\**[^\n]*\?[ \t]*$\n?", "", answer)
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(would you like|shall i|should i|do you want)\b[^.!?\n]*\breboot\w*\b[^.!?\n]*\?", "", answer)
+        # "3. **Reboot Node**: Rebooting the node might help" as one of the steps
+        answer = re.sub(r"(?im)^[ \t]*(\d+[.)]|[-*•])[^\n]*\breboot\w*\b[^\n]*$\n?", "", answer)
+        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\breboot\w*\b[^.!?\n]*\b(might|may|could|would) (help|fix|resolve|clear)\b[^.!?\n]*[.!?]?", "", answer)
     try:
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
