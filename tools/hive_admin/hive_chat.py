@@ -3266,9 +3266,20 @@ def ask(hive, messages, q, on_tool=None):
                 why = "; ".join(str(r.get("reason") or r.get("error")) for _, r in writes if isinstance(r, dict))
                 answer = "Nothing was changed%s." % (": " + why if why else "")
     if not any(isinstance(r, dict) and "you answered no" in str(r.get("say", "")) for _, r in writes):
-        # "You answered no to: pump 50 ml on Larkspur" when no card was shown this turn: copied from
-        # an earlier turn's refusal. Those sentences go.
-        cut = re.sub(r"(?i)[^.!?\n]*\b(you answered no|you (declined|said no)|you decided not)\b[^.!?\n]*[.!?]?\s*", "", answer).strip()
+        # "You answered no to: pump 50 ml on Larkspur" when no Larkspur card was ever declined: copied from an
+        # earlier refusal about the Rhubarb. A refusal is kept only if an earlier decline (a tool's words here,
+        # or the page's "the person declined ..." note) names the same plant.
+        before = " ".join(str(m.get("content") or "") for m in messages[:-1] if m.get("role") in ("user", "tool")
+                          and re.search(r"(?i)answered no to|person declined", str(m.get("content") or "")))
+        names = [n.get("name") for n in nodes if n.get("name")]
+
+        def keep_refusal(m):
+            sent = m.group(0)
+            said = [nm for nm in names if re.search(r"(?i)\b%s\b" % re.escape(nm), sent)]
+            ok = bool(before) and (not said or any(re.search(r"(?i)\b%s\b" % re.escape(nm), before) for nm in said))
+            return sent if ok else ""
+        cut = re.sub(r"(?i)[^.!?\n]*\b(you answered no|you (declined|said no)|you decided not)\b[^.!?\n]*[.!?]?\s*",
+                     keep_refusal, answer).strip()
         if cut != answer:
             answer = cut or "Nothing was sent this time - no card was shown."
     says = [r["say"] for _, r in writes if isinstance(r, dict) and r.get("say")]

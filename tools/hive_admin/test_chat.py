@@ -957,5 +957,14 @@ out = conv.ask(hive, "how is node %d doing?" % pump["id"])
 check("answered no" not in out["answer"] and "soil is fine" in out["answer"],
       "a refusal no tool gave this turn is cut from the answer", out["answer"])
 
+# ...but a refusal that really happened earlier (the page's decline note) stays.
+conv = C.Conversation()
+conv.messages.append({"role": "user", "content": "[From the page, not typed: the person declined pump 50 ml on %s (node %d)]"
+                      % (pump.get("name") or "x", pump["id"])})
+conv.messages.append({"role": "assistant", "content": "OK."})
+script[:] = [say("No - you declined the card for %s, so nothing was pumped." % (pump.get("name") or "node %d" % pump["id"]))]
+out = conv.ask(hive, "did node %d get watered?" % pump["id"])
+check("you declined" in out["answer"], "a decline that really happened earlier isn't cut", out["answer"])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
