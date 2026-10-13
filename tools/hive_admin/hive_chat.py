@@ -1773,7 +1773,7 @@ def fix_fahrenheit(answer):
     return out
 
 
-def temperatures(hive, n):
+def temperatures(hive, n, q=""):
     """Which temperatures a node really has: a node with no air sensor got its soil probe's
     reading reported as the air temperature."""
     r = readings(hive, n)
@@ -1792,7 +1792,8 @@ def temperatures(hive, n):
                     name, "soil temperature %s (probe in the pot)" % with_f(soil) if soil and not soil.startswith("NO")
                     else "no temperature reading at all",
                     " The air temperature at the %s is %s." % (wx.get("name") or "weather station", wx_air)
-                    if wx_air and not wx_air.startswith("NO") else ""))
+                    # (asked about the soil, the station's air figure came back as the soil temperature)
+                    if wx_air and not wx_air.startswith("NO") and not re.search(r"(?i)\bsoil\b", q) else ""))
     return "TEMPERATURE at %s: air %s%s." % (name, with_f(air), "; soil %s (probe in the pot)" % with_f(soil)
                                               if soil and not soil.startswith("NO") else "")
 
@@ -2891,6 +2892,39 @@ def errors_reply(hive, st, named):
     return "\n".join(lines)
 
 
+AUTO_SWITCH_Q = re.compile(r"(?i)\b(turn|switch|shut|set)\b[^?]{0,30}\b(off|on)\b[^?]{0,30}\bauto(matic)?[- ]?water\w*|"
+                           r"\bauto(matic)?[- ]?water\w*\b[^?]{0,30}\b(turn|switch|shut|set)\b[^?]{0,10}\b(off|on)\b|"
+                           r"\b(disable|enable|stop|pause|resume|deactivate|activate)\b[^?]{0,30}\bauto(matic)?[- ]?water\w*")
+
+
+def auto_switch_reply(nodes, q):
+    """ "Turn off automatic watering for the rhubarb" - it tried to write slot 10 (the battery %), then suggested
+    setting the 24-hour cap to 0. Switching it is the admin page's job."""
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    who = " for %s" % ", ".join(n.get("name") or "node %s" % n["id"] for n in named) if named else ""
+    return ("Automatic watering%s is switched on and off on the admin page (the node's Automatic watering card) - "
+            "this chat can't change it, and I won't work around it with other settings. Nothing was changed." % who)
+
+
+SOIL_TEMP_NOW_Q = re.compile(r"(?i)\bsoil\b[^?]{0,30}\b(temp\w*|warm|hot|cold|cool|degrees)\b|\b(temp\w*|warm|hot|cold|cool)\b[^?]{0,30}\bsoil\b")
+
+
+def soil_temp_reply(hive, n):
+    sid = slot_by_label(hive, n.get("kind"), "Soil temperature")
+    raw = (n.get("slots") or {}).get(sid) if sid else None
+    if raw is None:
+        return None
+    v = hive.fmt(n.get("kind"), sid, raw)
+    if not re.match(r"-?\d", str(v)):
+        return None
+    return "%s's soil (the probe in the pot) is %s right now." % (n.get("name") or "node %s" % n["id"], with_f(v))
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3151,7 +3185,7 @@ def focus_facts(hive, q):
             if b:
                 out.append(b)
         if TEMP_Q.search(q):
-            t = temperatures(hive, n)
+            t = temperatures(hive, n, q)
             if t:
                 out.append(t)
         if has_pump(hive, kind) and WATER_TOTAL.search(q):
@@ -3653,6 +3687,18 @@ def ask(hive, messages, q, on_tool=None):
             fixed = None if plant_q else errors_reply(hive, st, en)
         except RuntimeError:
             fixed = None
+    if not fixed and AUTO_SWITCH_Q.search(q):
+        fixed = auto_switch_reply(nodes, q)
+    if not fixed and is_question(q) and SOIL_TEMP_NOW_Q.search(q) and not DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) \
+            and not EXTREME_WORD.search(q) and not re.search(r"(?i)\b(high|low|average|get|got|was|did)\b", q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            sn = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        if len(sn) == 1:
+            fixed = soil_temp_reply(hive, sn[0])
     if not fixed and DELETE_Q.search(q):
         fixed = DELETE_REPLY
     if not fixed and DRY_RATE_Q.search(q) and is_question(q) and not COMMAND.search(q):
