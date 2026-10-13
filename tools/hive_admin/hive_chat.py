@@ -2625,6 +2625,97 @@ BEST_TIME_FACT = ("WATERING TIME: the general advice is early morning, so the wa
                   "when its soil falls below its start point, at any hour. Don't mention adjusting a schedule.")
 
 
+# --- the week in one answer (new, 2026-10-13) --------------------------------------------
+WEEK_REPORT_Q = re.compile(r"(?i)\b(week(ly)?|7 days|past week|last week)\b[^?]*\b(report|summary|recap|review|overview|roundup)\b|"
+                           r"\b(report|summary|recap|review|overview|roundup)\b[^?]*\b(week|7 days)\b|"
+                           r"\bhow (did|has|was) (the |my )?(garden|hive|week)\b[^?]*\b(do|done|doing|go|gone|been|week)\b")
+SPARK = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values, lo=0.0, hi=100.0):
+    """Each day's average as a block from ▁ (dry) to █ (wet)."""
+    out = ""
+    for v in values:
+        out += " " if v is None else SPARK[max(0, min(len(SPARK) - 1, int((v - lo) / (hi - lo) * (len(SPARK) - 1) + 0.5)))]
+    return out
+
+
+def week_report(hive, st):
+    """ "How did the garden do this week?" - worked out here from the hive's own records."""
+    lt = time.localtime()
+    start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - 6, 0, 0, 0, 0, 0, -1))
+    days = [time.strftime("%a", time.localtime(start + i * 86400)) for i in range(7)]
+    hours = int((time.time() - start) // 3600) + 1
+    lines = ["**The garden, %s to %s** (days: %s)" % (time.strftime("%a %d %b", time.localtime(start)),
+                                                       time.strftime("%a %d %b"), " ".join(d[0] for d in days))]
+    wx = weather_node(st)
+    if wx:
+        tsid = slot_by_label(hive, wx["kind"], "Air temperature")
+        gsid = slot_by_label(hive, wx["kind"], "Gust (10 min)")
+        bits = []
+        if tsid is not None:
+            h = t_slot_history(hive, str(wx["id"]), tsid, hours=hours)
+            byd = h.get("by_day") or []
+            if byd and time.localtime().tm_hour < 15:
+                byd = byd[:-1]          # today has barely begun: its "high" is the night's temperature
+            if byd:
+                hi_ = [float(d["max"].split()[0]) for d in byd]
+                lo_ = [float(d["min"].split()[0]) for d in byd]
+                bits.append("highs %.0f-%.0f °C, lows %.0f-%.0f °C" % (min(hi_), max(hi_), min(lo_), max(lo_)))
+        mm = rain_total(hive, st, int(start), int(time.time()))
+        if mm is not None:
+            bits.append("rain %.1f mm" % mm)
+        if gsid is not None:
+            g = t_slot_history(hive, str(wx["id"]), gsid, hours=hours)
+            if g.get("overall"):
+                bits.append("strongest gust %s" % g["overall"]["max"])
+        if bits:
+            lines.append("- **Weather**: " + "; ".join(bits) + ".")
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    for n in st.get("nodes", []):
+        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
+            continue
+        pts = soil_series(hive, n, hours)
+        if not pts:
+            continue
+        per = {}
+        for ts, avg, mn, mx in pts:
+            per.setdefault(int((ts - start) // 86400), []).append(avg)
+        daily = [sum(per[i]) / len(per[i]) if per.get(i) else None for i in range(7)]
+        lo, hi = min(p[2] for p in pts), max(p[3] for p in pts)
+        band = (cfg.get(str(n["id"])) or {}).get("plant_band")
+        where = ""
+        if band:
+            above = sum(1 for p in pts if p[1] > band[1]) / float(len(pts))
+            below = sum(1 for p in pts if p[1] < band[0]) / float(len(pts))
+            where = (" - too wet %s" % ("all week" if above > 0.95 else "%.0f %% of the time" % (above * 100)) if above > 0.05 else "") + \
+                    (" - too dry %.0f %% of the time" % (below * 100) if below > 0.05 else "") or " - inside its band"
+            where = " (band %s-%s %%%s)" % (band[0], band[1], where)
+        water = ""
+        if has_pump(hive, n.get("kind")):
+            sid = pumped_slot(hive, n.get("kind"))
+            runs = pump_runs(hive, n, sid, 7) if sid else []
+            water = "; pump: %s" % ("%d watering%s, %d ml" % (len(runs), "" if len(runs) == 1 else "s", sum(m for _, m in runs))
+                                     if runs else "no waterings")
+        else:
+            jumps = [(b[0]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10]
+            if jumps:
+                water = "; watered by hand %s" % time.strftime("%a", time.localtime(jumps[-1]))
+        lines.append("- **%s**: soil %.0f-%.0f %%%s `%s`%s." % (n.get("name") or "node %s" % n["id"], lo, hi, where,
+                                                              sparkline(daily), water))
+    errs = []
+    for n in st.get("nodes", []):
+        c = (n.get("slots") or {}).get("27")
+        if c and not n.get("hidden"):
+            errs.append("%s %s" % (n.get("name") or n.get("kind"), "E%s" % (n.get("slots") or {}).get("26")))
+    silent = [x.get("name") or "node %s" % x["id"] for x in st.get("silent") or [] if (x.get("age") or 0) < 7 * 86400]
+    if errs or silent:
+        lines.append("- **Needs a look**: %s." % "; ".join(
+            (["errors logged: " + ", ".join(errs)] if errs else []) + (["not reporting: " + ", ".join(silent)] if silent else [])))
+    lines.append("\n(The bar shows each day's average soil reading, low = drier.)")
+    return "\n".join(lines)
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3327,6 +3418,11 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = last_heard_reply(hive, st, named4)
             elif is_question(q) and FEELS_Q.search(q):
                 fixed = feels_reply(hive, st)
+        except RuntimeError:
+            fixed = None
+    if not fixed and WEEK_REPORT_Q.search(q) and not COMMAND.search(q):
+        try:
+            fixed = week_report(hive, st)
         except RuntimeError:
             fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):

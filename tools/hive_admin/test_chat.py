@@ -987,5 +987,13 @@ check(C.no_repeats("This sentence is long enough to count. Other. This sentence 
 check(C.c_range(24.4, 24.6) == "24-25 °C (76 °F)" and C.c_range(32.6, 34.2) == "33-34 °C (91-94 °F)",
       "temperature ranges round each scale once")
 
+# The weekly report: worked out in code, no model call.
+check(C.sparkline([0, 50, 100, None]) == "▁▅█ ", "a sparkline runs from ▁ (dry) to █ (wet)", C.sparkline([0, 50, 100, None]))
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "how did the garden do this week?")
+check(out["answer"].startswith("**The garden,") and not fake_llm.calls, "the weekly report comes from the hive's records",
+      out["answer"][:200])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
