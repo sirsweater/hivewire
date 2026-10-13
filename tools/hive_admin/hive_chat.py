@@ -3101,6 +3101,93 @@ def week_vs_reply(hive, n):
                                           if d <= -2 else "about the same", min(a), max(a), min(b), max(b)))
 
 
+# --- round 8: admin-side questions, answered from the admin's own records ------------------------
+CAL_HOW_Q = re.compile(r"(?i)\bhow (do|can|should) (i|we|you)\b[^?]*\b(calibrat\w*|set the (dry|wet) point)|\bhow to calibrat")
+CAL_HOW_REPLY = (
+    "To calibrate a soil probe, use the admin page's **Settings** tab (the soil row for that node):\n"
+    "1. Hold the probe in dry air and press **Use as dry** (it fills in the reading now).\n"
+    "2. Stand the probe in a glass of water up to its line and press **Use as wet**.\n"
+    "3. Press **Save**.\n"
+    "Or, without moving it: the row shows the wettest and driest readings the probe held over the last 1, 7 or 30 "
+    "days - **Wettest as wet** / **Driest as dry** fill those in. This chat can't change calibration.")
+GATEWAY_Q = re.compile(r"(?i)\b(gateway|the pi|raspberry pi|hub|admin (server|page)|host)\b[^?]*\b(ok|okay|working|running|alive|up|fine|"
+                       r"healthy|answering|down)\b")
+HIDDEN_Q = re.compile(r"(?i)\b(hidden|retired|hide)\b[^?]*\bnodes?\b|\bnodes?\b[^?]*\b(hidden|retired)\b")
+FW_LAST_Q = re.compile(r"(?i)\b(last|latest|recent|when)\b[^?]*\b(firmware|ota|update|flash\w*|push\w*)\b(?![^?]*\b(running|version|same|which)\b)")
+SEED_Q = re.compile(r"(?i)\bseed mode\b")
+FC_Q = re.compile(r"(?i)\bfield capacity\b")
+BAND_SRC_Q = re.compile(r"(?i)\b(where|how)\b[^?]*\b(target|band|range)\b[^?]*\b(come from|set|decided|chosen|get)\b|\bwho (set|sets|chose)\b[^?]*\b(band|target)\b")
+BAND_SET_Q = re.compile(r"(?i)\b(change|set|make|raise|lower|adjust)\b[^?]*\b(target|band|range)\b[^?]*\d")
+EXPORT_Q = re.compile(r"(?i)\b(download|export|spreadsheet|csv|excel)\b")
+
+
+def admin_reply(hive, st, nodes, q):
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    nm = lambda n: n.get("name") or "node %s" % n["id"]  # noqa: E731
+    if CAL_HOW_Q.search(q):
+        return CAL_HOW_REPLY
+    if EXPORT_Q.search(q):
+        return ("Yes - on the admin page, open a node: its chart section has a **CSV** download for the reading and the "
+                "dates you pick, which opens in any spreadsheet. This chat can't make files.")
+    if BAND_SET_Q.search(q) and not re.search(r"(?i)\b(pump|flow|cap|limit|max)\b", q):
+        return ("A node's target band comes from the plant it's linked to on g4rden, so it's changed there - pick a "
+                "different plant or its growth stage - not from this chat, and not by changing the pump settings. "
+                "Nothing was changed.")
+    if BAND_SRC_Q.search(q):
+        who = ", ".join("%s %s-%s %%" % ((nm(n),) + tuple(cfg.get(str(n["id"]), {}).get("plant_band") or ("?", "?")))
+                        for n in (named or nodes) if (cfg.get(str(n["id"])) or {}).get("plant_band"))
+        return ("Each band comes from the plant the node is linked to on g4rden: g4rden sends the plant's moisture range "
+                "back with every upload, and automatic watering starts at its low end. Change the plant (or its "
+                "growth stage) on g4rden and the band follows. Now: %s." % (who or "no bands set"))
+    if SEED_Q.search(q) and not REQUEST.search(q) and not re.search(
+            r"(?i)^\W*(please\s+)?(start|begin|turn|enable|disable|stop|set up|put|run|switch)\b", q):
+        on = [(n, (cfg.get(str(n["id"])) or {}).get("seed_mode")) for n in nodes]
+        on = [(n, sm) for n, sm in on if sm and sm.get("until", 0) > time.time()]
+        if not on:
+            return ("Seed mode is off on every node. It's started on the admin page (a node's Seed mode card: a small dose "
+                    "on a timer that stops by itself), not from this chat.")
+        return "Seed mode is on for: %s." % "; ".join("%s - %s ml every %s h until %s" % (
+            nm(n), sm.get("ml"), sm.get("every_h"), time.strftime("%b %d", time.localtime(sm["until"]))) for n, sm in on)
+    if FC_Q.search(q) and not REQUEST.search(q):
+        pool = [n for n in (named or nodes) if (n.get("derived") or {}).get("soil") is not None]
+        saved = [(n, (cfg.get(str(n["id"])) or {}).get("soil_fc")) for n in pool]
+        lines = ["%s: %s" % (nm(n), "%s %% (saved)" % fc if fc else "none saved") for n, fc in saved]
+        return ("Field capacity - how wet a pot stays once a soak has drained - is measured, not guessed: on the admin "
+                "page's Field capacity card, soak the pot, let it drain, and it reads the level the soil settles at. "
+                "Saved now: %s." % "; ".join(lines))
+    if HIDDEN_Q.search(q):
+        hidden = ["node %s%s" % (k, (" " + v["name"]) if v.get("name") else "") for k, v in cfg.items() if v.get("hidden")]
+        silent = ["node %s (last heard %s ago)" % (x["id"], ago(x.get("age"))) for x in st.get("silent") or []
+                  if not (cfg.get(str(x["id"])) or {}).get("hidden")]
+        return ("Hidden on the admin page (retired): %s.%s" % (", ".join(hidden) or "none",
+                (" Not reporting but not hidden: %s - \"Hide (retired)\" on the admin page tidies them away." % ", ".join(silent))
+                if silent else ""))
+    if FW_LAST_Q.search(q) and not REQUEST.search(q):
+        h = [x for x in (hive.call("GET", "/api/firmware") or {}).get("history") or [] if x.get("ts")]
+        if not h:
+            return "The admin has no firmware pushes on record. Boards flashed over USB don't show up there."
+        x = max(h, key=lambda y: y["ts"])
+        return ("The last firmware push from the admin was %s: %s to the %s family (%s). Boards flashed over USB don't "
+                "show up in that history." % (time.strftime("%a %d %b %Y %H:%M", time.localtime(x["ts"])), x.get("file"),
+                                               x.get("family"), x.get("result")))
+    if GATEWAY_Q.search(q):
+        age = int(time.time() - (st.get("snapshot_time") or 0))
+        hl = st.get("health") or {}
+        p = t_list_problems(hive)
+        return ("%s The gateway last answered %s ago and hears %s of %s nodes; problems active now: %s." % (
+            "The gateway (the radio on the Pi's USB) is answering." if not st.get("error") and age < 300 else
+            "The gateway has a problem: %s." % (st.get("error") or "no answer for %s" % ago(age)),
+            ago(age), hl.get("ok", "?"), hl.get("up", "?"),
+            p["active_now"] if isinstance(p["active_now"], str) else "; ".join(map(str, p["active_now"]))))
+    return None
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3790,7 +3877,7 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = battery_reply(hive, named3[0])
             elif PERCENT_Q.search(q):
                 fixed = percent_reply(hive, st, [n for n in named3 if n.get("kind") != "WeatherNode"], q)
-            elif CALIB_Q.search(q) and len(named3) == 1 and (named3[0].get("derived") or {}).get("soil") is not None \
+            elif CALIB_Q.search(q) and not CAL_HOW_Q.search(q) and len(named3) == 1 and (named3[0].get("derived") or {}).get("soil") is not None \
                     and not re.search(r"(?i)\b(pump|flow)\b", q):
                 fixed = calibration_reply(hive, named3[0])
             elif DEW_Q.search(q):
@@ -3902,6 +3989,13 @@ def ask(hive, messages, q, on_tool=None):
                     SAID[:] = keep
                 if len(wn) == 1:
                     fixed = week_vs_reply(hive, wn[0])
+        except RuntimeError:
+            fixed = None
+    if not fixed and (CAL_HOW_Q.search(q) or EXPORT_Q.search(q) or BAND_SET_Q.search(q) or BAND_SRC_Q.search(q) or
+                      SEED_Q.search(q) or FC_Q.search(q) or HIDDEN_Q.search(q) or FW_LAST_Q.search(q) or GATEWAY_Q.search(q)) \
+            and (not COMMAND.search(q) or BAND_SET_Q.search(q)):
+        try:
+            fixed = admin_reply(hive, st, nodes, q)
         except RuntimeError:
             fixed = None
     if not fixed and AUTO_SWITCH_Q.search(q):

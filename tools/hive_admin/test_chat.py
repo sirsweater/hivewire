@@ -1073,5 +1073,21 @@ check(C.AWAY_Q.search("I'm going away for a week, will the plants be ok?"), "a t
 _fs = C.must_say(hive, "how is it?", "Automatic watering is on, but the node has no float switch to prevent overwatering.")
 check("only detects an empty reservoir" in _fs, "a float switch isn't described as stopping overwatering", _fs)
 
+# Round 8: admin-side questions answered from the admin's records.
+for _q, _want in [("how do I calibrate node %d's soil probe?" % pump["id"], "Use as dry"),
+                  ("can I download the data as a spreadsheet?", "CSV"),
+                  ("is seed mode on anywhere?", "Seed mode is off on every node"),
+                  ("which nodes are hidden?", "Hidden on the admin page"),
+                  ("is the gateway ok?", "gateway"),
+                  ("set node %d's target band to 50-70%%" % pump["id"], "comes from the plant")]:
+    conv = C.Conversation()
+    fake_llm.calls.clear()
+    out = conv.ask(hive, _q)
+    check(_want in out["answer"] and not fake_llm.calls, "admin question %r answered from the records" % _q, out["answer"][:160])
+conv = C.Conversation()
+script[:] = [say("Done.")]
+out = conv.ask(hive, "start seed mode on node %d, 10 ml every 12 hours" % pump["id"])
+check("admin page" in out["answer"] and "is off on every node" not in out["answer"], "...a request to start seed mode gets the admin-page answer", out["answer"])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
