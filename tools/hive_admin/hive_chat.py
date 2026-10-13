@@ -3640,6 +3640,9 @@ def ask(hive, messages, q, on_tool=None):
     messages.append({"role": "user", "content": q + focus_facts(hive, q)})
     msg, writes, nudged = {}, [], False
     asking = not REQUEST.search(q)      # a question gets read-only tools
+    if SYMPTOM.search(q) and not re.search(r"(?i)\b(water|pump|reboot|restart|reset|set|rename|stop|turn|give)\b", q):
+        # "the cactus is dying!!! do something" isn't a request for any one action: it had tried a reboot
+        asking = True
     for _ in range(MAX_TOOL_ROUNDS):
         msg = ollama_chat(messages, read_only=asking)
         messages.append(msg)
