@@ -2075,6 +2075,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             node = app.adaptive_node(nid)
             return self.send_json({"adaptive": node["adaptive"], "plant_band": node.get("plant_band"),
                                    "recommendation": rec})
+        if path == "/api/forecast":
+            # The newest run of each public model, from this hour on (the chat's "will it rain tomorrow?").
+            return self.send_json(app.forecasts.latest())
         if path == "/api/forecast/score":
             # How each public model has done against the station: mean error and
             # bias per variable and lead time (forecast - measured).

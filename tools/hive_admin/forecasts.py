@@ -157,6 +157,21 @@ class Forecasts:
                     out[model][var][b] = {"n": n, "mae": round(ae / n, 2), "bias": round(e / n, 2)}
         return out
 
+    def latest(self, now=None):
+        """Each model's most recent run, from the current hour on: {"issued": {model: ts},
+        "models": {model: {var: [[valid, value], ...]}}}."""
+        now = int(now or time.time())
+        out = {"issued": {}, "models": {}}
+        with self.store.db() as db:
+            for model, issued in db.execute("SELECT model, MAX(issued) FROM forecasts GROUP BY model").fetchall():
+                out["issued"][model] = issued
+                m = out["models"].setdefault(model, {})
+                for valid, var, value in db.execute(
+                        "SELECT valid, var, value FROM forecasts WHERE model=? AND issued=? AND valid>=? ORDER BY valid",
+                        (model, issued, hour_floor(now))):
+                    m.setdefault(var, []).append([valid, value])
+        return out
+
     def run_once(self):
         try:
             n = self.collect()

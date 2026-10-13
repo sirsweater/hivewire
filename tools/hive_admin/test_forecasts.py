@@ -87,5 +87,12 @@ with store.db() as c:
     check(c.execute("SELECT COUNT(*) FROM forecasts WHERE issued < ?", (now - 35 * 86400,)).fetchone()[0] == 0,
           "forecasts older than 35 days are pruned")
 
+# The newest run of each model, from this hour on.
+lt = fc.latest(now=now)
+check(set(lt["models"]) == {"gfs_global", "ecmwf_ifs025"} and lt["issued"]["gfs_global"] == issued,
+      "latest(): each model's newest run", lt["issued"])
+check(all(v >= issued for m in lt["models"].values() for rows_ in m.values() for v, _ in rows_) and
+      lt["models"]["gfs_global"]["temp"][0][1] == 22, "...from the current hour on, values as stored")
+
 print("\n%d failed" % failed if failed else "\nall passed")
 sys.exit(1 if failed else 0)

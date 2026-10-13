@@ -1628,7 +1628,7 @@ TOPIC_HINTS = [
     (re.compile(r"(?i)\bdew ?point"), dew_point),
     (re.compile(r"(?i)\brain"), lambda hive: next(
         ("Rain amounts: call slot_history with node %s, slot 14 and the hours asked about (a week = 168); it "
-         "returns mm per hour/day and a total. Forecasts are not available.%s" % (n["id"], (" KNOWN ISSUE: " +
+         "returns mm per hour/day and a total.%s" % (n["id"], (" KNOWN ISSUE: " +
          known_issue(n["id"])) if known_issue(n["id"]) else "")
          for n in hive.call("GET", "/api/state").get("nodes", []) if n.get("kind") == "WeatherNode"), None)),
     (re.compile(r"(?i)(override|maintenance mode|approval (is )?(disabled|off)|ignore (all |your |the )?"
@@ -2119,6 +2119,83 @@ def hive_wide_facts(hive, st, named, q):
     return out
 
 
+# --- forecasts ---------------------------------------------------------------------
+# The admin stores four public models' next 48 h (forecasts.py) to score them. The chat said
+# "I can't see forecasts". The reply is worked out here, across the models, no model wording.
+FORECAST_Q = re.compile(r"(?i)\b(will it|is it going to|gonna|should I expect|chance of|any)\b[^?]{0,30}\b(rain|snow|"
+                        r"freeze|frost|storm|wind|windy|hot|cold|warm)\w*|\bforecast\b|\b(rain|weather|wind|temperature|"
+                        r"high|low)s? (for )?(tomorrow|tonight|this week(end)?|next week|later)\b|\b(tomorrow|tonight)'?s? "
+                        r"(weather|high|low|rain|forecast)\b|\bhow (hot|cold|warm|windy) will it\b")
+MODEL_NAME = {"gfs_global": "GFS", "gfs_hrrr": "HRRR", "ecmwf_ifs025": "ECMWF", "icon_seamless": "ICON"}
+
+
+def forecast_window(q):
+    now = time.localtime()
+    midnight = int(time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1)))
+    if re.search(r"(?i)\btonight|overnight\b", q):
+        start = midnight + 18 * 3600 if now.tm_hour < 18 else int(time.time())
+        return max(start, int(time.time())), midnight + 32 * 3600, "tonight (to 08:00)"
+    if re.search(r"(?i)\btomorrow\b", q):
+        return midnight + 86400, midnight + 2 * 86400, time.strftime("tomorrow (%a %d %b)", time.localtime(midnight + 86400))
+    if re.search(r"(?i)\btoday|this (afternoon|evening)|later\b", q):
+        return int(time.time()), midnight + 86400, "the rest of today"
+    return int(time.time()), int(time.time()) + 48 * 3600, "the next 48 hours"
+
+
+def c_f(c):
+    return "%.0f °C (%.0f °F)" % (c, c * 9 / 5.0 + 32)
+
+
+def forecast_reply(hive, q):
+    fc = hive.call("GET", "/api/forecast") or {}
+    models = fc.get("models") or {}
+    t0, t1, label = forecast_window(q)
+    per = {}
+    for m, vars_ in models.items():
+        pick = lambda var: [v for t, v in vars_.get(var) or [] if t0 <= t < t1]  # noqa: E731
+        temp, rain, gust = pick("temp"), pick("rain"), pick("gust")
+        if temp or rain:
+            per[MODEL_NAME.get(m, m)] = {"hi": max(temp) if temp else None, "lo": min(temp) if temp else None,
+                                         "rain": sum(rain) if rain else None, "gust": max(gust) if gust else None}
+    if not per:
+        return None
+    rng = lambda k: [d[k] for d in per.values() if d[k] is not None]  # noqa: E731
+    rains, his, los, gusts = rng("rain"), rng("hi"), rng("lo"), rng("gust")
+    out = []
+    if rains:
+        wet = [m for m, d in per.items() if (d["rain"] or 0) >= 0.5]
+        if not wet:
+            out.append("**Rain:** none expected - all %d models give under 0.5 mm." % len(rains))
+        elif len(wet) == len(rains):
+            out.append("**Rain:** likely - every model has some, %.1f to %.1f mm." % (min(rains), max(rains)))
+        else:
+            out.append("**Rain:** uncertain - %s give%s some (up to %.1f mm), %s don't." % (
+                ", ".join(wet), "s" if len(wet) == 1 else "", max(rains),
+                ", ".join(m for m in per if m not in wet)))
+    if his:
+        out.append("**Temperature:** high %s to %s, low %s to %s." % (c_f(min(his)), c_f(max(his)), c_f(min(los)),
+                                                                     c_f(max(los))))
+        if re.search(r"(?i)freez|frost|cold", q) or min(los) < 3:
+            out.append("**Frost:** %s" % ("below freezing in %d of %d models - protect tender plants." % (
+                sum(x <= 0 for x in los), len(los)) if min(los) <= 0 else "possible on plants - the lowest model "
+                "low is %s." % c_f(min(los)) if min(los) < 3 else "no - the coldest model low is %s." % c_f(min(los))))
+    if gusts:
+        note = ""
+        try:
+            sc = (hive.call("GET", "/api/forecast/score") or {}).get("score") or {}
+            bias = [b["bias"] for m in sc.values() for b in ((m.get("gust") or {}).values()) if b.get("n", 0) >= 24]
+            if bias and sum(bias) / len(bias) > 3:
+                note = " (your station is sheltered and usually reads about %.0f km/h less than these)" % (
+                    sum(bias) / len(bias))
+        except RuntimeError:
+            pass
+        out.append("**Gusts:** up to %.0f-%.0f km/h%s." % (min(gusts), max(gusts), note))
+    when = max((fc.get("issued") or {}).values() or [0])
+    return ("Forecast for %s, from %d public weather models (%s), fetched %s:\n\n%s" % (
+        label, len(per), ", ".join(per), time.strftime("%H:%M", time.localtime(when)) if when else "recently",
+        "\n".join("- " + x for x in out)))
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -2368,8 +2445,8 @@ FIXED_REPLIES = [
      "the node and the setting. Nothing was sent."),
     (re.compile(r"(?i)\b(will it|is it going to|gonna) (rain|snow|freeze|frost|storm)|\bforecast\b|"
                 r"\b(rain|weather) (tomorrow|tonight|this week(end)?|next week)\b"),
-     "I can't see weather forecasts - the hive downloads them only to score them against the station, and "
-     "that isn't available to me. I can tell you what the weather station has measured: current conditions "
+     "I can't see a weather forecast right now - the hive hasn't downloaded one yet (it needs the station's "
+     "location set on the admin page). I can tell you what the weather station has measured: current conditions "
      "and past rain."),
 ]
 # Offers of things this chat has no tool for. The model makes them anyway ("Would you
@@ -2448,7 +2525,13 @@ def ask(hive, messages, q, on_tool=None):
     except RuntimeError:
         st = {}
     nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
-    fixed = next((a for pat, a in FIXED_REPLIES if pat.search(q)), None)
+    fixed = None
+    if FORECAST_Q.search(q) and not COMMAND.search(q):
+        try:
+            fixed = forecast_reply(hive, q)
+        except RuntimeError:
+            fixed = None
+    fixed = fixed or next((a for pat, a in FIXED_REPLIES if pat.search(q)), None)
     if fixed:
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": fixed}]
         return fixed
