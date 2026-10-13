@@ -2713,13 +2713,13 @@ def scrub_tool_talk(answer):
     chat's own, not the person's. Such sentences go, with a "do that?" question after one."""
     names = "|".join(re.escape(t) for t in TOOLS)
     pat = re.compile(r"(?i)[ \t]*[^.!?\n]*\b(you can use|you could use|use the|I will call|I'll call|call the|"
-                     r"run the|try the|using the|with the|via the|through the|I can call|I could call|I can run|I could run)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
+                     r"run the|try the|using the|with the|via the|through the|I can call|I could call|I can run|I could run|call that|run that)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
     # "**water_now 30 ml**" on a line of its own: a tool call written out, not words for a person.
     out = re.sub(r"(?im)^[ \t>*_`-]*(%s)\b[^\n]{0,60}$\n?" % names, "", out)
     # "I can check the current status using a tool. Would you like me to do that?" - it can just check.
-    out = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(using|run|use|with|call) (a|the|my|one of my|another) tools?\b[^.!?\n]*[.!?]?"
+    out = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(using|run|use|with|call) (a|the|that|this|my|one of my|another) tools?\b[^.!?\n]*[.!?]?"
                  r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?", "", out)
     return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", out)).strip() if out.strip() and out != answer else answer
 
@@ -2807,6 +2807,26 @@ def ask(hive, messages, q, on_tool=None):
             fixed = "At the %s, %s: high %s, low %s, average %s.%s" % m2.groups()
         elif t and t.startswith("AIR TEMPERATURE") and "only began" in t:
             fixed = t.replace("AIR TEMPERATURE at the", "At the", 1)
+    if not fixed and PUMP_TIME_Q.search(q) and not COMMAND.search(q) and not REQUEST.search(q):
+        # Answered here: 200 ml at 95 ml/min came back as "2 minutes and 16 seconds".
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            pn = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+        finally:
+            SAID[:] = keep
+        if len(pn) == 1:
+            flow = pump_flow(hive, pn[0])
+            asked = stated_ml(q, flow)
+            t = pump_time(pn[0], flow, asked[0] if asked else None, q)
+            m = re.match(r"PUMP TIME for (.+?): ([\d.]+) ml at its pump flow of (.+?) ml/min = ([\d.]+) min \((\d+) s\)"
+                         r", worked out here\.(.*)$", t or "")
+            if m:
+                name, ml, fl, mins, secs, cap = m.groups()
+                secs = int(secs)
+                fixed = "%s's pump would take about %s (%d seconds) to deliver %s ml, at its set flow of %s ml/min.%s" % (
+                    name, ("%d min %d s" % (secs // 60, secs % 60)) if secs >= 60 else "%d s" % secs, secs, ml, fl,
+                    cap)
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
         # Answered here: given the numbers, the model said "warmer by 1.0 °C" and dropped both readings.
         try:
@@ -3045,6 +3065,14 @@ def must_say(hive, q, answer):
             if m and not re.search(r"(?<![\d.])%s ?ml" % m.group(1), answer):
                 add.append("%s can get %s ml more in the next 24 hours%s." % (
                     name, m.group(1), "".join(re.findall(r", at most \d+ ml in any one watering", b))))
+            # "When was it last watered?" with no run in the week came back as "not in the last 24 hours".
+            if PAST_WATERING.search(q) and not REQUEST.search(q) and not WATER_TOTAL.search(q):
+                rec = watering_record(hive, n)
+                # (an answer that gives the last date - "last watered on Oct 05" - already says it)
+                if "not in the last 7 days" in rec and not re.search(
+                        r"(?i)\b(7 days|seven days|a week|this week|past week|last week)\b", answer) and not re.search(
+                        r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w* \d|\d{4}-\d\d-\d\d|\b\d+ days ago\b", answer):
+                    add.append("%s's pump hasn't run in the last 7 days." % name)
         elif re.search(r"(?i)\b(water|irrigate)\b", q) and REQUEST.search(q) and not re.search(
                 r"(?i)%s[^.]*\b(no pump|doesn't have a pump|does not have a pump|can't be watered|cannot be watered)"
                 % re.escape(name), answer):
