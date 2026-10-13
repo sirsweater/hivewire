@@ -474,7 +474,8 @@ def facts(hive, meta, n):
     kind = n.get("kind")
     out = dict(plant(meta, n))
     # Words, not a bare false: a small model skims past "has_pump": false.
-    out["pump"] = ("yes - water_now can water it" if has_pump(hive, kind) else
+    # (not "water_now can water it": that came back as "Pump state: Yes - `water_now` can water it")
+    out["pump"] = ("yes - it can be watered from this chat" if has_pump(hive, kind) else
                    "NONE - this node has no pump; it cannot be watered from the hive")
     if "battery" not in ((hive.kinds().get(kind) or {}).get("derived") or {}):
         out["battery"] = "not reported by this node - unknown"
@@ -1944,8 +1945,12 @@ def weather_fact(hive, st, q):
             if sid is None or lbl in done or not re.search(pat, q):
                 continue
             done.add(lbl)
-            h = t_slot_history(hive, str(wx["id"]), sid, hours=168) if day in ("this week", "last 7 days", "past week") \
-                else t_slot_history(hive, str(wx["id"]), sid, day=day)
+            if day in ("this week", "last 7 days", "past week"):
+                lt = time.localtime()       # from midnight 6 days ago: no part-day at the start
+                start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - 6, 0, 0, 0, 0, 0, -1))
+                h = t_slot_history(hive, str(wx["id"]), sid, hours=int((time.time() - start) // 3600) + 1)
+            else:
+                h = t_slot_history(hive, str(wx["id"]), sid, day=day)
             if h.get("by_day") and day in ("this week", "last 7 days", "past week"):
                 out.append("%s by day (high / low): %s." % (lbl, "; ".join(
                     "%s %s / %s" % (d["day"], d["max"], d["min"]) for d in h["by_day"])))
@@ -2180,12 +2185,16 @@ NOW_WORD = re.compile(r"(?i)\b(now|right now|currently|at the moment|outside|out
                       r"\bwhich way\b|\bhow (humid|windy|hot|cold|warm)\b")
 
 
+EXTREME_WORD = re.compile(r"(?i)\b(strongest|highest|max\w*|most|peak|windiest|gustiest|lowest|least|top|biggest)\b")
+
+
 def weather_now_reply(hive, st, q):
     """Current conditions at the station, for the parts the question asks about. "Which way is the
     wind blowing?" got "calm" at 1.9 km/h from the east."""
     wx = weather_node(st)
-    if not wx or DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) or FORECAST_Q.search(q):
-        return None
+    if not wx or DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) or FORECAST_Q.search(q) or (
+            re.search(r"(?i)\btoday\b", q) and EXTREME_WORD.search(q)):
+        return None             # "the strongest gust today" is the day's history, not the reading now
     r = readings(hive, wx)
     pick = lambda lbl: next((v for k, v in r.items() if k.startswith(lbl + " (")), None)  # noqa: E731
     ok = lambda v: v is not None and not str(v).startswith(("NO READING", "invalid"))  # noqa: E731
@@ -3545,6 +3554,23 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = feels_reply(hive, st)
         except RuntimeError:
             fixed = None
+    if not fixed and is_question(q) and not COMMAND.search(q) and (DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) or (
+            re.search(r"(?i)\btoday\b", q) and EXTREME_WORD.search(q))) and \
+            re.search(r"(?i)\b(gusts?|gusty|wind\w*|breez\w*|humid\w*)\b", q) and not re.search(
+                r"(?i)\b(soil|pot|probe|temp\w*|hot|cold|rain\w*|forecast|will|tomorrow|tonight)\b", q):
+        # "What was the strongest gust yesterday?" was answered from the wind DIRECTION history ("344°").
+        try:
+            t = weather_fact(hive, st, q)
+        except RuntimeError:
+            t = None
+        hist = re.findall(r"((?:Gust \(10 min\)|Wind \(2-min average\)|Humidity)(?:, [^:]+: highest .+?, lowest [^(]+?"
+                          r"\(use these numbers\)\.| by day \(high / low\): .+?\.(?=\s+[A-Z]|\s*$)))", t or "")
+        if hist:
+            fixed = "At the %s - %s" % ((weather_node(st) or {}).get("name") or "weather station", " ".join(
+                h.replace(" (use these numbers)", "").replace("Wind (2-min average)", "Wind (2-minute average)")
+                .replace("Gust (10 min)", "Gusts") for h in hist))
+            if "Gust" in fixed or "Wind" in fixed:
+                fixed += " (A gust is the strongest 10-minute burst; the wind figure is a 2-minute average.)"
     if not fixed and DELETE_Q.search(q):
         fixed = DELETE_REPLY
     if not fixed and DRY_RATE_Q.search(q) and is_question(q) and not COMMAND.search(q):
@@ -3737,7 +3763,7 @@ def ask(hive, messages, q, on_tool=None):
         # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with
         # (once after a refused -50 ml: "Let's try -200 ml. Would you like me to proceed?").
         answer = no_card_offers(answer)
-    if not REQUEST.search(q) and not re.search(r"(?i)\b(reboot|restart|reset)\b", q):
+    if not re.search(r"(?i)\b(reboot|restart|reset|power cycle)\b", q):        # ("do something" counts as a request)
         # "The cactus is dying!!!" got "Would you like to reboot the node?" - not what helps a plant.
         answer = re.sub(r"(?im)^[ \t]*[-*]?[ \t]*\**reboot\**[^\n]*\?[ \t]*$\n?", "", answer)
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(would you like|shall i|should i|do you want)\b[^.!?\n]*\breboot\w*\b[^.!?\n]*\?", "", answer)
