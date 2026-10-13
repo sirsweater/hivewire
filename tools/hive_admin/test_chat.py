@@ -885,5 +885,29 @@ h.route_post("/api/chat/test", {})
 check(h.out[0].get("context_ok") is False and "8192" in h.out[0].get("context_note", ""),
       "the Test button reports a truncating server", h.out[0])
 
+# --- questions about the whole hive, or the weather (probe set hive1, 2026-10-12) ---
+f = C.focus_facts(hive, "how humid is it outside right now?")
+wxn = next((n for n in st["nodes"] if n["kind"] == "WeatherNode"), None)
+if wxn:
+    check("WEATHER at the" in f and "Humidity" in f, "an outdoor humidity question gets the weather station's reading", f[-300:])
+    check("NO air pressure sensor" in C.focus_facts(hive, "is the air pressure rising or falling?"),
+          "...a pressure question is told there's no barometer")
+    check("WEATHER at" not in C.focus_facts(hive, "how long has the %s been up?" % (wxn.get("name") or "weather station")),
+          "...but \"weather station\" alone isn't a weather question")
+f = C.focus_facts(hive, "which node has the weakest signal?")
+check("SIGNAL now, weakest first" in f, "the weakest-signal question gets every node ranked", f[-300:])
+f = C.focus_facts(hive, "what errors have there been this week?")
+check("ERRORS, from each node's own count" in f and "NO ERRORS" in f, "an errors question gets each node's own count, clean ones apart", f[-400:])
+f = C.focus_facts(hive, "how many times has node %d rebooted?" % pump["id"])
+check("UPTIME AND STARTS" in f and "boot counter" in f, "a reboot question gets uptime and the boot counter", f[-300:])
+check("UPTIME AND STARTS" not in C.focus_facts(hive, "reboot node %d" % pump["id"]), "...a reboot request doesn't")
+f = C.focus_facts(hive, "what does adaptive watering actually do?")
+check("changes only the AMOUNT" in f, "how adaptive watering works comes from code, not the model")
+check("No such" not in C.focus_facts(hive, "how much does 10 ml raise node %d's soil?" % pump["id"]) and
+      "SOIL RISE for" in C.focus_facts(hive, "how much does 10 ml raise node %d's soil?" % pump["id"]),
+      "soil rise per 10 ml comes from what adaptive watering learned (or that it hasn't yet)")
+t = C.temp_extremes(hive, "did it freeze last night?")
+check(t is None or "freeze" in t or "froze" in t, "a freeze question gets a yes/no from the low", t)
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
