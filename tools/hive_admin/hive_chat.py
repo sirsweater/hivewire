@@ -2836,6 +2836,40 @@ DELETE_REPLY = ("This chat can't delete anything, and nothing in the hive delete
                 "\"Hide (retired)\" on the admin page takes it off the lists; its history is kept. Nothing was changed.")
 
 
+TREND_Q = re.compile(r"(?i)\b(trend|graph|chart|plot|sparkline|show me)\b[^?]*\b(soil|moisture|wet|dry|reading)|"
+                     r"\b(soil|moisture)\b[^?]*\b(over|across|for) the (last |past )?(week|\d+ days|few days|month)\b")
+
+
+def trend_reply(hive, n, q):
+    """ "Show me the larkspur's soil over the week": four points a day, as a text chart."""
+    m = re.search(r"(?i)\b(\d+) days\b", q)
+    days = int(m.group(1)) if m else 30 if re.search(r"(?i)\bmonth\b", q) else 7
+    days = max(2, min(30, days))
+    pts = soil_series(hive, n, days * 24)
+    if len(pts) < 8:
+        return None
+    step = 6 * 3600 if days <= 10 else 24 * 3600
+    buckets = {}
+    for ts, avg, _, _ in pts:
+        buckets.setdefault(int(ts // step), []).append(avg)
+    keys = sorted(buckets)
+    vals = [sum(buckets[k]) / len(buckets[k]) for k in keys]
+    meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
+    band = meta.get("plant_band")
+    lo, hi = min(p[2] for p in pts), max(p[3] for p in pts)
+    first = time.strftime("%a %d %b", time.localtime(keys[0] * step))
+    labels = ""
+    if step < 86400:
+        # a day letter under each day's first block
+        for k in keys:
+            t = time.localtime(k * step)
+            labels += time.strftime("%a", t)[0] if t.tm_hour < 6 else " "
+    return ("%s's soil, last %d days (from %s; %s per mark, ▁ dry to █ wet):\n`%s`%s\nRange %.0f-%.0f %%, now %.0f %%%s." % (
+        n.get("name") or "node %s" % n["id"], days, first, "6 hours" if step < 86400 else "1 day", sparkline(vals),
+        ("\n`%s`" % labels) if labels else "", lo, hi, (n.get("derived") or {}).get("soil") or vals[-1],
+        "; its band is %s-%s %%" % tuple(band) if band else ""))
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3571,6 +3605,18 @@ def ask(hive, messages, q, on_tool=None):
                 .replace("Gust (10 min)", "Gusts") for h in hist))
             if "Gust" in fixed or "Wind" in fixed:
                 fixed += " (A gust is the strongest 10-minute burst; the wind figure is a 2-minute average.)"
+    if not fixed and TREND_Q.search(q) and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            tn = [n for n in nodes if named_by_person(n) and (n.get("derived") or {}).get("soil") is not None]
+        finally:
+            SAID[:] = keep
+        if len(tn) == 1:
+            try:
+                fixed = trend_reply(hive, tn[0], q)
+            except RuntimeError:
+                fixed = None
     if not fixed and DELETE_Q.search(q):
         fixed = DELETE_REPLY
     if not fixed and DRY_RATE_Q.search(q) and is_question(q) and not COMMAND.search(q):
