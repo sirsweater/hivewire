@@ -2716,6 +2716,29 @@ def week_report(hive, st):
     return "\n".join(lines)
 
 
+# --- phone alerts: what the admin sends (new, 2026-10-13) ---------------------------------------
+ALERTS_Q = re.compile(r"(?i)\b(alert(s|ed)?|notif\w*|ping me|text me|warn me|buzz)\b")
+ALERT_CODES = (101, 102, 206, 301, 303, 306, 307, 1001)
+
+
+def alerts_reply(hive):
+    """ "Will I get a notification if the reservoir runs dry?" - from the admin's own alert rules (HiveAlerts)."""
+    g = hive.call("GET", "/api/g4rden") or {}
+    paired = (g.get("config") or {}).get("paired")
+    codes = (hive.call("GET", "/api/problems") or {}).get("codes") or {}
+    names = ["E%d %s" % (c, (codes.get(str(c)) or {}).get("title", "")) for c in ALERT_CODES if codes.get(str(c))]
+    return ("Phone alerts go out through g4rden%s:\n"
+            "- **Soil alerts** for each plant come from g4rden itself, from the readings the hive uploads.\n"
+            "- **A node error** that needs a hand: %s.\n"
+            "- **A node gone quiet** for 30 minutes (once per outage), and **the gateway not answering** for 10 minutes.\n"
+            "Not alerted (only logged on the Problems page): a weak link (E104), an unexpected restart, low power on "
+            "the Pi. The same problem alerts at most once every 6 hours. The alert rules are set in the admin's code; "
+            "this chat can't add new ones, such as an alert for one plant dropping below a number." % (
+                " - the hub is paired with g4rden, so they reach your phone" if paired else
+                " - but the hub isn't paired with g4rden right now, so none will reach your phone (pair it on the "
+                "admin page)", "; ".join(names)))
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3418,6 +3441,11 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = last_heard_reply(hive, st, named4)
             elif is_question(q) and FEELS_Q.search(q):
                 fixed = feels_reply(hive, st)
+        except RuntimeError:
+            fixed = None
+    if not fixed and ALERTS_Q.search(q) and is_question(q) and not COMMAND.search(q):
+        try:
+            fixed = alerts_reply(hive)
         except RuntimeError:
             fixed = None
     if not fixed and WEEK_REPORT_Q.search(q) and not COMMAND.search(q):

@@ -995,5 +995,14 @@ out = conv.ask(hive, "how did the garden do this week?")
 check(out["answer"].startswith("**The garden,") and not fake_llm.calls, "the weekly report comes from the hive's records",
       out["answer"][:200])
 
+# Phone alerts: the admin's own rules, not the model's idea of them.
+check(C.ALERTS_Q.search("will I get a notification if the reservoir runs dry?") and not C.ALERTS_Q.search("push the firmware"),
+      "alert questions are recognised")
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "what alerts do I get?")
+check("E307" in out["answer"] and "E104" in out["answer"] and not fake_llm.calls, "the alert rules come from the admin's code",
+      out["answer"][:200])
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
