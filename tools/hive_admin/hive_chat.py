@@ -3557,13 +3557,19 @@ def ask(hive, messages, q, on_tool=None):
         last_a = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=0)
         notes = [str(m.get("content")) for m in messages[last_a - 1 if last_a else 0:] if m.get("role") == "user"
                  and str(m.get("content", "")).startswith("[From the page, not typed: the person declined")]
+        # ...or a tool's own refusal in the turn just answered ("Nothing was sent - you answered no to: ...")
+        for m in messages[max(0, last_a - 6):last_a + 1]:
+            if m.get("role") == "tool":
+                mm = re.search(r"Nothing was sent - you answered no to: ([^\".]+)", str(m.get("content", "")))
+                if mm:
+                    notes.append("it was NOT sent: " + mm.group(1).strip())
         confirmed = [m for m in messages[last_a - 1 if last_a else 0:] if m.get("role") == "user"
                      and "pressed Confirm" in str(m.get("content", ""))]
         asked = [n.get("name") for n in nodes if n.get("name") and re.search(r"(?i)\b%s\b" % re.escape(n["name"]), q)]
         if asked:           # "did the larkspur get watered?" after declining only the Rhubarb's card
             notes = [x for x in notes if any(re.search(r"(?i)\b%s\b" % re.escape(a), x) for a in asked)]
         if notes and not confirmed:
-            fixed = "No - you pressed Decline, so nothing was sent: %s." % "; ".join(
+            fixed = "No - you declined it, so nothing was sent: %s." % "; ".join(
                 re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
     if FORECAST_Q.search(q) and not COMMAND.search(q) and not (
             re.search(r"(?i)\b(were|was|did|has|have|had|been|yesterday|last (night|week)|so far|ago)\b", q) and

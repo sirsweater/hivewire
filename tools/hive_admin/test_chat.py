@@ -974,7 +974,7 @@ conv.messages.append({"role": "user", "content": "[From the page, not typed: the
                       "pump 50 ml on Larkspur (node 7)]"})
 fake_llm.calls.clear()
 out = conv.ask(hive, "did it water?")
-check(out["answer"].startswith("No - you pressed Decline") and "pump 50 ml on Larkspur (node 7)" in out["answer"]
+check(out["answer"].startswith("No - you declined it") and "pump 50 ml on Larkspur (node 7)" in out["answer"]
       and not fake_llm.calls, "after Decline, 'did it water?' says so, without the model", out["answer"])
 
 # Round 4: two questions in one, short questions, repeats, ranges.
@@ -1050,6 +1050,17 @@ check(any(p.search("what should I cook for dinner?") for p, a in C.FIXED_REPLIES
       not any(p.search("water node 7 after dinner") and "kitchen" in a for p, a in C.FIXED_REPLIES),
       "recipe questions go to the kitchen assistant, watering requests don't")
 check(C.nice_qty(1 / 3.0) == "1/3" and C.nice_qty(0.4) == "0.4", "amounts on a card read 1/3, not 0.333333")
+
+# "Did it work?" after a refusal the tool itself reported (no page note) - the same plain answer.
+conv = C.Conversation()
+conv.messages += [{"role": "user", "content": "water it"},
+                  {"role": "tool", "tool_name": "water_now", "content": "{\"sent\": false, \"say\": \"Nothing was sent - you answered no "
+                   "to: pump 100 ml on Larkspur (node 7). (The card noted: soil is wet.)\"}"},
+                  {"role": "assistant", "content": "Nothing was sent - you answered no to: pump 100 ml on Larkspur (node 7)."}]
+fake_llm.calls.clear()
+out = conv.ask(hive, "did it work?")
+check(out["answer"].startswith("No - you declined it") and "pump 100 ml on Larkspur (node 7)" in out["answer"] and not fake_llm.calls,
+      "'did it work?' after a tool's own refusal says so plainly", out["answer"])
 
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
