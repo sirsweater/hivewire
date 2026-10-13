@@ -3188,6 +3188,40 @@ def admin_reply(hive, st, nodes, q):
     return None
 
 
+ATTENTION_Q = re.compile(r"(?i)\b(needs?|need) (attention|looking at|a look|checking|fixing)\b|\bwhat'?s wrong\b|\banything (wrong|to fix|to check)\b|"
+                         r"\b(problems?|issues?) (in|with) (the )?(hive|garden|nodes?|plants?)\b|\bwhat should i (check|fix|look at)\b")
+
+
+def attention_reply(hive, st):
+    """ "What needs attention in the hive?" sometimes left out the Cactus at 96 % against 5-20 %. Every item, from data."""
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    items = []
+    for n in st.get("nodes", []):
+        if n.get("hidden"):
+            continue
+        nm = "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"])
+        soil, band = (n.get("derived") or {}).get("soil"), (cfg.get(str(n["id"])) or {}).get("plant_band")
+        if soil is not None and band and not band[0] <= soil <= band[1]:
+            items.append("%s: soil %.0f%%, %s its %s-%s%% band" % (nm, soil, "above" if soil > band[1] else "BELOW",
+                                                                 band[0], band[1]))
+        issue = known_issue(n["id"])
+        if issue:
+            items.append("%s: known issue - %s" % (nm, issue.split(". ")[0].rstrip(".")))
+        warn = [w for w in n.get("warnings") or [] if not w.startswith("soil raw")]
+        if warn:
+            items.append("%s: %s" % (nm, "; ".join(warn)))
+    for x in st.get("silent") or []:
+        if (x.get("age") or 0) < 7 * 86400 and not (cfg.get(str(x["id"])) or {}).get("hidden"):
+            items.append("node %s%s: not reporting (last heard %s ago)" % (x["id"], (" " + x["name"]) if x.get("name") else "",
+                                                                          ago(x.get("age"))))
+    p = t_list_problems(hive)
+    if p["active_now"] != "none":
+        items.append("active problems: %s" % p["active_now"])
+    if not items:
+        return "Nothing needs attention: every plant is inside its band, every node is reporting and no problems are active."
+    return "What needs attention:\n%s" % "\n".join("- " + x for x in items)
+
+
 def hive_wide_facts(hive, st, named, q):
     out = []
     if not is_question(q) or COMMAND.search(q):
@@ -3567,7 +3601,8 @@ PAST_MARK = re.compile(r"(?i)\b(yesterday|last (night|week|month|time)|ago|earli
                        r"aug|sep|oct|nov|dec)\w* \d|\d{4}-\d\d-\d\d|according to|the log)\b")
 
 
-HISTORY_MARK = re.compile(r"(?i)\b(\d+|once|twice|zero|no|several|many) times?\b|\bthis (week|month)\b|\b(in|over|during) "
+HISTORY_MARK = re.compile(r"(?i)\b(\d+|once|twice|zero|no|several|many) times?\b|\bthis (week|month)\b|\b(ever|in total|so far|"
+                          r"since (it|records|the start|oct\w*|sep\w*))\b|\b(in|over|during) "
                           r"the (last|past) (\d+|few|seven|7) (days|hours|weeks)\b|\bso far\b")
 
 
@@ -4000,6 +4035,35 @@ def ask(hive, messages, q, on_tool=None):
             fixed = admin_reply(hive, st, nodes, q)
         except RuntimeError:
             fixed = None
+    if not fixed and ATTENTION_Q.search(q) and is_question(q) and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            an = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        if not an:
+            try:
+                fixed = attention_reply(hive, st)
+            except RuntimeError:
+                fixed = None
+    if not fixed and is_question(q) and not COMMAND.search(q) and re.search(
+            r"(?i)\b(in total|ever|all[- ]time|altogether|lifetime)\b", q) and WATER_TOTAL.search(q):
+        # "how many ml has the rhubarb's pump done in total?" sometimes lost "since records began"
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            pn = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+        finally:
+            SAID[:] = keep
+        if len(pn) == 1:
+            t = watering_total(hive, pn[0], q)
+            m = re.match(r"WATER TOTAL for (.+?), its whole record \(since (.+?) - nothing before that is kept\): (\d+) ml in "
+                         r"(\d+) waterings?\.", t or "")
+            if m:
+                fixed = "%s's pump has delivered %s ml in %s watering%s since its records begin (%s)%s" % (
+                    m.group(1), m.group(3), m.group(4), "" if m.group(4) == "1" else "s", m.group(2),
+                    "." + (t.split("(Worked out")[1].split(")", 1)[1] if ")" in t.split("(Worked out")[1] else ""))
     if not fixed and AUTO_SWITCH_Q.search(q):
         fixed = auto_switch_reply(nodes, q)
     if not fixed and is_question(q) and SOIL_TEMP_NOW_Q.search(q) and not DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) \

@@ -1097,5 +1097,13 @@ out = conv.ask(hive, "did it work?")
 check(out["answer"].startswith("Not yet") and "pump 30 ml on Larkspur (node 7)" in out["answer"] and not fake_llm.calls,
       "'did it work?' with a card still waiting says it's waiting for Confirm", out["answer"])
 
+# The attention list and lifetime totals come from data, not the model.
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "what needs attention in the hive?")
+check(not fake_llm.calls and (out["answer"].startswith("What needs attention") or out["answer"].startswith("Nothing needs attention")),
+      "'what needs attention?' is listed from the data", out["answer"][:160])
+check(C.HISTORY_MARK.search("The larkspur has been watered 446 ml in total."), "'in total' marks history, not a claim")
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
