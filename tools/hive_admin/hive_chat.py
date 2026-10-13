@@ -2172,7 +2172,9 @@ def forecast_reply(hive, q):
             out.append("**Rain:** uncertain - %s give%s some (up to %.1f mm), %s don't." % (
                 ", ".join(wet), "s" if len(wet) == 1 else "", max(rains),
                 ", ".join(m for m in per if m not in wet)))
-    if his:
+    if his and label.startswith("tonight"):
+        out.append("**Temperature:** falling to a low of %s to %s." % (c_f(min(los)), c_f(max(los))))
+    elif his:
         out.append("**Temperature:** high %s to %s, low %s to %s." % (c_f(min(his)), c_f(max(his)), c_f(min(los)),
                                                                      c_f(max(los))))
         if re.search(r"(?i)freez|frost|cold", q) or min(los) < 3:
