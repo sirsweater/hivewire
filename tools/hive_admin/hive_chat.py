@@ -3373,6 +3373,12 @@ def forecast_reply(hive, q):
             pass
         out.append("**Gusts:** up to %.0f-%.0f km/h%s." % (min(gusts), max(gusts), note))
     when = max((fc.get("issued") or {}).values() or [0])
+    last = max((t for vars_ in models.values() for t, _ in vars_.get("temp") or []), default=0)
+    if re.search(r"(?i)\b(this|next|the) week(end)?\b|\bweekend\b|\b(next|coming) (few|several|\d+) days\b|\bweek ahead\b", q) \
+            and last and last - time.time() < 4 * 86400:
+        # "is it going to freeze this week?" was answered from 48 hours without saying so
+        out.append("**Note:** the hive keeps forecasts only to %s, so this doesn't cover the whole %s." % (
+            time.strftime("%a %d %b", time.localtime(last)), "weekend" if re.search(r"(?i)weekend", q) else "week"))
     return ("Forecast for %s, from %d public weather models (%s), fetched %s:\n\n%s" % (
         label, len(per), ", ".join(per), time.strftime("%H:%M", time.localtime(when)) if when else "recently",
         "\n".join("- " + x for x in out)))
