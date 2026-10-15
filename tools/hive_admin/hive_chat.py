@@ -4550,7 +4550,12 @@ def ask(hive, messages, q, on_tool=None):
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(would you like|shall i|should i|do you want)\b[^.!?\n]*\breboot\w*\b[^.!?\n]*\?", "", answer)
         # "3. **Reboot Node**: Rebooting the node might help" as one of the steps
         answer = re.sub(r"(?im)^[ \t]*(\d+[.)]|[-*•])[^\n]*\breboot\w*\b[^\n]*$\n?", "", answer)
-        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\breboot\w*\b[^.!?\n]*\b(might|may|could|would) (help|fix|resolve|clear)\b[^.!?\n]*[.!?]?", "", answer)
+        # "Rebooting can sometimes resolve transient issues. If not, we may need to wait..." (and its "if not" tail)
+        tail = r"([ \t]*\bif (not|that (doesn't|does not|fails)|this (doesn't|does not|fails))\b[^.!?\n]*[.!?]?)?"
+        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\breboot\w*\b[^.!?\n]*\b(can|might|may|could|would|should|will)( \w+)? "
+                        r"(help|fix|resolve|clear|solve|reset)\b[^.!?\n]*[.!?]?" + tail, "", answer)
+        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(try|trying|consider|considering|recommend|suggest)\w*\b[^.!?\n]*\breboot\w*\b[^.!?\n]*[.!?]?" + tail,
+                        "", answer)
     try:
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
