@@ -51,6 +51,7 @@ from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # n
 from waterlearn import LearnThread, WaterLearner  # noqa: E402
 from potcare import SeedMode, SeedThread, analyze_soak, scaled_band  # noqa: E402
 from forecasts import Forecasts, ForecastThread  # noqa: E402
+from streamplant import StreamPlant  # noqa: E402
 import hive_chat  # noqa: E402
 
 DUMP_LINE = re.compile(r"^DUMP (\d+) age=(\d+) hops=(\d+)(.*)$")
@@ -1383,6 +1384,9 @@ class App:
             slots=lambda nid: ((self.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {})
         # Public model forecasts saved next to what the station measures, and
         # scored against it (forecasts.py). Off until the config has a place.
+        # A plant on a Twitch stream that viewers can water (streamplant.py).
+        # Off until the Stream page turns it on.
+        self.stream = None if self.flash_only else StreamPlant(self, args.data)
         self.forecasts = None if self.flash_only else Forecasts(
             self.store, lambda: self.cfg.data.get("forecast"),
             log=lambda msg: self.store.event("system", msg))
@@ -1960,6 +1964,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         q = dict(urllib.parse.parse_qsl(u.query))
         if u.path in ("/", "/index.html") or u.path.startswith("/static/"):
             return self.static(u.path)
+        if u.path == "/api/stream/overlay":
+            # The stream's video overlay, fetched by the machine that composes the
+            # stream: no session, a key of its own. Only what is on screen anyway.
+            st = self.app.stream
+            key = (st.settings().get("overlay_key") if st else "") or ""
+            if not key or not hmac.compare_digest(str(q.get("key", "")), key):
+                return self.fail("not found", 404)
+            return self.send_json(st.overlay())
         if u.path == "/api/session":
             return self.send_json({"authed": self.authed(), "flash_only": self.app.flash_only,
                                    "needs_setup": not self.app.flash_only
@@ -2023,6 +2035,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def stream_post(self, what, b):
+        st = self.app.stream
+        if not st:
+            raise ValueError("no stream in flash-only mode")
+        if what == "config":
+            st.save_settings(b)
+            self.app.store.event("config", "stream settings: %s" % ", ".join(sorted(b)))
+        elif what == "login":
+            return self.send_json(st.auth.start_device())
+        elif what == "unlink":
+            st.auth.forget()
+            st.ensure_eventsub()
+            self.app.store.event("config", "stream: Twitch account unlinked")
+        elif what == "overlay_key":
+            return self.send_json({"key": st.new_overlay_key()})
+        elif what == "test":
+            ok, msg = st.water.request("test", "admin", "a test from the admin page", ml=int(b.get("ml") or 5))
+            return self.send_json({"ok": ok, "message": msg or ("queued" if ok else "refused")})
+        elif what == "retry":
+            return self.send_json({"ok": st.water.retry(int(b["id"]))})
+        elif what == "drop":
+            return self.send_json({"ok": st.water.drop(int(b["id"]))})
+        elif what == "reward":
+            return self.send_json({"reward_id": st.create_reward()})
+        else:
+            return self.fail("not found", 404)
+        return self.send_json(st.status())
+
     def first_setup(self):
         if self.app.cfg.data["password"]:
             return self.fail("already set up", 403)
@@ -2064,6 +2104,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # --- API -----------------------------------------------------------------
     def route_get(self, path, q):
+        if path == "/api/stream":
+            if not self.app.stream:
+                raise ValueError("no stream in flash-only mode")
+            return self.send_json(self.app.stream.status())
         app = self.app
         if path == "/api/flash":
             from flasher import find_esptool
@@ -2385,6 +2429,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def route_post(self, path, q):
+        if path.startswith("/api/stream/"):
+            return self.stream_post(path[len("/api/stream/"):], self.jbody())
         app = self.app
         if path == "/api/flash/start":
             b = self.jbody()
@@ -2717,6 +2763,7 @@ def main():
         app.uploader.start()
         RollupThread(app.rollup).start()
         ForecastThread(app.forecasts).start()
+        app.stream.start()
 
         def pump_nodes():
             snap = (app.poller.snapshot or {}).get("nodes", {})

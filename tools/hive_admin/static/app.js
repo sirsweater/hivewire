@@ -853,6 +853,176 @@ function chatText(t) {
   // Model output is untrusted text: escape everything, keep line breaks and **bold**.
   return esc(t).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/\n/g, "<br>");
 }
+// ---------------------------------------------------------------------------
+// Stream: a plant on Twitch that viewers can water (streamplant.py)
+// ---------------------------------------------------------------------------
+views.stream = async (el) => {
+  const r = await api("/api/stream");
+  const s = r.settings, tw = r.twitch, p = r.plant || {};
+  const pumps = STATE.nodes.filter((n) => (((KINDS[n.kind] || {}).slots || {})["40"] || {}).writable);
+  const ago = (t) => fmtAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));
+  const srcName = { chat: "chat", points: "channel points", bits: "Bits", test: "test" };
+  const overlayUrl = r.overlay_key_set ? `${location.origin}/api/stream/overlay?key=` : "";
+  const num = (id, label, v, min, max, w = 100) =>
+    `<label class="f">${label}<input id="${id}" type="number" min="${min}" max="${max}" value="${esc(v)}" style="width:${w}px"></label>`;
+  el.innerHTML = `
+    <div class="head spread"><div><h1>Stream</h1>
+      <div class="muted small">A plant on a Twitch stream that viewers can water from chat, with channel points or with Bits.
+        The node's own limits still apply to every drop.</div></div>
+      <span class="pill ${s.enabled ? (s.paused ? "warn" : "good") : ""}">${s.enabled ? (s.paused ? "paused" : "viewers can water") : "off"}</span></div>
+
+    <div class="grid cols-2">
+      <div class="card stack"><h2>1 · The plant</h2>
+        <form id="plantform" class="row" style="align-items:flex-end">
+          <label class="f">Pump node<select id="st-node"><option value="">— none —</option>
+            ${pumps.map((n) => `<option value="${n.id}" ${s.node === n.id ? "selected" : ""}>${esc(nodeTitle(n))} #${n.id}</option>`).join("")}</select></label>
+          <button>Save</button></form>
+        ${p.node !== undefined ? `<div class="kv" style="max-width:420px">
+          <div class="k">Soil</div><div class="v">${p.soil == null ? "—" : p.soil + " %"}</div>
+          <div class="k">Light</div><div class="v">${p.light == null ? "no light on this node" : p.light ? "on" : "off"}</div>
+          <div class="k">Reservoir</div><div class="v">${p.reservoir_empty ? '<span class="pill bad">empty</span>' : "ok (or no float switch)"}</div></div>` : ""}
+        <div class="row">
+          <button class="${s.enabled ? "danger" : "primary"}" id="st-enable" ${s.node == null ? "disabled" : ""}>${s.enabled ? "Turn viewer watering off" : "Turn viewer watering on"}</button>
+          <button id="st-pause" ${s.enabled ? "" : "disabled"}>${s.paused ? "Resume" : "Pause free water"}</button></div>
+        <form id="testform" class="row" style="align-items:flex-end">
+          ${num("st-test-ml", "Test watering (ml)", 5, 1, 500, 90)}
+          <button ${s.enabled ? "" : "disabled"}>Queue a test</button></form>
+        <p class="muted small">A test goes through the same queue and checks as a viewer's, so it shows the whole path working before the stream does.</p></div>
+
+      <div class="card stack"><h2>2 · Twitch account</h2>
+        ${tw.linked
+          ? `<div class="row"><span class="pill good">linked</span><b>${esc(tw.login || "")}</b>
+               <span class="pill ${tw.connected ? "good" : "warn"}">${tw.connected ? "listening" : "not connected"}</span></div>
+             <div class="kv small">${Object.entries(tw.subscriptions || {}).map(([k, v]) =>
+               `<div class="k">${esc(k.replace("channel.", "").replace("_custom_reward_redemption.add", " redemptions"))}</div><div class="v">${v === "ok" ? "ok" : esc(v)}</div>`).join("")}</div>
+             ${tw.error ? `<div class="err small">${esc(tw.error)}</div>` : ""}
+             ${tw.chat_error ? `<div class="err small">chat: ${esc(tw.chat_error)}</div>` : ""}
+             <p class="muted small">Channel points and Bits answer 403 until the channel is a Twitch Affiliate; the chat command works on any channel.</p>
+             <div><button class="danger" id="st-unlink">Unlink</button></div>`
+          : `<p class="muted small">At <span class="mono">dev.twitch.tv/console</span>, register an application: any name, OAuth redirect
+               <span class="mono">http://localhost</span> (it isn't used), category Other, client type <b>Public</b>. Paste its client ID here,
+               then link: you'll get a code to type at twitch.tv/activate. No password or secret is ever typed into this page.</p>
+             <form id="cidform" class="row" style="align-items:flex-end">
+               <label class="f">Client ID<input id="st-cid" value="${esc(s.client_id)}" style="width:260px" autocomplete="off"></label>
+               <button>Save</button></form>
+             <div><button class="primary" id="st-link" ${s.client_id ? "" : "disabled"}>Link a Twitch account</button></div>
+             <div id="st-device" class="stack"></div>`}
+      </div>
+    </div>
+
+    <div class="card stack" style="margin-top:16px"><h2>3 · Rules</h2>
+      <form id="rulesform" class="stack">
+        <div class="row" style="align-items:flex-end">
+          <label class="f">Chat command<input id="st-command" value="${esc(s.command)}" style="width:110px"></label>
+          ${num("st-chat-ml", "Chat: ml each", s.chat_ml, 1, 500)}
+          ${num("st-chat-cd", "Wait between, everyone (s)", s.chat_cooldown_s, 0, 86400, 120)}
+          ${num("st-user-cd", "Wait per viewer (s)", s.user_cooldown_s, 0, 86400, 120)}</div>
+        <div class="row" style="align-items:flex-end">
+          ${num("st-points-ml", "Channel points: ml", s.points_ml, 1, 1000)}
+          <label class="f">Reward title<input id="st-reward-title" value="${esc(s.reward_title)}" style="width:170px"></label>
+          ${num("st-reward-cost", "Cost (points)", s.reward_cost, 1, 1000000, 110)}
+          <span class="small muted">${s.reward_id ? "reward created" : ""}</span></div>
+        <div class="row" style="align-items:flex-end">
+          ${num("st-bits-rate", "Bits: ml per 100", s.bits_ml_per_100, 0, 5000)}
+          ${num("st-bits-max", "Most from one cheer (ml)", s.bits_max_ml, 0, 20000, 120)}
+          ${num("st-day", "Free water per 24 h (ml)", s.viewer_day_ml, 0, 20000, 120)}
+          ${num("st-queue", "Free water waiting, at most", s.max_free_queue, 1, 50)}</div>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="st-announce" ${s.announce ? "checked" : ""}> Say each watering in chat</label>
+        <div class="row"><button class="primary">Save rules</button>
+          <button type="button" id="st-reward" ${tw.linked && !s.reward_id ? "" : "disabled"}>Create the channel-point reward</button></div>
+      </form>
+      <p class="muted small">Free water (chat, channel points) stops at the daily amount and waits out the cooldowns; refused channel points are refunded.
+        Bits can't be refunded, so they always queue, and wait for the node if it is at its own limit. The node's per-watering and per-24 h limits
+        (its Max per watering and Max per 24 h settings) are the final word.</p></div>
+
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card stack"><h2>4 · Video overlay</h2>
+        <p class="muted small">The machine that sends the stream to Twitch reads this address for the text it draws over the video.
+          It needs no login, so it has a key of its own; making a new key stops the old address working.</p>
+        ${overlayUrl ? `<div class="mono small" style="word-break:break-all">${esc(overlayUrl)}<span id="st-key">…</span></div>` : '<div class="muted small">No key yet.</div>'}
+        <div class="row"><button id="st-newkey">${overlayUrl ? "Make a new key" : "Make a key"}</button></div></div>
+      <div class="card stack"><h2>Now</h2>
+        <div id="st-now"></div></div>
+    </div>
+
+    <div class="card stack" style="margin-top:16px"><h2>Waterings</h2>
+      <div class="tablewrap"><table id="st-table"></table></div></div>`;
+
+  const save = async (patch, msg = "Saved") => {
+    try { await api("/api/stream/config", patch); toast(msg); render(); } catch (e) { toast(e.message); }
+  };
+  $("#plantform").onsubmit = (e) => { e.preventDefault(); save({ node: $("#st-node").value === "" ? null : +$("#st-node").value }); };
+  $("#st-enable").onclick = () => save({ enabled: !s.enabled }, s.enabled ? "Viewer watering off" : "Viewer watering on");
+  $("#st-pause").onclick = () => save({ paused: !s.paused }, s.paused ? "Resumed" : "Free water paused");
+  $("#testform").onsubmit = async (e) => {
+    e.preventDefault();
+    try { const x = await api("/api/stream/test", { ml: +$("#st-test-ml").value }); toast(x.message); refresh(); } catch (err) { toast(err.message); }
+  };
+  $("#rulesform").onsubmit = (e) => {
+    e.preventDefault();
+    save({ command: $("#st-command").value, chat_ml: +$("#st-chat-ml").value, chat_cooldown_s: +$("#st-chat-cd").value,
+      user_cooldown_s: +$("#st-user-cd").value, points_ml: +$("#st-points-ml").value, reward_title: $("#st-reward-title").value,
+      reward_cost: +$("#st-reward-cost").value, bits_ml_per_100: +$("#st-bits-rate").value, bits_max_ml: +$("#st-bits-max").value,
+      viewer_day_ml: +$("#st-day").value, max_free_queue: +$("#st-queue").value, announce: $("#st-announce").checked });
+  };
+  $("#st-reward").onclick = async () => {
+    try { await api("/api/stream/reward", {}); toast("Reward created"); render(); } catch (e) { toast(e.message, 6000); }
+  };
+  $("#st-newkey").onclick = async () => {
+    if (overlayUrl && !confirm("Make a new key? The streaming machine must be given the new address.")) return;
+    try { const x = await api("/api/stream/overlay_key", {}); await render(); $("#st-key").textContent = x.key; } catch (e) { toast(e.message); }
+  };
+  if ($("#st-key")) {
+    // The key is in the saved settings; shown here so it can be copied.
+    api("/api/config").then((c) => { $("#st-key").textContent = ((c.stream || {}).overlay_key) || ""; }).catch(() => {});
+  }
+  if ($("#cidform")) $("#cidform").onsubmit = (e) => { e.preventDefault(); save({ client_id: $("#st-cid").value }); };
+  if ($("#st-unlink")) $("#st-unlink").onclick = async () => {
+    if (!confirm("Unlink the Twitch account? Viewers' chat and rewards stop reaching the plant.")) return;
+    try { await api("/api/stream/unlink", {}); render(); } catch (e) { toast(e.message); }
+  };
+  const showDevice = (d) => {
+    const box = $("#st-device");
+    if (!box || !d) return;
+    box.innerHTML = d.state === "waiting" || d.state.startsWith("waiting")
+      ? `<div>On any device, open <a href="${esc(d.verification_uri)}" target="_blank" rel="noopener">${esc(d.verification_uri)}</a> and enter</div>
+         <div class="mono" style="font-size:28px;letter-spacing:3px">${esc(d.user_code)}</div>
+         <div class="muted small">Waiting for you to approve… (${esc(d.state)})</div>`
+      : `<div class="${d.state === "linked" ? "" : "err"}">${esc(d.state)}</div>`;
+  };
+  if ($("#st-link")) $("#st-link").onclick = async () => {
+    try { showDevice(await api("/api/stream/login", {})); } catch (e) { toast(e.message, 6000); }
+  };
+  showDevice(tw.device);
+
+  const refresh = async () => {
+    let x;
+    try { x = await api("/api/stream"); } catch { return; }
+    if (x.twitch.device && $("#st-device")) {
+      showDevice(x.twitch.device);
+      if (x.twitch.device.state === "linked") { render(); return; }
+    }
+    const fmtR = (q) => `<tr><td class="small">${q.status === "queued" || q.status === "sent" ? "waiting " + ago(q.at) : ago(q.done_at || q.at)}</td>
+      <td>${esc(q.name)} <span class="muted small">${esc(srcName[q.src] || q.src)}${q.bits ? " · " + q.bits + " bits" : ""}</span></td>
+      <td class="num">${q.ml} ml</td><td>${esc(q.status)}${q.note ? `<div class="muted small">${esc(q.note)}</div>` : ""}</td>
+      <td>${q.status === "unconfirmed" ? `<button data-retry="${q.id}">Retry</button>` : q.status === "queued" ? `<button data-drop="${q.id}">Remove</button>` : ""}</td></tr>`;
+    $("#st-now").innerHTML = `<div class="kv"><div class="k">Doing</div><div class="v">${esc(x.status)}</div>
+      <div class="k">Free water, last 24 h</div><div class="v">${x.free_ml_24h} of ${x.settings.viewer_day_ml} ml</div>
+      <div class="k">Waiting</div><div class="v">${x.queue.length}</div></div>`;
+    $("#st-table").innerHTML = `<tr><th>When</th><th>Who</th><th class="num">Water</th><th>Outcome</th><th></th></tr>` +
+      ([...x.queue, ...x.history].map(fmtR).join("") || '<tr><td colspan="5" class="muted">No waterings yet.</td></tr>');
+  };
+  $("#st-table").onclick = async (e) => {
+    const id = e.target.dataset.retry || e.target.dataset.drop;
+    if (!id) return;
+    if (e.target.dataset.retry && !confirm("Send this dose again? The node never showed the first one, but it may still have pumped.")) return;
+    try { await api(e.target.dataset.retry ? "/api/stream/retry" : "/api/stream/drop", { id: +id }); refresh(); } catch (err) { toast(err.message); }
+  };
+  await refresh();
+  clearInterval(views.stream._t);
+  views.stream._t = setInterval(() => { if (route().name !== "stream") { clearInterval(views.stream._t); return; } refresh(); }, 4000);
+};
+
 views.chat = async (el) => {
   const cfg = await api("/api/chat/config");
   const setup = `
