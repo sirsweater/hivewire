@@ -4585,6 +4585,8 @@ def no_card_offers(answer):
         # " If so, I will need your confirmation before proceeding." with no card
         (r"(?i)[ \t]*[^.!?\n]*\b(need your (confirmation|approval|go-ahead)|confirm(ation)? before proceeding|if so, (i|we) "
          r"(will|can|could))\b[^.!?\n]*[.!?]?", ""),
+        # "This action will be sent once you confirm" left behind when an offer to water was scrubbed
+        (r"(?i)[ \t]*[^.!?\n]*\b(this|the|that|your) (action|command|request|watering request)s? will\b[^.!?\n]*[.!?]?", ""),
         # "I will set the pump flow to 1 ml/min" with no card
         (r"(?i)[ \t]*[^.!?\n]*\bI('ll| will| am going to|'m going to) (now |go ahead and )?(set|water|change|turn|"
          r"start|send|update|adjust|reboot|rename|stop)\b[^.!?\n]*[.!?]?", ""),

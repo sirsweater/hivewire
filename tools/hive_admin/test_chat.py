@@ -748,6 +748,8 @@ check(t == "It takes about 2.1 minutes.\nWant a test watering?", "a typed y/n is
 t = C.no_card_offers("0 is outside the range. I will set the pump flow to 1 ml/min instead.")
 check(t == "0 is outside the range.", "...nor an 'I will set' with no card behind it", t)
 check(C.no_card_offers("I will water it 50 ml.") == "I will water it 50 ml.", "...unless that's all there is to say")
+check(C.no_card_offers("Rhubarb doesn't need water now. This action will be sent only after you confirm.") ==
+      "Rhubarb doesn't need water now.", "a leftover 'this action will be sent' goes when there is no card")
 t = C.scrub_tool_talk("No undervoltage since the 5th.\nTo confirm, I can check the status using a tool. "
                       "Would you like me to do that?")
 check(t == "No undervoltage since the 5th.", "an offer to 'use a tool' goes: it can just use it", t)
