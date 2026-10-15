@@ -4282,8 +4282,15 @@ def ask(hive, messages, q, on_tool=None):
         except RuntimeError:
             fixed = None
     if not fixed and BATTERY_RANK_Q.search(q) and is_question(q) and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
         try:
-            fixed = battery_rank_reply(hive, st)
+            bn = [n for n in nodes if named_by_person(n)]
+        finally:
+            SAID[:] = keep
+        try:
+            # ("what battery level is the cactus at?" is about one node)
+            fixed = battery_rank_reply(hive, st) if len(bn) != 1 else None
         except RuntimeError:
             fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
