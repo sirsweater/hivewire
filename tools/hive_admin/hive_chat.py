@@ -4581,6 +4581,17 @@ def must_say(hive, q, answer):
             answer = re.sub(r"(?i)[^.!?\n]*(\b%s\b[^.!?\n]{0,40}\bautomatic watering\b|\bautomatic watering\b[^.!?\n]{0,40}\b%s\b)"
                             r"[^.!?\n]*\b(on|enabled|active|running|turned on)\b[^.!?\n]*[.!?]?" % (nm, nm),
                             "%s has no pump, so it has no automatic watering." % n["name"], answer)
+    # "All nodes are set to automatic watering with their respective target soil bands" - the Cactus has no pump.
+    if re.search(r"(?i)\b(all|every|each)( the| of the)? (nodes|plants|pots)\b[^.!?\n]*\bautomatic watering\b|"
+                 r"\bautomatic watering\b[^.!?\n]*\b(all|every) (nodes|plants|pots)\b", answer):
+        on = [n["name"] for n in st.get("nodes", []) if n.get("name") and not n.get("hidden") and
+              has_pump(hive, n.get("kind")) and (n.get("slots") or {}).get("49")]
+        off = [n["name"] for n in st.get("nodes", []) if n.get("name") and not n.get("hidden") and
+               (n.get("derived") or {}).get("soil") is not None and n["name"] not in on]
+        answer = re.sub(r"(?i)[^.!?\n]*\b(all|every|each)( the| of the)? (nodes|plants|pots)\b[^.!?\n]*\bautomatic watering\b"
+                        r"[^.!?\n]*[.!?:]?|[^.!?\n]*\bautomatic watering\b[^.!?\n]*\b(all|every) (nodes|plants|pots)\b[^.!?\n]*[.!?:]?",
+                        "Automatic watering is on for %s%s." % (" and ".join(on) or "no plant",
+                                                                "; not for %s" % ", ".join(off) if off else ""), answer, count=1)
     # "The Rhubarb (node 5) does not have a pump" - it does; the model mixed it up with the Cactus.
     for n in st.get("nodes", []):
         if n.get("name") and has_pump(hive, n.get("kind")):
