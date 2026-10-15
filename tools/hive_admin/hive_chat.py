@@ -937,7 +937,9 @@ def watering_record(hive, n):
     kind, slots = n.get("kind"), n.get("slots") or {}
     sid = pumped_slot(hive, kind)
     pumped = slots.get(sid) if sid else None
-    run = last_pump_run(hive, n, sid) if sid else None
+    # (a week with no run had stopped the search: "how many days ago was it last watered?" got "not in the last 7 days"
+    # when it had run 9.6 days ago)
+    run = (last_pump_run(hive, n, sid) or last_pump_run(hive, n, sid, days=30)) if sid else None
     sent = None
     for e in hive.call("GET", "/api/events", {"limit": 3000}) or []:
         m = re.match(r"set %d 40 (\d+)\b" % n["id"], e.get("text", ""))
@@ -951,7 +953,7 @@ def watering_record(hive, n):
                 "%s, %s ml (%s ago)" % (when(run[0]), run[1], "%.1f days" % ((time.time() - run[0]) / 86400.0)
                                          if time.time() - run[0] >= 172800 else ago(int(time.time()) - run[0]))
                 if run else
-                "not in the last 7 days" if sid else "unknown",
+                "not in the last 30 days" if sid else "unknown",
                 "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n)
 
 
@@ -3303,6 +3305,10 @@ def forecast_window(q):
     if re.search(r"(?i)\btomorrow\b", q):
         return midnight + 86400, midnight + 2 * 86400, time.strftime("tomorrow (%a %d %b)", time.localtime(midnight + 86400))
     if re.search(r"(?i)\btoday|this (afternoon|evening)|later\b", q):
+        if now.tm_hour >= 20:
+            # "today's weather" at 23:40 had a 20-minute window with no forecast hour in it
+            return int(time.time()), midnight + 2 * 86400, time.strftime("tonight and tomorrow (%a %d %b)",
+                                                                          time.localtime(midnight + 86400))
         return int(time.time()), midnight + 86400, "the rest of today"
     return int(time.time()), int(time.time()) + 48 * 3600, "the next 48 hours"
 
@@ -3346,7 +3352,7 @@ def forecast_reply(hive, q):
             out.append("**Rain:** uncertain - %s give%s some (up to %.1f mm), %s don't." % (
                 ", ".join(wet), "s" if len(wet) == 1 else "", max(rains),
                 ", ".join(m for m in per if m not in wet)))
-    if his and label.startswith("tonight"):
+    if his and label.startswith("tonight (to"):
         out.append("**Temperature:** falling to a low of %s." % c_range(min(los), max(los)))
     elif his:
         out.append("**Temperature:** high %s, low %s." % (c_range(min(his), max(his)), c_range(min(los), max(los))))
@@ -4399,11 +4405,16 @@ def must_say(hive, q, answer):
             # "When was it last watered?" with no run in the week came back as "not in the last 24 hours".
             if PAST_WATERING.search(q) and not REQUEST.search(q) and not WATER_TOTAL.search(q):
                 rec = watering_record(hive, n)
+                old_run = re.search(r"Pump last ran \(automatic or sent\): (\w{3} \d\d) \d\d:\d\d, ([\d.]+) ml \(([\d.]+) days ago\)", rec)
+                gave_date = re.search(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w* \d|\d{4}-\d\d-\d\d|"
+                                      r"\b\d+(\.\d)? days ago\b|\b(over|about|nearly|almost) \d+(\.\d)? days\b", answer)
                 # (an answer that gives the last date - "last watered on Oct 05" - already says it)
-                if "not in the last 7 days" in rec and not re.search(
-                        r"(?i)\b(7 days|seven days|a week|this week|past week|last week)\b", answer) and not re.search(
-                        r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w* \d|\d{4}-\d\d-\d\d|\b\d+ days ago\b", answer):
-                    add.append("%s's pump hasn't run in the last 7 days." % name)
+                if "not in the last 30 days" in rec and not re.search(r"(?i)\b(30 days|thirty days|a month)\b", answer) \
+                        and not gave_date:
+                    add.append("%s's pump hasn't run in the last 30 days." % name)
+                elif old_run and float(old_run.group(3)) >= 7 and not gave_date:
+                    add.append("%s's pump last ran on %s (%s ml, %s days ago)." % (
+                        name, old_run.group(1), old_run.group(2), old_run.group(3)))
         elif re.search(r"(?i)\b(water|irrigate)\b", q) and REQUEST.search(q) and not re.search(
                 r"(?i)%s[^.]*\b(no pump|doesn't have a pump|does not have a pump|can't be watered|cannot be watered)"
                 % re.escape(name), answer):
