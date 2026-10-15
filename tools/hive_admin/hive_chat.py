@@ -1054,14 +1054,20 @@ def watering_record(hive, n):
             sent = (e["ts"], int(m.group(1)))
             break                       # newest first
     when = lambda t: time.strftime("%b %d %H:%M", time.localtime(t))
-    return ("WATERING RECORD for %s (node %s): pumped in the last 24 h: %s. Pump last ran (automatic or sent): %s. "
+    hand = hand_note(hive, n, run)
+    last = last_watered_at(hive, n) if hand else None
+    # Said first when a hand watering came after the pump's run: given the pump's "10.1 days ago" and the hand
+    # watering's date, it answered "last watered 10.1 days ago ... between Mon 12 Oct 06:00 and 14:00".
+    lead = ("LAST WATERED: %s (%s ago), by hand - not the pump's run below. " % (
+        time.strftime("%a %d %b %H:%M", time.localtime(last)), days_ago(last))) if last else ""
+    return lead + ("WATERING RECORD for %s (node %s): pumped in the last 24 h: %s. Pump last ran (automatic or sent): %s. "
             "Last watering sent from the hive or this chat: %s." % (
                 n.get("name") or kind, n["id"], "unknown" if pumped is None else "%s ml" % pumped,
                 "%s, %s ml (%s ago)" % (when(run[0]), run[1], "%.1f days" % ((time.time() - run[0]) / 86400.0)
                                          if time.time() - run[0] >= 172800 else ago(int(time.time()) - run[0]))
                 if run else
                 "not in the last 30 days" if sid else "unknown",
-                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n) + hand_note(hive, n, run)
+                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n) + hand
 
 
 def hand_note(hive, n, run):
@@ -4714,6 +4720,15 @@ def must_say(hive, q, answer):
                 elif old_run and float(old_run.group(3)) >= 7 and not gave_date:
                     add.append("%s's pump last ran on %s (%s ml, %s days ago)." % (
                         name, old_run.group(1), old_run.group(2), old_run.group(3)))
+                # "Last watered 10.1 days ago" (the pump's run) when a hand watering came 3.4 days ago.
+                t = last_watered_at(hive, n)
+                if t:
+                    true_d = (time.time() - t) / 86400.0
+
+                    def fix_days(m):
+                        return ("%.1f days ago" % true_d) if abs(float(m.group(1)) - true_d) > 1 else m.group(0)
+                    answer = re.sub(r"(?i)[^.!?\n]*\blast watered\b[^.!?\n]*", lambda sm: re.sub(
+                        r"(?<![\d.])(\d+(?:\.\d+)?) days ago\b", fix_days, sm.group(0)), answer)
                 # "How many days ago was it last watered?" answered with a date and no count of days.
                 if DAYS_AGO_Q.search(q) and not re.search(r"(?i)\b(\d+(\.\d)?|one|two|three|four|five|six|seven|eight|"
                                                          r"nine|ten|a few|several) days?\b|\b(hours?|minutes?) ago\b", answer):
