@@ -1059,7 +1059,21 @@ def watering_record(hive, n):
                                          if time.time() - run[0] >= 172800 else ago(int(time.time()) - run[0]))
                 if run else
                 "not in the last 30 days" if sid else "unknown",
-                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n)
+                "%s ml on %s" % (sent[1], when(sent[0])) if sent else "none in the log")) + uncounted(n) + hand_note(hive, n, run)
+
+
+def hand_note(hive, n, run):
+    """A climb in the soil after the pump's last run that the pump didn't make: watered by hand (or rain)."""
+    try:
+        rises = [r for r in soil_rises(hive, n) if not run or r[0] > run[0]]
+    except RuntimeError:
+        return ""
+    if not rises:
+        return ""
+    t0, t1, a, b = rises[-1]
+    return (" WATERED SINCE, NOT BY THE PUMP: its soil climbed from %.0f %% to %.0f %% between %s and %s with no pump run - "
+            "a watering by hand (or rain on an open pot). Say so: that is its last watering." % (
+                a, b, time.strftime("%a %d %b %H:%M", time.localtime(t0)), time.strftime("%H:%M", time.localtime(t1))))
 
 
 def confirm(summary, path=None, body=None):
@@ -2185,6 +2199,29 @@ def soil_series(hive, n, hours, res="hour"):
             if None not in (x.get("avg"), x.get("min"), x.get("max"))]
 
 
+def soil_rises(hive, n, hours=24 * 14):
+    """[(t_start, t_end, from %, to %)]: each climb of 15 points or more within 8 hours that no pump run explains -
+    a watering by hand (or rain on an open pot). The Rhubarb went 48 -> 93 % between 04:00 and 10:00 on Oct 15 after
+    a hand watering, its pump counter at 0, and "when was it last watered?" would have said Oct 05. Hour averages; a
+    climb out of an hour that read near 0 % (the probe out of the soil - a repot) doesn't count."""
+    pts = soil_series(hive, n, hours)
+    sid = pumped_slot(hive, n.get("kind")) if has_pump(hive, n.get("kind")) else None
+    runs = [t for t, _ in pump_runs(hive, n, sid, days=max(1, hours // 24))] if sid else []
+    out, i = [], 0
+    while i < len(pts) - 1:
+        j = i
+        while j + 1 < len(pts) and pts[j + 1][1] >= pts[j][1] - 1 and pts[j + 1][0] - pts[i][0] <= 8 * 3600:
+            j += 1
+        top = max(range(i, j + 1), key=lambda k: pts[k][1])
+        if pts[top][1] - pts[i][1] >= 15 and pts[i][2] > 5 and \
+                not any(pts[i][0] - 3600 <= t <= pts[top][0] + 3600 for t in runs):
+            out.append((pts[i][0], pts[top][0], pts[i][1], pts[top][1]))
+            i = top + 1
+        else:
+            i += 1
+    return out
+
+
 BAND_TIME_Q = re.compile(r"(?i)\bhow long\b[^?]*\b(too wet|too dry|soggy|waterlogged|over ?watered|under ?watered|"
                          r"above|below|out of|outside|over|under|wet|dry|in (its |the )?(band|range))\b|"
                          r"\bsince when\b[^?]*\b(wet|dry)\b")
@@ -2439,7 +2476,8 @@ def predict_reply(hive, n, q):
 def hand_watering_fact(hive, n):
     """The Cactus has no pump; "when was it last watered?" can only be a jump in its soil."""
     pts = soil_series(hive, n, 24 * 14)
-    jumps = [(b[0], a[1], b[1]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10]
+    jumps = [(b[0], a[1], b[1]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10 and a[2] > 5]
+    jumps = sorted(jumps + [(t0, a, b) for t0, _, a, b in soil_rises(hive, n)])
     name = n.get("name") or "node %s" % n["id"]
     if not jumps:
         return ("HAND WATERING for %s: it has NO pump, so the hive never waters it. No jump in its soil reading (a sign "
@@ -2911,6 +2949,9 @@ def week_report(hive, st, only=None):
             runs = pump_runs(hive, n, sid, 7) if sid else []
             water = "; pump: %s" % ("%d watering%s, %d ml" % (len(runs), "" if len(runs) == 1 else "s", sum(m for _, m in runs))
                                      if runs else "no waterings")
+            hand = [r for r in soil_rises(hive, n, hours) if r[0] >= start]
+            if hand:
+                water += "; watered by hand (or rain) %s" % ", ".join(time.strftime("%a", time.localtime(r[0])) for r in hand)
         else:
             # (not after an hour that read near 0 %: the probe out of the soil - a repot - and back in isn't a watering)
             jumps = [(b[0]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10 and a[2] > 5]
