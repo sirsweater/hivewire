@@ -812,7 +812,10 @@ def when_dry_reply(hive, st, n):
     if soil is None or not band:
         return None
     name = n.get("name") or "node %s" % n["id"]
-    who = ("its automatic watering will water it then" if has_pump(hive, n.get("kind")) and (n.get("slots") or {}).get("49")
+    issue = known_issue(n["id"]) or ""
+    who = ("its pump has a known fault, so don't count on it - check the pump or water by hand" if "NOT TRUSTED" in issue.upper()
+           and has_pump(hive, n.get("kind")) else
+           "its automatic watering will water it then" if has_pump(hive, n.get("kind")) and (n.get("slots") or {}).get("49")
            else "it has no pump, so that's a hand watering" if not has_pump(hive, n.get("kind")) else "water it then")
     if soil < band[0]:
         return "%s is already below its band - %.0f%% now against %s-%s%% - so it's dry enough to water now (%s)." % (
@@ -2510,6 +2513,37 @@ BATTERY_LIFE_Q = re.compile(r"(?i)\bbatter(y|ies)\b[^?]*\b(die|dies|dead|last|ru
                             r"how long|charg\w*|left)\b|\bhow long\b[^?]*\bbatter(y|ies)\b")
 
 
+BATTERY_RANK_Q = re.compile(r"(?i)\b(which|what|whose)\b[^?]*\bbatter(y|ies)\b[^?]*\b(lowest|weakest|lowest|most drained|least|"
+                            r"low|worst)\b|\b(lowest|weakest) batter(y|ies)\b|\bbatter(y|ies) (levels?|status|report|check)\b|"
+                            r"\b(all|every) (the |node'?s? )?batter(y|ies)\b|\bhow are the batteries\b")
+
+
+def battery_rank_reply(hive, st):
+    """ "Which battery is lowest?" was answered with three nodes' full details and no answer."""
+    rows = []
+    for n in st.get("nodes", []):
+        if n.get("hidden"):
+            continue
+        d = derived(hive, n)
+        pct_sid = slot_by_label(hive, n.get("kind"), "Battery (node's own %)")
+        pct = d.get("Battery") or ((n.get("slots") or {}).get(pct_sid) if pct_sid else None)
+        volts = d.get("Battery voltage")
+        if pct is None and not volts:
+            continue
+        try:
+            key = float(str(pct).split()[0]) if pct is not None else float(str(volts).split()[0]) * 25
+        except ValueError:
+            continue
+        rows.append((key, "%s (node %s): %s%s" % (n.get("name") or n.get("kind"), n["id"],
+                                                  ("%s" % pct if "%" in str(pct) else "%s %%" % pct) if pct is not None else "",
+                                                  (" (%s)" % volts if pct is not None else volts) if volts else "")))
+    if not rows:
+        return None
+    rows.sort()
+    return ("Lowest first:\n%s\n\nLowest is %s. Ask \"how long will the X's battery last?\" for one node's drain rate." % (
+        "\n".join("- " + r for _, r in rows), rows[0][1].split(" (node")[0]))
+
+
 def battery_reply(hive, n):
     """ "How many days until the rhubarb's battery dies?" got "no battery reading" (it reads 84 %)."""
     name = n.get("name") or "node %s" % n["id"]
@@ -2800,15 +2834,21 @@ def sparkline(values, lo=0.0, hi=100.0):
     return out
 
 
-def week_report(hive, st):
-    """ "How did the garden do this week?" - worked out here from the hive's own records."""
+PLANT_WEEK_Q = re.compile(r"(?i)\bhow (did|has|was|were|is)\b[^?]{0,30}\b(do|done|doing|go|gone|been|get on|fare|fared)\b[^?]*"
+                          r"\b(this|past|last) week\b|\bweek(ly)? (report|summary|recap) (for|on) (the |my )?\w+")
+
+
+def week_report(hive, st, only=None):
+    """ "How did the garden do this week?" - worked out here from the hive's own records. With only=node: that
+    plant's line alone ("how did the larkspur do this week?" had been told about its waterings and nothing else)."""
     lt = time.localtime()
     start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - 6, 0, 0, 0, 0, 0, -1))
     days = [time.strftime("%a", time.localtime(start + i * 86400)) for i in range(7)]
     hours = int((time.time() - start) // 3600) + 1
-    lines = ["**The garden, %s to %s** (days: %s)" % (time.strftime("%a %d %b", time.localtime(start)),
-                                                       time.strftime("%a %d %b"), " ".join(d[0] for d in days))]
-    wx = weather_node(st)
+    lines = ["**%s, %s to %s** (days: %s)" % ("The %s" % (only.get("name") or "node %s" % only["id"]) if only else "The garden",
+                                              time.strftime("%a %d %b", time.localtime(start)),
+                                              time.strftime("%a %d %b"), " ".join(d[0] for d in days))]
+    wx = None if only else weather_node(st)
     if wx:
         tsid = slot_by_label(hive, wx["kind"], "Air temperature")
         gsid = slot_by_label(hive, wx["kind"], "Gust (10 min)")
@@ -2833,7 +2873,7 @@ def week_report(hive, st):
             lines.append("- **Weather**: " + "; ".join(bits) + ".")
     cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
     for n in st.get("nodes", []):
-        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
+        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None or (only and n["id"] != only["id"]):
             continue
         pts = soil_series(hive, n, hours)
         if not pts:
@@ -2858,7 +2898,8 @@ def week_report(hive, st):
             water = "; pump: %s" % ("%d watering%s, %d ml" % (len(runs), "" if len(runs) == 1 else "s", sum(m for _, m in runs))
                                      if runs else "no waterings")
         else:
-            jumps = [(b[0]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10]
+            # (not after an hour that read near 0 %: the probe out of the soil - a repot - and back in isn't a watering)
+            jumps = [(b[0]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10 and a[2] > 5]
             if jumps:
                 water = "; watered by hand %s" % time.strftime("%a", time.localtime(jumps[-1]))
         lines.append("- **%s**: soil %.0f-%.0f %%%s `%s`%s." % (n.get("name") or "node %s" % n["id"], lo, hi, where,
@@ -2866,9 +2907,9 @@ def week_report(hive, st):
     errs = []
     for n in st.get("nodes", []):
         c = (n.get("slots") or {}).get("27")
-        if c and not n.get("hidden"):
+        if c and not n.get("hidden") and not (only and n["id"] != only["id"]):
             errs.append("%s %s" % (n.get("name") or n.get("kind"), "E%s" % (n.get("slots") or {}).get("26")))
-    silent = [x.get("name") or "node %s" % x["id"] for x in st.get("silent") or [] if (x.get("age") or 0) < 7 * 86400]
+    silent = [] if only else [x.get("name") or "node %s" % x["id"] for x in st.get("silent") or [] if (x.get("age") or 0) < 7 * 86400]
     if errs or silent:
         lines.append("- **Needs a look**: %s." % "; ".join(
             (["errors logged: " + ", ".join(errs)] if errs else []) + (["not reporting: " + ", ".join(silent)] if silent else [])))
@@ -4140,6 +4181,8 @@ def ask(hive, messages, q, on_tool=None):
             pn = [n for n in nodes if named_by_person(n) and (n.get("derived") or {}).get("soil") is not None]
         finally:
             SAID[:] = keep
+        if not pn:
+            pn = [n for n in pronoun_nodes(st, q) if (n.get("derived") or {}).get("soil") is not None]
         if len(pn) == 1:
             try:
                 fixed = pump_ran_reply(hive, pn[0], q) if PUMP_RAN_Q.search(q) else when_dry_reply(hive, st, pn[0])
@@ -4226,9 +4269,21 @@ def ask(hive, messages, q, on_tool=None):
             fixed = alerts_reply(hive)
         except RuntimeError:
             fixed = None
-    if not fixed and WEEK_REPORT_Q.search(q) and not COMMAND.search(q):
+    if not fixed and (PLANT_WEEK_Q.search(q) or WEEK_REPORT_Q.search(q)) and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
         try:
-            fixed = week_report(hive, st)
+            wn = [n for n in nodes if named_by_person(n) and (n.get("derived") or {}).get("soil") is not None]
+        finally:
+            SAID[:] = keep
+        try:
+            fixed = week_report(hive, st, only=wn[0]) if len(wn) == 1 else \
+                week_report(hive, st) if WEEK_REPORT_Q.search(q) else None
+        except RuntimeError:
+            fixed = None
+    if not fixed and BATTERY_RANK_Q.search(q) and is_question(q) and not COMMAND.search(q):
+        try:
+            fixed = battery_rank_reply(hive, st)
         except RuntimeError:
             fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
