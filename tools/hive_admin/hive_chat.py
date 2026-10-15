@@ -1073,9 +1073,29 @@ def hand_note(hive, n, run):
     if not rises:
         return ""
     t0, t1, a, b = rises[-1]
-    return (" WATERED SINCE, NOT BY THE PUMP: its soil climbed from %.0f %% to %.0f %% between %s and %s with no pump run - "
-            "a watering by hand (or rain on an open pot). Say so: that is its last watering." % (
-                a, b, time.strftime("%a %d %b %H:%M", time.localtime(t0)), time.strftime("%H:%M", time.localtime(t1))))
+    return (" WATERED SINCE, NOT BY THE PUMP: its soil climbed from %.0f %% to %.0f %% between %s and %s (%s ago) with no "
+            "pump run - a watering by hand (or rain on an open pot). Say so: that is its last watering." % (
+                a, b, time.strftime("%a %d %b %H:%M", time.localtime(t0)), time.strftime("%H:%M", time.localtime(t1)),
+                days_ago(t0)))
+
+
+def days_ago(t):
+    d = (time.time() - t) / 86400.0
+    return "%.1f days" % d if d >= 1 else ago(int(time.time() - t))
+
+
+def last_watered_at(hive, n):
+    """When it was last watered, by the pump or (a later soil climb no run explains) by hand: a timestamp or None."""
+    sid = pumped_slot(hive, n.get("kind")) if has_pump(hive, n.get("kind")) else None
+    run = (last_pump_run(hive, n, sid) or last_pump_run(hive, n, sid, days=30)) if sid else None
+    try:
+        rises = [r for r in soil_rises(hive, n, 24 * 30) if not run or r[0] > run[0]]
+    except RuntimeError:
+        rises = []
+    return rises[-1][0] if rises else run[0] if run else None
+
+
+DAYS_AGO_Q = re.compile(r"(?i)how (many|much) (days|time)|how long ago|days (since|ago)|how long since")
 
 
 def confirm(summary, path=None, body=None):
@@ -4587,6 +4607,8 @@ def no_card_offers(answer):
         # " If so, I will need your confirmation before proceeding." with no card
         (r"(?i)[ \t]*[^.!?\n]*\b(need your (confirmation|approval|go-ahead)|confirm(ation)? before proceeding|if so, (i|we) "
          r"(will|can|could))\b[^.!?\n]*[.!?]?", ""),
+        # "This action will be sent once you confirm" left behind when an offer to water was scrubbed
+        (r"(?i)[ \t]*[^.!?\n]*\b(this|the|that|your) (action|command|request|watering request)s? will\b[^.!?\n]*[.!?]?", ""),
         # "I will set the pump flow to 1 ml/min" with no card
         (r"(?i)[ \t]*[^.!?\n]*\bI('ll| will| am going to|'m going to) (now |go ahead and )?(set|water|change|turn|"
          r"start|send|update|adjust|reboot|rename|stop)\b[^.!?\n]*[.!?]?", ""),
@@ -4692,6 +4714,12 @@ def must_say(hive, q, answer):
                 elif old_run and float(old_run.group(3)) >= 7 and not gave_date:
                     add.append("%s's pump last ran on %s (%s ml, %s days ago)." % (
                         name, old_run.group(1), old_run.group(2), old_run.group(3)))
+                # "How many days ago was it last watered?" answered with a date and no count of days.
+                if DAYS_AGO_Q.search(q) and not re.search(r"(?i)\b(\d+(\.\d)?|one|two|three|four|five|six|seven|eight|"
+                                                         r"nine|ten|a few|several) days?\b|\b(hours?|minutes?) ago\b", answer):
+                    t = last_watered_at(hive, n)
+                    if t:
+                        add.append("That was about %s ago." % days_ago(t))
         elif re.search(r"(?i)\b(water|irrigate)\b", q) and REQUEST.search(q) and not re.search(
                 r"(?i)%s[^.]*\b(no pump|doesn't have a pump|does not have a pump|can't be watered|cannot be watered)"
                 % re.escape(name), answer):
