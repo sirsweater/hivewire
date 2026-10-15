@@ -2544,6 +2544,20 @@ def battery_rank_reply(hive, st):
         "\n".join("- " + r for _, r in rows), rows[0][1].split(" (node")[0]))
 
 
+def battery_level_reply(hive, n):
+    """ "What battery level is the cactus at?" got "the Cactus doesn't report its battery" - it reads 100 % (4.2 V)."""
+    d = derived(hive, n)
+    pct_sid = slot_by_label(hive, n.get("kind"), "Battery (node's own %)")
+    pct = d.get("Battery") or ((n.get("slots") or {}).get(pct_sid) if pct_sid else None)
+    volts = d.get("Battery voltage")
+    if pct is None and not volts:
+        return None
+    name = n.get("name") or "node %s" % n["id"]
+    reading = ("%s" % pct if "%" in str(pct) else "%s %%" % pct) if pct is not None else ""
+    return "%s's battery reads %s%s. Ask \"how long will its battery last?\" for how fast it's draining." % (
+        name, reading, (" (%s)" % volts if reading else volts) if volts else "")
+
+
 def battery_reply(hive, n):
     """ "How many days until the rhubarb's battery dies?" got "no battery reading" (it reads 84 %)."""
     name = n.get("name") or "node %s" % n["id"]
@@ -4290,9 +4304,22 @@ def ask(hive, messages, q, on_tool=None):
             SAID[:] = keep
         try:
             # ("what battery level is the cactus at?" is about one node)
-            fixed = battery_rank_reply(hive, st) if len(bn) != 1 else None
+            fixed = battery_rank_reply(hive, st) if len(bn) != 1 else battery_level_reply(hive, bn[0])
         except RuntimeError:
             fixed = None
+    if not fixed and re.search(r"(?i)\bbatter(y|ies)\b", q) and is_question(q) and not COMMAND.search(q) and \
+            not BATTERY_LIFE_Q.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            bn = [n for n in nodes if named_by_person(n)] or pronoun_nodes(st, q)
+        finally:
+            SAID[:] = keep
+        if len(bn) == 1:
+            try:
+                fixed = battery_level_reply(hive, bn[0])
+            except RuntimeError:
+                fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):
         # Answered here: given the numbers, the model said "warmer by 1.0 °C" and dropped both readings.
         try:
