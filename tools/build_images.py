@@ -29,10 +29,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 # family -> (sketch folder under examples/, extra build flags). WaterNode is
 # the SoilNode sketch with its pump compiled in: its own family, so a pump image
-# never lands on a sensor-only board or the other way round.
+# never lands on a sensor-only board or the other way round. GrowNode adds a
+# grow light on a schedule (HivewireLight.h) to the WaterNode.
 FAMILIES = {
     "SoilNode":  ("SoilNode", ""),
     "WaterNode": ("SoilNode", "-DHW_WITH_PUMP=1"),
+    "GrowNode":  ("SoilNode", "-DHW_WITH_PUMP=1 -DHW_WITH_LIGHT=1"),
     "PumpNode":  ("PumpNode", ""),
     "RangeNode": ("RangeNode", ""),
     "WeatherNode": ("WeatherNode", ""),

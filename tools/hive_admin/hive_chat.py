@@ -184,6 +184,8 @@ class Hive:
             return "yes" if raw else "no"
         if raw == 0 and s.get("zero_means"):
             return s["zero_means"]
+        if s.get("time_of_day") and 0 <= raw < 1440:
+            return "%02d:%02d" % (raw // 60, raw % 60)
         if s.get("valid") and not s["valid"][0] <= raw <= s["valid"][1]:
             return "invalid reading (raw %s)" % raw
         if "direction" in s.get("label", "").lower() and s.get("unit") == "°":

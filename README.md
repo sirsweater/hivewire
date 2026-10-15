@@ -720,6 +720,33 @@ mode. Wiring: switch input on GPIO4, float switch on GPIO5 to GND.
 **Not yet run on hardware.** Built and exercised against the admin's simulated
 swarm only, until a pump is on the bench.
 
+### A grow light on the same board (GrowNode)
+
+[`src/HivewireLight.h`](src/HivewireLight.h) switches a grow light on a daily
+schedule. **GrowNode** is SoilNode built with `-DHW_WITH_PUMP=1
+-DHW_WITH_LIGHT=1`: soil sensor, pump and light on one board, its own firmware
+family. The switch input is GPIO7: a logic-level MOSFET module in the ground
+wire of a USB or 12 V lamp, or, for a mains lamp, a pre-built relay box with a
+low-voltage control input (`-DLIGHT_ACTIVE_LOW=1` for active-low relay boards).
+
+The schedule runs **on the node**, on its own clock, so a plant's day doesn't
+end because the hive's host rebooted. That is also why, unlike the pump, the
+light is deliberately not switched off when the hive goes quiet: a lamp left on
+can't do what a pump left on does. The node has no wall clock: the admin writes
+the local minute of the day into slot 60 when a node reports none (after a
+power loss; a crash or update keeps it in RTC memory) and every six hours
+after that, which also picks up daylight saving. Until it has a clock, a light
+on its schedule stays off.
+
+Slots 56–60: `56` light on/off now, `57` mode (0 always off, 1 always on, 2 on
+the schedule), `58`/`59` lights on/off at (minute of the day; on later than off
+spans midnight), `60` the node's clock (65535 = not set). The admin shows and
+takes these as times (`06:00`).
+
+**Not yet run on hardware.** The schedule, clock, restart and active-low logic
+pass a PC test (`tools/host_tests/run.sh`); the admin side is exercised against
+its simulated swarm (node 15).
+
 ### Seed mode and field capacity (the admin)
 
 A probe reads several centimetres down, and a pot stays wet there for days

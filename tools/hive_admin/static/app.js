@@ -44,6 +44,8 @@ function fmtVal(spec, v) {
   // Some zeroes mean "not measured" rather than a reading of zero — a board
   // with no battery divider reports 0, and "0.00 V" would read as flat.
   if (v === 0 && spec.zero_means) return spec.zero_means;
+  // A minute of the day (a grow light's schedule and clock): 360 is 06:00.
+  if (spec.time_of_day && v >= 0 && v < 1440) return hhmm(v);
   if (spec.hex) return (v >>> 0).toString(16).padStart(8, "0");
   if (spec.enum) return spec.enum[String(v)] ?? String(v);
   if (spec.error) { const c = v & 0xFFFF, sub = (v >>> 16) & 0xFF; return c ? "E" + c + (sub ? "/" + sub : "") : "none"; }
@@ -55,6 +57,13 @@ function fmtVal(spec, v) {
   const x = v * (spec.scale || 1);
   const d = spec.decimals ?? (spec.scale && spec.scale < 1 ? 2 : 0);
   return x.toFixed(d) + (spec.unit ? " " + spec.unit : "");
+}
+function hhmm(m) { return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); }
+// What a person typed into a slot's box: "06:30" for a time-of-day slot, else a number.
+function parseSlotInput(spec, text) {
+  const t = String(text).trim(), m = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (spec && spec.time_of_day && m && +m[1] < 24 && +m[2] < 60) return +m[1] * 60 + +m[2];
+  return t === "" ? NaN : +t;
 }
 function fmtAge(s) {
   if (s == null) return "never";
@@ -273,7 +282,7 @@ views.node = async (el, id) => {
           <p class="muted small">How wet this pot stays once a soak has drained: the most its soil holds. Soak the pot, let it drain, and the reading falls from 100% and levels off. That level is this pot's field capacity. Scaling the band reads the plant's range as a share of it, so a band this soil can never reach stops reading "too wet".</p></div>` : ""}
         <div class="card"><h2>Actions</h2><div class="row" id="actions"></div>
           <form id="setform" class="row" style="margin-top:14px">
-            <select id="set-slot"></select><input id="set-val" type="number" style="width:110px" placeholder="value" required>
+            <select id="set-slot"></select><input id="set-val" type="text" style="width:110px" placeholder="value" required>
             <button>Write</button></form>
           <p class="muted small">Writes go out over the swarm and the gateway echoes them over LoRa too, so each one costs a little airtime.</p>
           <div id="set-reply" class="mono muted"></div></div>
@@ -427,11 +436,12 @@ views.node = async (el, id) => {
   }
   if (!acts.children.length) acts.innerHTML = '<span class="muted small">No shortcuts for this node type.</span>';
   const writable = Object.entries(k.slots || {}).filter(([, s]) => s.writable);
-  $("#set-slot").innerHTML = writable.map(([sid, s]) => `<option value="${sid}">${esc(s.label)} (${s.min}–${s.max})</option>`).join("") || '<option value="">no writable slots</option>';
+  $("#set-slot").innerHTML = writable.map(([sid, s]) => `<option value="${sid}">${esc(s.label)} (${s.time_of_day ? hhmm(s.min) + "–" + hhmm(s.max) : s.min + "–" + s.max})</option>`).join("") || '<option value="">no writable slots</option>';
   $("#setform").onsubmit = async (e) => {
     e.preventDefault();
-    const slot = +$("#set-slot").value, value = +$("#set-val").value;
-    const s = (k.slots || {})[slot];
+    const slot = +$("#set-slot").value, s = (k.slots || {})[slot];
+    const value = parseSlotInput(s, $("#set-val").value);
+    if (Number.isNaN(value)) { toast(s && s.time_of_day ? "Type a time like 06:30, or minutes into the day" : "Type a number"); return; }
     if (s && (value < s.min || value > s.max)) { toast(`Must be ${s.min}–${s.max}`); return; }
     if (!confirm(`Write ${value} to "${s ? s.label : slot}" on ${nodeTitle(n)}?`)) return;
     try { const r = await api("/api/set", { target: String(nid), slot, value }); $("#set-reply").textContent = r.reply || "no reply from the gateway"; }

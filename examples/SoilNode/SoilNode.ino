@@ -40,6 +40,16 @@
  * 15 minutes raises application code 1001 (a dry reservoir the float switch
  * missed, a tube off the stake, a dead pump).
  *
+ * GROWNODE: built with -DHW_WITH_PUMP=1 -DHW_WITH_LIGHT=1, a third family:
+ * the WaterNode plus a grow light on a daily schedule the node keeps itself
+ * (see HivewireLight.h for the slots and why the light ignores onSafe):
+ *
+ *   Light switch logic-level MOSFET module input -> GPIO7, switching the
+ *                lamp's own supply (the ground wire of a USB or 12 V lamp).
+ *                A mains lamp: a pre-built relay box with a low-voltage
+ *                control input on GPIO7 + GND. Active-low relay boards:
+ *                build with -DLIGHT_ACTIVE_LOW=1.
+ *
  *   arduino-cli compile --build-property compiler.cpp.extra_flags=-DHW_NODE_ID=11
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -57,8 +67,19 @@
 #ifndef HW_WITH_PUMP
 #define HW_WITH_PUMP 0
 #endif
+#ifndef HW_WITH_LIGHT
+#define HW_WITH_LIGHT 0
+#endif
+#if HW_WITH_LIGHT && !HW_WITH_PUMP
+#error "HW_WITH_LIGHT is the GrowNode family: build it with HW_WITH_PUMP=1 too"
+#endif
 #if HW_WITH_PUMP
 #include <HivewirePump.h>
+#endif
+#if HW_WITH_LIGHT
+#include <HivewireLight.h>
+#define NODE_FAMILY "GrowNode"
+#elif HW_WITH_PUMP
 #define NODE_FAMILY "WaterNode"
 #else
 #define NODE_FAMILY "SoilNode"
@@ -140,9 +161,9 @@ HivewireFlashProvider flashSrc;
 // does. A soil node out of the hive's reach can only be updated by a peer of
 // its own family, and a range node's image is refused by family.
 HivewireFwNodeSender fwTx(node);
-// Only images of this same family are accepted -- see setFamily(). SoilNode
-// and WaterNode are separate families: a pump image must never land on a
-// board without a pump, or a sensor-only image on one that has one.
+// Only images of this same family are accepted -- see setFamily(). SoilNode,
+// WaterNode and GrowNode are separate families: a pump image must never land
+// on a board without a pump, or a sensor-only image on one that has one.
 HW_FW_FAMILY(NODE_FAMILY);
 
 #if HW_WITH_PUMP
@@ -155,6 +176,18 @@ HivewirePump pump(node, PUMP_PIN, FLOAT_PIN);
 static const uint32_t DOSE_CHECK_MS   = 15UL * 60 * 1000;
 static const uint16_t DOSE_CHECK_MIN_ML = 50;     // smaller doses may not move the probe
 static const uint16_t DOSE_SEEN_DROP  = 30;       // raw counts: wetter reads LOWER
+#endif
+
+#if HW_WITH_LIGHT
+// GPIO7: free since the battery check's control pin moved to GPIO3, and not an
+// ADC pin (those stay for sensors) or a strapping pin (8, 9, 15).
+#ifndef LIGHT_PIN
+#define LIGHT_PIN 7
+#endif
+#ifndef LIGHT_ACTIVE_LOW
+#define LIGHT_ACTIVE_LOW 0
+#endif
+HivewireLight light(node, LIGHT_PIN, LIGHT_ACTIVE_LOW);
 #endif
 
 // ---- readings, refreshed in loop() -- samplers only copy them ---------------
@@ -639,6 +672,19 @@ static void sAutoPulses(void *o){ uint8_t v = pump.autoPulses(); memcpy(o, &v, 1
 static void aAutoPulses(const void *in) { pump.requestSetting(HW_PUMP_SLOT_AUTO_PULSES, *(const uint8_t *)in); }
 #endif
 
+#if HW_WITH_LIGHT
+// ---- light slots (numbers and meaning: HivewireLight.h) ---------------------
+static void sLight(void *o)    { uint8_t v = light.isOn(); memcpy(o, &v, 1); }
+static void sLightMode(void *o){ uint8_t v = light.mode(); memcpy(o, &v, 1); }
+static void aLightMode(const void *in) { light.requestSetting(HW_LIGHT_SLOT_MODE, *(const uint8_t *)in); }
+static void sLightOn(void *o)  { uint16_t v = light.onAt(); memcpy(o, &v, 2); }
+static void aLightOn(const void *in) { uint16_t v; memcpy(&v, in, 2); light.requestSetting(HW_LIGHT_SLOT_ON_AT, v); }
+static void sLightOff(void *o) { uint16_t v = light.offAt(); memcpy(o, &v, 2); }
+static void aLightOff(const void *in) { uint16_t v; memcpy(&v, in, 2); light.requestSetting(HW_LIGHT_SLOT_OFF_AT, v); }
+static void sClock(void *o)    { uint16_t v = light.clock(); memcpy(o, &v, 2); }
+static void aClock(const void *in) { uint16_t v; memcpy(&v, in, 2); light.requestSetting(HW_LIGHT_SLOT_CLOCK, v); }
+#endif
+
 // Slot ids 22, 23 and 25 match RangeNode, so the same maintenance commands
 // (reboot, arm, firmware CRC) work on every node type.
 //  id  type    dir            sample  report  thresh min  max  sampler     applier
@@ -681,12 +727,24 @@ static const HwSlotDef SLOTS[] = {
   { HW_PUMP_SLOT_AUTO_SINCE,HW_U16, HW_DIR_OUT,   60000, 900000, 30, 0,   0, sAutoSince, nullptr    },
   { HW_PUMP_SLOT_AUTO_PULSES,HW_U8, HW_DIR_INOUT, 60000, 900000, 1, 1,   10, sAutoPulses, aAutoPulses },
 #endif
+#if HW_WITH_LIGHT
+  { HW_LIGHT_SLOT_STATE,    HW_U8,  HW_DIR_OUT,    1000, 900000, 1, 0,    0, sLight,     nullptr    },
+  { HW_LIGHT_SLOT_MODE,     HW_U8,  HW_DIR_INOUT, 60000, 900000, 1, 0,    2, sLightMode, aLightMode },
+  { HW_LIGHT_SLOT_ON_AT,    HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 0, 1439, sLightOn,   aLightOn   },
+  { HW_LIGHT_SLOT_OFF_AT,   HW_U16, HW_DIR_INOUT, 60000, 900000, 1, 0, 1439, sLightOff,  aLightOff  },
+  // Reported on a big change (set, or unset after a power loss), else with the
+  // 15-minute report: the host needs to see 65535, not watch it tick.
+  { HW_LIGHT_SLOT_CLOCK,    HW_U16, HW_DIR_INOUT, 10000, 900000, 30, 0, 1439, sClock,     aClock     },
+#endif
 };
 static const uint8_t N_SLOTS = sizeof(SLOTS) / sizeof(SLOTS[0]);
 
 void setup() {
 #if HW_WITH_PUMP
   pump.off();                       // before anything slow: a floating pin is not "off"
+#endif
+#if HW_WITH_LIGHT
+  light.off();
 #endif
   Serial.begin(115200);
   delay(200);
@@ -746,6 +804,9 @@ void setup() {
   node.onSafe([] { pump.stop(HW_PUMP_STOPPED_SAFE); });
   ota.onBeforeUpdate([] { pump.stop(HW_PUMP_STOPPED_SAFE); });
   fw.onBeforeUpdate([] { pump.stop(HW_PUMP_STOPPED_SAFE); });
+#endif
+#if HW_WITH_LIGHT
+  light.begin();                    // not in onSafe: see HivewireLight.h
 #endif
 
   ahtFound = ahtBegin();
@@ -831,6 +892,9 @@ void loop() {
         node.log("dose %u ml seen: soil %u -> %u", doseMl, rawBefore, soilRaw);
     }
   }
+#endif
+#if HW_WITH_LIGHT
+  light.loop();
 #endif
   hwErrCheckLink(node);
 

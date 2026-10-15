@@ -378,6 +378,24 @@ class FakeGateway(Gateway):
         # all writes never arrive, so the page's retry path gets exercised.
         self.written = {}               # (node, slot) -> value
 
+    def fake_grownode(self, t, temp):
+        """Node 15: a WaterNode with a grow light (slots 56-60). Its clock is
+        unset until the admin sends one, and then counts on like the real one."""
+        w = self.written
+        clock = 65535
+        if (15, 60) in w:
+            clock = int(w[(15, 60)] + (time.time() - w[(15, "clock_at")]) // 60) % 1440
+        mode, on_at, off_at = w.get((15, 57), 2), w.get((15, 58), 360), w.get((15, 59), 1320)
+        lit = mode == 1 or (mode == 2 and clock != 65535 and on_at != off_at and (
+            on_at <= clock < off_at if on_at < off_at else (clock >= on_at or clock < off_at)))
+        return ("DUMP 15 age=%d hops=0 1=%d 2=5600 3=%d 4=50 5=4110 6=7 7=1 8=%d 9=-52 "
+                "22=0 23=0 25=1281381655 40=%d 41=0 42=%d 43=%d 44=%d 45=%d 46=%d 47=1 48=1 "
+                "56=%d 57=%d 58=%d 59=%d 60=%d"
+                % (random.randint(0, 20), temp, 1700 - w.get((15, "dosed"), 0) // 10, t // 60,
+                   w.get((15, 40), 0), w.get((15, 42), 120), w.get((15, 43), 250), w.get((15, 44), 1500),
+                   w.get((15, "dosed"), 0), 2 if w.get((15, "dosed")) else 0,
+                   1 if lit else 0, mode, on_at, off_at, clock))
+
     def transact(self, cmd, until=None, timeout=4.0, quiet=None):
         with self.lock:
             if self.pushing:
@@ -414,6 +432,7 @@ class FakeGateway(Gateway):
                        self.written.get((14, 43), 250), self.written.get((14, 44), 1500),
                        self.written.get((14, "dosed"), 0), 2 if self.written.get((14, "dosed")) else 0,
                        self.written.get((14, 48), 0)),
+                    self.fake_grownode(t, temp),
                 ]
                 return "\n".join(lines) + "\nDUMP END %d ep=%d m=%d up=3 ok=3 flt=0\n" % (
                     len(lines), self.ep, self.mode)
@@ -427,6 +446,10 @@ class FakeGateway(Gateway):
                     if int(tgt) == 14 and int(slot) == 40 and self.written.get((14, 42)):
                         # the simulated pump only doses once calibrated, like the real one
                         self.written[(14, "dosed")] = self.written.get((14, "dosed"), 0) + int(val)
+                    if int(tgt) == 15 and int(slot) == 40:
+                        self.written[(15, "dosed")] = self.written.get((15, "dosed"), 0) + int(val)
+                    if int(tgt) == 15 and int(slot) == 60:
+                        self.written[(15, "clock_at")] = time.time()
                 return "[uplink-usb] ACK set %s=%s\n" % (slot, val)
             if cmd.startswith("log "):
                 nid = int(cmd.split()[1])
@@ -557,9 +580,17 @@ class Poller(threading.Thread):
         self.alerts = None              # set by App: HiveAlerts
         self.plausible = None           # set by App: (nid, slot, value) -> bool
         self.fails = 0                  # polls in a row that got no dump
+        self.clock_sent = {}            # node -> when its light clock was last sent
 
     WRITE_RETRY_S = 45
     WRITE_TRIES = 5
+    # A grow light (HivewireLight.h) keeps its schedule on the node's own clock,
+    # which only the host can set. The C6's crystal drifts under a second a day,
+    # so a re-send every few hours is for daylight saving, not drift.
+    CLOCK_SLOT = 60
+    CLOCK_UNSET = 65535
+    CLOCK_RESEND_S = 6 * 3600
+    CLOCK_RETRY_S = 60
 
     def track_write(self, nid, slot, value):
         with self.pending_lock:
@@ -695,6 +726,30 @@ class Poller(threading.Thread):
         if rows:
             self.store.add_readings(rows)
         self.check_writes(d, t)
+        self.sync_clocks(d, t, stale)
+
+    def sync_clocks(self, d, t, stale):
+        """Send the local minute of the day to every node with a light clock that
+        reports none (it rebooted after a power loss, and its light stays off on
+        its schedule until it knows the time), and to all of them every few hours.
+        Only reached with the host's own clock trusted: poll() stops earlier when
+        it is behind the stored readings."""
+        for nid, rec in d["nodes"].items():
+            v = rec["slots"].get(self.CLOCK_SLOT)
+            if v is None or rec["age"] > stale:
+                continue
+            since = t - self.clock_sent.get(nid, 0)
+            if not ((v == self.CLOCK_UNSET and since >= self.CLOCK_RETRY_S) or since >= self.CLOCK_RESEND_S):
+                continue
+            lt = time.localtime(t)
+            m = lt.tm_hour * 60 + lt.tm_min
+            ack = self.gw.command("set %d %d %d" % (nid, self.CLOCK_SLOT, m), r"ACK set|ERR")
+            self.clock_sent[nid] = t
+            if v == self.CLOCK_UNSET:
+                # Worth a line: the light was dark for want of it. The routine
+                # re-send every few hours is not news.
+                self.store.event("command", "node %d had no clock: sent %02d:%02d -> %s" % (
+                    nid, m // 60, m % 60, ack or "no reply"))
 
 
 # ---------------------------------------------------------------------------
