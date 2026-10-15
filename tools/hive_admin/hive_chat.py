@@ -3024,7 +3024,8 @@ def morning_reply(hive, st):
 
 
 AWAY_Q = re.compile(r"(?i)\b(going away|go away|away for|on vacation|on holiday|out of town|leaving for|be gone|be away|"
-                    r"while i'?m (away|gone)|trip)\b")
+                    r"while i'?m (away|gone)|trip|(we'?re|we are|i'?m|i am|we'?ll be|i'?ll be) (away|gone)|away (this|next|for the) (weekend|week)|"
+                    r"gone (this|next|for the) (weekend|week))\b")
 
 
 def away_reply(hive, st, q):
@@ -3036,6 +3037,12 @@ def away_reply(hive, st, q):
         k = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "ten": 10,
              "fourteen": 14}.get(m.group(1).lower(), None) or int(m.group(1))
         days = k * (7 if m.group(2).startswith("week") else 1)
+    elif re.search(r"(?i)\blong weekend\b", q):
+        days = 4
+    elif re.search(r"(?i)\bweekend\b", q):
+        days = 3            # ("away this weekend" had been checked for a week)
+    elif re.search(r"(?i)\b(overnight|tonight|one night)\b", q):
+        days = 1
     rates = plant_rates(hive, st)
     cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
     res = reservoirs(hive)
