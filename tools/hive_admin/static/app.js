@@ -237,6 +237,7 @@ views.node = async (el, id) => {
       <div class="muted small">#${n.id} · ${esc(n.kind || "unknown type")}${n.location ? " · " + esc(n.location) : ""} · heard ${fmtAge(n.age)}</div>
     </div><div class="row"><button id="addmark">Add marker</button><a class="btn" href="#/settings">Edit name &amp; calibration</a></div></div>
     ${n.warnings.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px">${n.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
+    <div id="node-cam" style="margin-bottom:16px" hidden></div>
     <div class="card stack">
       <div class="spread"><div class="tabs" id="metric-tabs"></div><div class="tabs" id="range-tabs"></div></div>
       <div id="chart"></div>
@@ -294,6 +295,17 @@ views.node = async (el, id) => {
           <div id="nodelog" class="log mono" hidden></div></div>
       </div>
     </div>`;
+  if ((k.slots || {})["40"]) {
+    // The stream plant: its camera (a separate box on the network) shown with its readings.
+    api("/api/stream").then((sr) => {
+      const box = $("#node-cam");
+      if (!box || sr.settings.node !== nid || !sr.settings.camera_url) return;
+      box.hidden = false;
+      cameraCard(box, sr.settings.camera_url, () => route().name === "node" && +route().arg === nid);
+      const h = $("h2", box);
+      if (h) h.innerHTML = 'Camera <a class="small" href="#/stream">on stream</a>';
+    }).catch(() => {});
+  }
   if ($("#auto-form")) {
     const cfg = await api("/api/config");
     const c = (cfg.nodes || {})[nid] || {};
@@ -856,6 +868,31 @@ function chatText(t) {
 // ---------------------------------------------------------------------------
 // Stream: a plant on Twitch that viewers can water (streamplant.py)
 // ---------------------------------------------------------------------------
+// The streaming box's snapshot and status (tools/streamcam), fetched by the
+// browser straight from that box. Refreshes while `stillHere()` says so.
+function cameraCard(box, base, stillHere) {
+  const u = base.replace(/\/+$/, "");
+  box.innerHTML = `<div class="card stack"><div class="spread"><h2>Camera</h2><span class="pill" data-st>…</span></div>
+    <img data-img alt="The plant's camera" style="width:100%;max-width:640px;border-radius:8px;background:#000;min-height:120px">
+    <div class="muted small" data-info></div></div>`;
+  const img = $("[data-img]", box), st = $("[data-st]", box), info = $("[data-info]", box);
+  const tick = async () => {
+    if (!stillHere() || !box.isConnected) return false;
+    img.src = u + "/snapshot.jpg?t=" + Date.now();
+    try {
+      const s = await (await fetch(u + "/status.json", { cache: "no-store" })).json();
+      const live = s.mode === "camera" && s.snapshot_age_s != null && s.snapshot_age_s < 30;
+      st.className = "pill " + (live ? "good" : "warn");
+      st.textContent = live ? "camera live" : s.mode === "slate" ? "camera offline: showing the slate" : s.mode;
+      info.textContent = `sending to ${s.output || "?"} · ${s.encoder || "?"} · overlay ${s.overlay === "ok" ? "ok" : s.overlay}` +
+        (s.restarts ? ` · ${s.restarts} restart(s)` : "") + (s.camera ? ` · camera: ${s.camera}` : "");
+    } catch (e) { st.className = "pill bad"; st.textContent = "streaming box not answering"; info.textContent = u; }
+    return true;
+  };
+  tick();
+  const t = setInterval(async () => { if (!(await tick())) clearInterval(t); }, 5000);
+}
+
 views.stream = async (el) => {
   const r = await api("/api/stream");
   const s = r.settings, tw = r.twitch, p = r.plant || {};
@@ -936,15 +973,19 @@ views.stream = async (el) => {
         (its Max per watering and Max per 24 h settings) are the final word.</p></div>
 
     <div class="grid cols-2" style="margin-top:16px">
-      <div class="card stack"><h2>4 · Video overlay</h2>
-        <p class="muted small">The machine that sends the stream to Twitch reads this address for the text it draws over the video.
+      <div class="card stack"><h2>4 · Streaming box</h2>
+        <p class="muted small">The machine that sends the camera to Twitch (tools/streamcam) reads this address for the text it draws over the video.
           It needs no login, so it has a key of its own; making a new key stops the old address working.</p>
         ${overlayUrl ? `<div class="mono small" style="word-break:break-all">${esc(overlayUrl)}<span id="st-key">…</span></div>` : '<div class="muted small">No key yet.</div>'}
-        <div class="row"><button id="st-newkey">${overlayUrl ? "Make a new key" : "Make a key"}</button></div></div>
+        <div class="row"><button id="st-newkey">${overlayUrl ? "Make a new key" : "Make a key"}</button></div>
+        <form id="camform" class="row" style="align-items:flex-end">
+          <label class="f">Its snapshot address (shows the camera here and on the plant's page)<input id="st-cam" value="${esc(s.camera_url)}" placeholder="http://streaming-box:8787/" style="width:260px"></label>
+          <button>Save</button></form></div>
       <div class="card stack"><h2>Now</h2>
         <div id="st-now"></div></div>
     </div>
 
+    <div id="st-camera" style="margin-top:16px"></div>
     <div class="card stack" style="margin-top:16px"><h2>Waterings</h2>
       <div class="tablewrap"><table id="st-table"></table></div></div>`;
 
@@ -976,6 +1017,8 @@ views.stream = async (el) => {
     // The key is in the saved settings; shown here so it can be copied.
     api("/api/config").then((c) => { $("#st-key").textContent = ((c.stream || {}).overlay_key) || ""; }).catch(() => {});
   }
+  $("#camform").onsubmit = (e) => { e.preventDefault(); save({ camera_url: $("#st-cam").value }); };
+  if (s.camera_url) cameraCard($("#st-camera"), s.camera_url, () => route().name === "stream");
   if ($("#cidform")) $("#cidform").onsubmit = (e) => { e.preventDefault(); save({ client_id: $("#st-cid").value }); };
   if ($("#st-unlink")) $("#st-unlink").onclick = async () => {
     if (!confirm("Unlink the Twitch account? Viewers' chat and rewards stop reaching the plant.")) return;

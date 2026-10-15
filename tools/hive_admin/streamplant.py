@@ -57,6 +57,7 @@ DEFAULTS = {
     "viewer_day_ml": 1000,       # free water (chat + points) per rolling 24 h
     "max_free_queue": 3,
     "announce": True,            # say waterings in chat
+    "camera_url": "",            # the streaming box's snapshot/status server (tools/streamcam), shown on the page
     "overlay_key": "",
 }
 LIMITS = {"chat_ml": (1, 500), "chat_cooldown_s": (0, 86400), "user_cooldown_s": (0, 86400),
@@ -399,6 +400,10 @@ class StreamPlant:
                         raise ValueError("node %d has no pump" % v)
             elif k in ("enabled", "paused", "announce"):
                 v = bool(v)
+            elif k == "camera_url":
+                v = str(v or "").strip()
+                if v and not re.match(r"^https?://[^\s\"'<>]+$", v):
+                    raise ValueError("the camera address must start with http:// or https://")
             elif k == "command":
                 v = str(v).strip().split()[0][:25] if str(v).strip() else "!water"
             else:
@@ -520,9 +525,11 @@ class StreamPlant:
         kind = self.app.kind_of(nid, slots)
         soil = self.app.derived(nid, kind, slots).get("soil") if slots else None
         meta = self.app.cfg.node(nid)
+        hhmm = lambda m: "%02d:%02d" % (m // 60, m % 60) if isinstance(m, int) and 0 <= m < 1440 else None
         return {"node": nid, "name": meta.get("name") or "node %d" % nid,
                 "soil": None if soil is None else round(soil),
                 "light": None if SLOT_LIGHT not in slots else bool(slots[SLOT_LIGHT]),
+                "lights_on_at": hhmm(slots.get(58)), "lights_off_at": hhmm(slots.get(59)),
                 "reservoir_empty": slots.get(SLOT_RESERVOIR) == 0}
 
     def status(self):

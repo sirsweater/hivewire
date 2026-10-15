@@ -747,6 +747,14 @@ takes these as times (`06:00`).
 pass a PC test (`tools/host_tests/run.sh`); the admin side is exercised against
 its simulated swarm (node 15).
 
+### On stream: viewers water it
+
+The admin's **Stream** page puts one pump node on Twitch: viewers water it with
+a chat command, channel points or Bits, one dose at a time and inside the
+node's own limits, and `tools/streamcam` sends its camera to Twitch with the
+hive's readings drawn over it. Setup, from wiring to going live, is in
+[`tools/streamcam/README.md`](tools/streamcam/README.md).
+
 ### Seed mode and field capacity (the admin)
 
 A probe reads several centimetres down, and a pot stays wet there for days

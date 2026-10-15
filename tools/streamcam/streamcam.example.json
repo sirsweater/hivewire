@@ -1,0 +1,11 @@
+{
+  "camera": "rtsp://CAMERA-ADDRESS/live/0",
+  "overlay_url": "http://HIVE-ADDRESS:8080/api/stream/overlay?key=PASTE-FROM-THE-STREAM-PAGE",
+  "stream_key_file": "~/.config/streamcam/twitch_key",
+  "ingest": "rtmp://live.twitch.tv/app/",
+  "width": 1280, "height": 720, "fps": 30, "bitrate_k": 3000,
+  "encoder": "auto",
+  "transform": "",
+  "title": "Water the plant",
+  "listen": "0.0.0.0", "http_port": 8787
+}

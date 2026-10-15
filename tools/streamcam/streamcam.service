@@ -1,0 +1,14 @@
+# systemd user unit: ~/.config/systemd/user/streamcam.service
+#   systemctl --user daemon-reload && systemctl --user enable --now streamcam
+# (and `loginctl enable-linger $USER` once, so it runs without a login)
+[Unit]
+Description=streamcam: the plant's camera to Twitch with the hive's overlay
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/hivewire/tools/streamcam/streamcam.py --config %h/.config/streamcam/streamcam.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
