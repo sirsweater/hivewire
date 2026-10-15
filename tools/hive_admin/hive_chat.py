@@ -769,10 +769,17 @@ def pump_ran_reply(hive, n, q):
     state shows it was active". What the pump counts show for the window the question names."""
     sid = pumped_slot(hive, n.get("kind"))
     if not sid:
-        return None
+        if has_pump(hive, n.get("kind")):
+            return None
+        return "%s has no pump - it's a sensor-only node - so no pump ran there. Any watering it got was by hand." % (
+            n.get("name") or "node %s" % n["id"])
     m = re.search(r"(?i)\b(all night|last night|overnight|today|this morning|yesterday)\b", q)
-    word = (m.group(1).lower() if m else "last night").replace("all night", "last night").replace("overnight", "last night")
-    if word == "this morning":
+    word = (m.group(1).lower() if m else "").replace("all night", "last night").replace("overnight", "last night")
+    if not word:
+        # "did the larkspur pump run?" with no time: the last 24 hours, not last night
+        t1 = int(time.time())
+        t0, label = t1 - 86400, "in the last 24 hours"
+    elif word == "this morning":
         t0, t1, label = day_window("today")
         t1, label = min(t1, t0 + 12 * 3600), "this morning"
     else:
@@ -850,7 +857,7 @@ def water_all_reply(hive, st, q):
             ok.append(n)
     if ok:
         return None
-    return "I'm not watering anything - none of the plants should get water from here right now:\n" + "\n".join(lines)
+    return "I won't water anything right now - none of the plants should get water from here:\n" + "\n".join(lines)
 
 
 def rain_history(hive, kind, node, slot, rows, res):
