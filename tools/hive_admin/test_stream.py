@@ -375,6 +375,12 @@ class FakeHelix:
             raise TW.TwitchError(403, "The broadcaster must have partner or affiliate status.")
 
 
+# threading.Thread keeps its own state in "_" names, and which ones changes by
+# version: on Python 3.13 self._handle is the thread's handle, and a method
+# EventSub had of that name made the first notification raise on the Pi.
+check(not [n for n in vars(TW.EventSub) if n.startswith("_") and not n.startswith("__")],
+      "EventSub (a Thread) defines no '_' names that a Python version could shadow")
+
 es_srv = MockWs(eventsub_script)
 es_srv.start()
 events = []

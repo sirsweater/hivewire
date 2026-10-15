@@ -110,5 +110,8 @@ free = s.getsockname()[1]
 s.close()
 check(not S.camera_answers("rtsp://127.0.0.1:%d/x" % free)[0], "nothing listening: down")
 
+check(not [n for c in (S.Runner, S.OverlayFetcher) for n in vars(c) if n.startswith("_") and not n.startswith("__")],
+      "the Thread subclasses define no '_' names (Thread's own live there: _stderr, and _handle on 3.13)")
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

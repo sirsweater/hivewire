@@ -261,6 +261,8 @@ def ffmpeg_cmd(cfg, mode, encoder, target):
 
 
 class Runner(threading.Thread):
+    # (No "_" method names: threading.Thread keeps its own there -- _stderr shadowed
+    # a method of that name here, and Python 3.13 adds _handle.)
     """Keeps ffmpeg running: the camera when it answers, the slate when it
     doesn't, and back to the camera when it returns."""
     daemon = True
@@ -284,7 +286,7 @@ class Runner(threading.Thread):
             self.proc = subprocess.Popen(ffmpeg_cmd(self.cfg, mode, self.encoder, self.target),
                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             started = checked = time.time()
-            threading.Thread(target=self._pump_stderr, args=(self.proc,), daemon=True).start()
+            threading.Thread(target=self.pump_stderr, args=(self.proc,), daemon=True).start()
             snap = os.path.join(self.cfg["workdir"], "snapshot.jpg")
             stall = max(STALL_S, 3 * int(self.cfg["snapshot_every_s"]))
             while self.proc.poll() is None and not self.stopping:
@@ -314,7 +316,7 @@ class Runner(threading.Thread):
             log("ffmpeg exited (%s) after %.0f s" % (rc, ran))
             time.sleep(min(60, 2 ** min(fails, 6)))
 
-    def _pump_stderr(self, proc):
+    def pump_stderr(self, proc):
         for line in proc.stderr:
             line = line.strip()
             if line:

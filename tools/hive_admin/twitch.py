@@ -359,6 +359,9 @@ class WsClient:
 # EventSub: one WebSocket session, its subscriptions, reconnects
 # ---------------------------------------------------------------------------
 class EventSub(threading.Thread):
+    # (No method names starting with "_": threading.Thread keeps its own there,
+    # and on Python 3.13 self._handle is the thread's handle -- a method of that
+    # name was shadowed and the first notification raised TypeError.)
     """Keeps an EventSub WebSocket open and hands each notification to
     on_event(type, event). `wanted(user_id)` lists (type, version, condition)
     to subscribe to; each one's outcome is kept in `subs` for the page (channel
@@ -383,7 +386,7 @@ class EventSub(threading.Thread):
     def stop(self):
         self.stop_evt.set()
 
-    def _welcome(self, ws):
+    def read_welcome(self, ws):
         m = json.loads(ws.recv() or "{}")
         if (m.get("metadata") or {}).get("message_type") != "session_welcome":
             raise ConnectionError("EventSub: expected a welcome, got %s" % str(m)[:120])
@@ -391,7 +394,7 @@ class EventSub(threading.Thread):
         ws.settimeout(int(s.get("keepalive_timeout_seconds") or 10) + 10)
         return s["id"]
 
-    def _subscribe(self, session_id):
+    def subscribe_all(self, session_id):
         uid = self.auth.tok.get("user_id")
         for sub_type, version, cond in self.wanted(uid):
             try:
@@ -401,7 +404,7 @@ class EventSub(threading.Thread):
                 self.subs[sub_type] = "%s %s" % (e.status, e.message)
                 self.log("twitch: %s not subscribed: %s %s" % (sub_type, e.status, e.message))
 
-    def _handle(self, raw):
+    def on_message(self, raw):
         m = json.loads(raw)
         md = m.get("metadata") or {}
         mt = md.get("message_type")
@@ -433,28 +436,28 @@ class EventSub(threading.Thread):
                 if ws is None:
                     self.auth.validate()
                     ws = WsClient(url)
-                    sid = self._welcome(ws)
+                    sid = self.read_welcome(ws)
                     if resubscribe:
-                        self._subscribe(sid)
+                        self.subscribe_all(sid)
                     self.connected, self.last_error, backoff = True, None, 1
                     url, resubscribe = self.url, True
                 raw = ws.recv()
                 if raw is None:
                     raise ConnectionError("EventSub closed the session")
-                new_url = self._handle(raw)
+                new_url = self.on_message(raw)
                 if new_url:
                     # Twitch's move to another server: open the new session first and only
                     # then drop the old one, reading what it still delivered -- events in
                     # between go to the old session. Subscriptions carry over.
                     nws = WsClient(new_url)
-                    self._welcome(nws)
+                    self.read_welcome(nws)
                     ws.settimeout(0.5)
                     try:
                         while True:
                             raw = ws.recv()
                             if raw is None:
                                 break
-                            self._handle(raw)
+                            self.on_message(raw)
                     except (OSError, ConnectionError, ValueError):
                         pass
                     ws.close()
