@@ -3855,6 +3855,45 @@ def light_fact(hive, nodes, request=False):
     return " ".join(out)
 
 
+STREAM_Q = re.compile(r"(?i)\b(stream\w*|twitch|viewers?|chatters?|channel points|cheers?|on air)\b|\bbits\b")
+
+
+def stream_fact(hive):
+    """ "How many viewers watered the plant on stream today?" got "I don't have information about streaming". The
+    Stream page's own numbers. Counts and amounts only: no viewer's name or words - nothing typed on Twitch reaches
+    the model."""
+    try:
+        r = hive.call("GET", "/api/stream") or {}
+    except RuntimeError:
+        return "STREAM: this hive has no Stream page (an older admin, or flash-only mode)."
+    st, tw = r.get("settings") or {}, r.get("twitch") or {}
+    if not st.get("node"):
+        where = "no plant picked"
+    else:
+        where = "the plant is node %s" % st["node"]
+    status = str(r.get("status") or "")
+    status = ("a viewer's dose is going out now" if status.startswith("watering") else status)
+    t = time.time()
+    hist = [h for h in r.get("history") or [] if t - (h.get("done_at") or h.get("at") or 0) < 86400]
+    given = [h for h in hist if h.get("status") == "given"]
+    by = {}
+    for h in given:
+        by[h.get("src")] = by.get(h.get("src"), 0) + int(h.get("ml") or 0)
+    other = {}
+    for h in hist:
+        if h.get("status") != "given":
+            other[h.get("status")] = other.get(h.get("status"), 0) + 1
+    return ("STREAM PAGE (viewers water the stream plant): %s; %s; Twitch %s; now: %s. Last 24 h: %d viewer "
+            "watering(s) given, %d ml%s%s; %d waiting in the queue; free water used %s of %s ml a day. Viewer "
+            "watering is set up and changed on the admin's Stream page, not from this chat." % (
+                "ON" if st.get("enabled") and not st.get("paused") else "PAUSED" if st.get("enabled") else "OFF (viewers "
+                "can't water)", where, "linked" if tw.get("linked") else "not linked",
+                status or "unknown", len(given), sum(by.values()),
+                " (%s)" % ", ".join("%s %d ml" % (k, v) for k, v in sorted(by.items())) if by else "",
+                "; not given: %s" % ", ".join("%d %s" % (v, k) for k, v in sorted(other.items())) if other else "",
+                len(r.get("queue") or []), r.get("free_ml_24h", 0), st.get("viewer_day_ml", "?")))
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -3956,6 +3995,8 @@ def focus_facts(hive, q):
         extra = ["%s: %s" % (k.replace("_", " "), f[k]) for k in ("target_note", "field_capacity", "seed_mode") if f.get(k)]
         if extra:
             out.append("%s, more: %s." % (n.get("name") or kind, "; ".join(extra)))
+    if STREAM_Q.search(q):
+        out.append(stream_fact(hive))
     if LIGHT_WORDS.search(q):
         out.append(light_fact(hive, [n for n in st.get("nodes", []) if not n.get("hidden")], REQUEST.search(q)))
     if out:
