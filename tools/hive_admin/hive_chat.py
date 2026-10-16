@@ -508,8 +508,23 @@ COMMON_WORDS = {"water", "waters", "watered", "watering", "whether", "what", "la
                 "pump", "pumps", "stop", "start", "status", "plant", "plants", "node", "nodes"}
 
 
+# "the grow light", "lights on", "the lamp" - not "a light watering" or "light rain".
+LIGHT_WORDS = re.compile(r"(?i)\bgrow[ -]?lights?\b|\b(the|its|my|that|this|a|your) (grow )?(lights?|lamps?|leds?)\b"
+                         r"(?! (rain|watering|water|drizzle|shower|breeze|wind|frost|feed|dose|soak|mist))|"
+                         r"\blights? (on|off|schedule|timer|mode|come|comes|go|goes|turn|turns)\b|\blamps?\b|"
+                         r"\b(turn|switch|put)\w* (on|off) the (grow )?lights?\b")
+ONLY_LIGHT = []     # the one node (id) with a grow light, set each turn: "turn on the grow light" names it
+
+
+def has_light(hive, kind):
+    sp = hive.slot_spec(kind, 57)
+    return bool(sp.get("writable")) and "light" in str(sp.get("label", "")).lower()
+
+
 def named_by_person(n):
     text = " ".join(SAID).lower()
+    if ONLY_LIGHT and ONLY_LIGHT[0] == n["id"] and LIGHT_WORDS.search(text):
+        return True
     if re.search(r"(node|#|id)\s*%d\b" % n["id"], text):
         return True
     name = (n.get("name") or "").lower()
@@ -1154,6 +1169,41 @@ SET_SLOT_BLOCKED = {
 }
 
 
+TIME_OF_DAY = re.compile(r"(?i)\b(noon|midday|midnight)\b|(?<![\d:.])(\d{1,2})(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])|"
+                         r"(?<![\d:.])([01]?\d|2[0-3])[:h]([0-5]\d)(?![\d:])")
+
+
+def stated_time(q, label=""):
+    """The minute of the day the person gave: "7am" 420, "7:30 pm" 1170, "19:00" 1140, "noon" 720. With two times
+    ("on at 7am and off at 9pm") the one after this setting's own word (on / off). None when there isn't one clear
+    time ("at 7" could be either)."""
+    found = []
+    for m in TIME_OF_DAY.finditer(q):
+        if m.group(1):
+            t = 0 if m.group(1).lower() == "midnight" else 720
+        elif m.group(2):
+            h, mi = int(m.group(2)), int(m.group(3) or 0)
+            if not 1 <= h <= 12:
+                continue
+            t = (h % 12 + (12 if m.group(4).lower().startswith("p") else 0)) * 60 + mi
+        else:
+            t = int(m.group(5)) * 60 + int(m.group(6))
+        found.append((m.start(), t))
+    if len(found) == 1:
+        return found[0][1]
+    if len(found) > 1:
+        word = "off" if re.search(r"(?i)\boff\b", label) else "on" if re.search(r"(?i)\bon\b", label) else None
+        prev = 0
+        hits = []
+        for pos, t in found:
+            if word and re.search(r"(?i)\b%s\b" % word, q[prev:pos]):
+                hits.append(t)
+            prev = pos
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def t_set_slot(hive, slot, value, target=None, node=None):
     """One setting on ONE node the person named. Broadcasts to 'all' or a role
     are the admin page's job: a model can't be trusted to aim them."""
@@ -1188,6 +1238,22 @@ def t_set_slot(hive, slot, value, target=None, node=None):
     asked = stated_value(SAID[-1] if SAID else "", spec.get("unit"))
     if asked:
         value = asked[0]
+    if spec.get("time_of_day"):
+        # "lights on at 7am" came through as 7 (00:07): the time is read from the message itself.
+        t = stated_time(SAID[-1] if SAID else "", spec.get("label", ""))
+        if t is None:
+            return {"sent": False, "reason": "%s is a time of day: ask the person for it as a clock time (e.g. 07:00 "
+                    "or 7 pm); \"7\" alone could be morning or evening" % spec.get("label"),
+                    "say": "What time should that be - for example 07:00 or 7 pm? Nothing was sent."}
+        value, asked = t, None
+        word = "off" if re.search(r"(?i)\boff\b", spec.get("label", "")) else \
+            "on" if re.search(r"(?i)\bon\b", spec.get("label", "")) else None
+        other = {"on": "off", "off": "on"}.get(word)
+        said = SAID[-1] if SAID else ""
+        if other and re.search(r"(?i)\b%s\b" % other, said) and not re.search(r"(?i)\b%s\b" % word, said):
+            # "lights off at 9pm" aimed at Lights on at
+            return {"sent": False, "reason": "the person gave the time the light goes %s, so %s (slot %s) is the wrong "
+                    "setting - it's the Lights %s at one" % (other, spec.get("label"), slot, other)}
     if not spec.get("min", 0) <= value <= spec.get("max", 0):
         return {"sent": False, "reason": "%s must be %s..%s; %s would be refused" % (
             spec.get("label"), spec.get("min"), spec.get("max"), value)}
@@ -1287,6 +1353,8 @@ def t_node_action(hive, node, action):
     acts = node_actions(hive, n.get("kind"))
     want = str(action).lower()
     hit = [a for a in acts if want in a["label"].lower() or a["label"].lower() in want]
+    # ("Light on" is also inside "Light on schedule")
+    hit = [a for a in hit if a["label"].lower() == want.strip()] or hit
     if len(hit) != 1:
         return {"sent": False, "reason": "%s has these actions: %s" % (
             n.get("name") or "node %s" % n["id"], ", ".join(a["label"] for a in acts) or "none")}
@@ -1295,6 +1363,19 @@ def t_node_action(hive, node, action):
         return {"sent": False, "reason": "the person didn't ask for %s. %s's actions are: %s - if none is what "
                 "they asked for, tell them it isn't available" % (a["label"], n.get("name") or "the node",
                                                                   ", ".join(x["label"] for x in acts))}
+    lab, said = a["label"].lower(), (SAID[-1] if SAID else "").lower()
+    # "turn on the grow light" also mentions the light, so "Light off" passed the check above.
+    if re.search(r"\bschedule\b", lab):
+        wrong = not re.search(r"\b(schedule\w*|timer|auto\w*|normal|back)\b", said)
+    elif re.search(r"\bon\b", lab):
+        wrong = bool(re.search(r"\b(off|out)\b", said)) and not re.search(r"\bon\b", said)
+    elif re.search(r"\boff\b", lab):
+        wrong = bool(re.search(r"\bon\b", said)) and not re.search(r"\b(off|out)\b", said)
+    else:
+        wrong = False
+    if wrong:
+        return {"sent": False, "reason": "the person didn't ask for %s - pick the action that matches what they "
+                "said: %s" % (a["label"], ", ".join(x["label"] for x in acts))}
     return write(hive, "%s on %s (node %s)  (sent over the radio mesh)" % (a["label"].upper(), n.get("name") or
                  n.get("kind"), n["id"]), "/api/set", {"target": str(n["id"]), "slot": a["slot"], "value": a["value"]})
 
@@ -2255,6 +2336,61 @@ BAND_TIME_Q = re.compile(r"(?i)\bhow long\b[^?]*\b(too wet|too dry|soggy|waterlo
                          r"\bsince when\b[^?]*\b(wet|dry)\b")
 
 
+
+def settled(pts):
+    """(the points after the last hour the probe was out of the soil, that hour's time or None). A repot shows as one
+    hour whose average is still high but whose lowest reading is near 0 % (the probe in the air): the Cactus's soil
+    change on Oct 14 20:00 read 71 % on average with a 2 % low, and counted as drying 2.8 points a day."""
+    cut = None
+    for i, p in enumerate(pts):
+        if p[2] < 5 and p[1] - p[2] > 20:
+            cut = i
+    return (pts, None) if cut is None else (pts[cut + 1:], pts[cut][0])
+
+
+RISING_CLAIM = re.compile(r"(?i)[^.!?\n]*\b(has been|have been|is|are|keeps|kept|been|was)\s+(\w+ly\s+)?(increasing|rising|"
+                          r"going up|climbing|getting wetter)\b[^.!?\n]*[.!?]?")
+FALLING_CLAIM = re.compile(r"(?i)[^.!?\n]*\b(has been|have been|is|are|keeps|kept|been|was)\s+(\w+ly\s+)?(decreasing|falling|"
+                           r"dropping|going down|declining|getting drier|drying( out)?)\b[^.!?\n]*[.!?]?")
+
+
+def fix_trend_claim(hive, n, answer, only_one, others=()):
+    """ "Its soil moisture level has been increasing steadily without any pump activity" for the Larkspur, whose
+    reading eased from 90 to 87 % over the two days before (a hand watering three days back was its last rise).
+    A sentence about this plant's soil moving one way while the last 48 hours moved the other is replaced by
+    what the readings did."""
+    if not (RISING_CLAIM.search(answer) or FALLING_CLAIM.search(answer)):
+        return answer
+    pts, _ = settled(soil_series(hive, n, 48))
+    if len(pts) < 24:
+        return answer
+    first = sum(p[1] for p in pts[:6]) / 6.0
+    last = sum(p[1] for p in pts[-6:]) / 6.0
+    name = n.get("name") or "node %s" % n["id"]
+    nm = re.compile(r"(?i)\b%s\b" % re.escape(name))
+
+    def about_it(sent):
+        if nm.search(sent):
+            return True
+        return only_one and not any(re.search(r"(?i)\b%s\b" % re.escape(o), sent) for o in others if o != name)
+
+    def soil_words(sent):
+        # ("its temperature is rising" isn't about the soil; "the Larkspur is getting wetter" is)
+        return re.search(r"(?i)\b(soil|moisture|reading|readings|level|wetness|wetter|drier|drying|pot)\b", sent)
+    said = "%s's reading went from %.0f%% to %.0f%% over the last %s." % (
+        name, first, last, "two days" if pts[-1][0] - pts[0][0] > 40 * 3600 else "%d hours" % round(
+            (pts[-1][0] - pts[0][0]) / 3600.0))
+
+    def fix(m, wrong):
+        sent = m.group(0)
+        if wrong and about_it(sent) and soil_words(sent):
+            lead = re.match(r"\s*", sent).group(0)
+            return lead + said
+        return sent
+    answer = RISING_CLAIM.sub(lambda m: fix(m, last - first <= -1.5), answer)
+    answer = FALLING_CLAIM.sub(lambda m: fix(m, last - first >= 3), answer)
+    return answer
+
 def band_duration(hive, n, band):
     soil = (n.get("derived") or {}).get("soil")
     if soil is None or not band:
@@ -3041,15 +3177,44 @@ def followup_question(q):
 DRY_RATE_Q = re.compile(r"(?i)\b(dries|dry|drying|dried|loses water|drains?)\b[^?]*\b(fastest|quickest|slowest|fast|quick|"
                         r"rate|how (fast|quickly))\b|\bhow (fast|quickly)\b[^?]*\b(dry|dries|drying)\b")
 
+# (asking for the rates or a ranking: "the cactus has been drying out really fast, should I water it?" is a premise
+# and a question about that plant, and got the ranking of every pot)
+DRY_RANK_Q = re.compile(r"(?i)\b(which|what|who)\b[^?]*\b(fastest|quickest|slowest|most|least|faster|slower)\b|"
+                        r"\bhow (fast|quickly)\b|\b(drying|dry) rate\b|\brate\b[^?]*\bdry|\b(fastest|slowest)\b")
+
+
+def drying_fact(hive, n):
+    """What one pot's reading did lately, for a message that says it's drying (fast): settled readings only."""
+    pts, cut = settled(soil_series(hive, n, 72))
+    name = n.get("name") or "node %s" % n["id"]
+    if len(pts) < 6:
+        return None
+    hours = (pts[-1][0] - pts[0][0]) / 3600.0
+    first, last = sum(p[1] for p in pts[:3]) / 3.0, sum(p[1] for p in pts[-3:]) / 3.0
+    per_day = (last - first) / max(hours, 1) * 24
+    since = "since its probe went back in the soil %s (a repot)" % time.strftime(
+        "%a %d %b %H:%M", time.localtime(cut)) if cut else "over the last %d hours" % round(hours)
+    how = ("NOT drying - the reading held or rose" if per_day > -0.5 else
+           "drying slowly, about %.1f points a day" % -per_day if per_day > -3 else "drying about %.0f points a day" % -per_day)
+    return ("DRYING CHECK for %s: %s it went from %.0f%% to %.0f%%: %s. If the message says it's drying fast and "
+            "this says otherwise, say so first." % (name, since, first, last, how))
+
+
 
 def dry_rate_reply(hive, st):
     """ "Which one dries fastest?" was guessed from today's levels. The fall in each pot's reading over the
     last 3 days (risings - waterings, soaks - left out)."""
-    rows = []
+    rows, recent = [], []
     for n in st.get("nodes", []):
         if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
             continue
-        pts = soil_series(hive, n, 96)
+        pts, cut = settled(soil_series(hive, n, 96))
+        if cut and len(pts) < 36:
+            if len(pts) >= 6:
+                recent.append("- %s: too soon to say - its probe was out of the soil %s (a repot); since then %.0f%% -> "
+                              "%.0f%%" % (n.get("name") or "node %s" % n["id"], time.strftime("%a %d %b %H:%M",
+                                          time.localtime(cut)), pts[0][1], pts[-1][1]))
+            continue
         if len(pts) < 24:
             continue
         # day by day: an hourly sum counted a probe's +-3 point jitter as drying
@@ -3064,8 +3229,8 @@ def dry_rate_reply(hive, st):
     if not rows:
         return None
     rows.sort(reverse=True)
-    lines = "\n".join("- %s: %s" % (nm, "about %.1f points a day" % r if r >= 0.5 else "hardly drying (under half a point a day)")
-                      for r, nm in rows)
+    lines = "\n".join(["- %s: %s" % (nm, "about %.1f points a day" % r if r >= 0.5 else "hardly drying (under half a point a day)")
+                       for r, nm in rows] + recent)
     if rows[0][0] < 0.5:
         return ("Over the last few days none of them has dried measurably - each day's average reading held or rose "
                 "(waterings and soaks left out):\n%s\n\nWet pots in mild weather dry slowly; a pot sitting in water "
@@ -3660,6 +3825,75 @@ def pronoun_nodes(st, q):
     return was if len(was) == 1 else []
 
 
+def light_fact(hive, nodes, request=False):
+    """ "What time does the grow light turn on?" got "no indication of a scheduled turn-on time", and a SoilNode
+    given a light it doesn't have. Each grow light's state and schedule, as the node reports them."""
+    lit = [n for n in nodes if has_light(hive, n.get("kind"))]
+    if not lit:
+        return ("GROW LIGHTS: no node in the hive has a grow light. Say so plainly; don't give a schedule, propose a "
+                "change, or send the person to the admin page for it: a light is switched by a GrowNode (a node "
+                "flashed with the GrowNode firmware, the light wired to it), and the hive has none.")
+    out = []
+    for n in lit:
+        sl, kind = n.get("slots") or {}, n.get("kind")
+        val = lambda sid: sl.get(str(sid), sl.get(sid))     # noqa: E731
+        clock = val(60)
+        out.append("GROW LIGHT on %s (node %s): %s now; mode: %s; schedule on %s, off %s (node clock %s)." % (
+            n.get("name") or kind, n["id"], hive.fmt(kind, 56, val(56)) if val(56) is not None else "unknown",
+            hive.fmt(kind, 57, val(57)) if val(57) is not None else "unknown",
+            hive.fmt(kind, 58, val(58)) if val(58) is not None else "unknown",
+            hive.fmt(kind, 59, val(59)) if val(59) is not None else "unknown",
+            "NOT SET - the admin sends the time by itself within a minute or two of hearing the node; until then "
+            "the light stays off on its schedule. Nothing to do about it from this chat" if clock in (None, 65535)
+            else hive.fmt(kind, 60, clock)))
+    others = [n.get("name") or n.get("kind") for n in nodes if n not in lit]
+    if others:
+        out.append("No grow light on: %s." % ", ".join(others))
+    if request:
+        out.append("To change a light: node_action Light on / Light off / Light on schedule, or set_slot Lights on at "
+                   "(slot 58) / Lights off at (slot 59) with the time the person gave.")
+    return " ".join(out)
+
+
+STREAM_Q = re.compile(r"(?i)\b(stream\w*|twitch|viewers?|chatters?|channel points|cheers?|on air)\b|\bbits\b")
+
+
+def stream_fact(hive):
+    """ "How many viewers watered the plant on stream today?" got "I don't have information about streaming". The
+    Stream page's own numbers. Counts and amounts only: no viewer's name or words - nothing typed on Twitch reaches
+    the model."""
+    try:
+        r = hive.call("GET", "/api/stream") or {}
+    except RuntimeError:
+        return "STREAM: this hive has no Stream page (an older admin, or flash-only mode)."
+    st, tw = r.get("settings") or {}, r.get("twitch") or {}
+    if not st.get("node"):
+        where = "no plant picked"
+    else:
+        where = "the plant is node %s" % st["node"]
+    status = str(r.get("status") or "")
+    status = ("a viewer's dose is going out now" if status.startswith("watering") else status)
+    t = time.time()
+    hist = [h for h in r.get("history") or [] if t - (h.get("done_at") or h.get("at") or 0) < 86400]
+    given = [h for h in hist if h.get("status") == "given"]
+    by = {}
+    for h in given:
+        by[h.get("src")] = by.get(h.get("src"), 0) + int(h.get("ml") or 0)
+    other = {}
+    for h in hist:
+        if h.get("status") != "given":
+            other[h.get("status")] = other.get(h.get("status"), 0) + 1
+    return ("STREAM PAGE (viewers water the stream plant): %s; %s; Twitch %s; now: %s. Last 24 h: %d viewer "
+            "watering(s) given, %d ml%s%s; %d waiting in the queue; free water used %s of %s ml a day. Viewer "
+            "watering is set up and changed on the admin's Stream page, not from this chat." % (
+                "ON" if st.get("enabled") and not st.get("paused") else "PAUSED" if st.get("enabled") else "OFF (viewers "
+                "can't water)", where, "linked" if tw.get("linked") else "not linked",
+                status or "unknown", len(given), sum(by.values()),
+                " (%s)" % ", ".join("%s %d ml" % (k, v) for k, v in sorted(by.items())) if by else "",
+                "; not given: %s" % ", ".join("%d %s" % (v, k) for k, v in sorted(other.items())) if other else "",
+                len(r.get("queue") or []), r.get("free_ml_24h", 0), st.get("viewer_day_ml", "?")))
+
+
 def focus_facts(hive, q):
     """The facts about each node this message names, right next to the question:
     small models weigh what's beside the question far above a long status."""
@@ -3717,6 +3951,10 @@ def focus_facts(hive, q):
                 "Dry soil: thirst is likely; a watering is the first thing to try." if thirsty else
                 "The soil is moist, so this is NOT thirst - don't suggest more water or more frequent watering. "
                 "Think heat or strong sun, root rot from overwatering, poor drainage, or transplant shock."))
+        if DRY_RATE_Q.search(q) or re.search(r"(?i)\b(drying (out|up)|dried (out|up)|dries out)\b", q):
+            t = drying_fact(hive, n)
+            if t:
+                out.append(t)
         if has_pump(hive, kind) and NEXT_WATER_Q.search(q):
             t = next_watering(hive, n)
             if t:
@@ -3757,6 +3995,10 @@ def focus_facts(hive, q):
         extra = ["%s: %s" % (k.replace("_", " "), f[k]) for k in ("target_note", "field_capacity", "seed_mode") if f.get(k)]
         if extra:
             out.append("%s, more: %s." % (n.get("name") or kind, "; ".join(extra)))
+    if STREAM_Q.search(q):
+        out.append(stream_fact(hive))
+    if LIGHT_WORDS.search(q):
+        out.append(light_fact(hive, [n for n in st.get("nodes", []) if not n.get("hidden")], REQUEST.search(q)))
     if out:
         out.append("Turning automatic watering or seed mode on/off, calibration, field capacity and firmware: admin page only, not this chat.")
     # "Which plant got the most water this week?" names none: every pump's total.
@@ -3801,6 +4043,31 @@ def focus_facts(hive, q):
                 out.append(h)
     return ("\n\n[Hive facts about the node(s) named above - from the hive, not typed by the person]\n" +
             "\n".join(out)) if out else ""
+
+
+NOT_A_NAME = {"it", "them", "that", "this", "those", "these", "plant", "plants", "pot", "pots", "all", "everything",
+              "everyone", "both", "one", "ones", "some", "node", "nodes", "garden", "pump", "pumps", "light", "lights",
+              "grow", "lamp", "now", "again", "please", "more", "less", "too", "today", "tonight", "tomorrow", "later",
+              "off", "on", "up", "down", "out", "in", "for", "with", "by", "to", "at", "every", "each", "other", "rest",
+              "first", "dry", "wet", "dried", "thirsty", "my", "the", "our", "your", "few", "little", "lot", "bit",
+              "half", "full", "quick", "quickly", "lightly", "deeply", "well", "auto", "automatic", "hive", "swarm",
+              "relay", "gateway", "station", "weather", "sensor", "probe", "seeds", "seedlings", "seedling", "outside",
+              "inside", "indoor", "outdoor", "and", "but", "then", "if", "when", "after", "before", "until", "watering",
+              "everybody", "anything", "something", "nothing", "same", "big", "small", "ml", "cup", "cups", "ounce",
+              "ounces", "oz", "litre", "litres", "liter", "liters", "gallon", "gallons", "pint", "pints", "quart",
+              "quarts", "tablespoon", "tablespoons", "teaspoon", "teaspoons", "tbsp", "tsp", "second", "seconds",
+              "minute", "minutes", "sec", "secs", "min", "mins", "hour", "hours", "day", "days", "two", "three",
+              "four", "five", "ten", "twenty", "fifty", "hundred", "twice", "once", "pls", "plz", "asap"}
+
+
+def unknown_plant(q):
+    """ "water the strawberry 20 ml": the word where a plant's name goes, when it isn't a word for "it" or "all"
+    or an amount (callers ask only when no node was named, so it matched no name, typos allowed)."""
+    m = re.match(r"(?i)^\s*(please\s+)?(water|pump|stop|reboot|restart|rename)\s+(the |my |our |that |this )?([a-z][a-z'-]+)", q)
+    if not m:
+        return None
+    w = m.group(4).lower()
+    return None if w in NOT_A_NAME or len(w) < 3 else w
 
 
 COMMAND = re.compile(r"(?i)^\s*(please\s+)?(water|pump|stop|reboot|restart|reset|set|rename|turn)\b")
@@ -3856,9 +4123,11 @@ HISTORY_MARK = re.compile(r"(?i)\b(\d+|once|twice|zero|no|several|many) times?\b
 REQUEST = re.compile(r"(?i)(^|[.!?]\s+|\b(can|could|would|will) you\s+|\bplease\s+|\bgo ahead and\s+|"
                      r"\bi (want|need) you to\s+|\bok(ay)?,?\s+|\bjust\s+|\bnow\s+|\bactually,?\s+|\bthen\s+)"
                      r"(water|pump|stop|reboot|restart|reset|set|rename|turn|run|change|add|note|log|mark|give|"
-                     r"enable|disable|switch|update|make|redo|try|use|do)\b"
+                     r"enable|disable|switch|update|make|redo|try|use|do|put)\b"
                      # an amendment to the last request: "make it 50 ml instead", "change that to 50"
                      r"|\b(make|change) (it|that|this)\b.*\b(ml|instead|to \d)|\binstead\b.*\b\d+ ?ml\b"
+                     # "lights off at 9pm": no verb either
+                     r"|^\s*(the\s+)?(grow\s*)?lights?\s+(on|off)\b(?![^?]*\?)"
                      # "💧 larkspur 50ml pls": no verb, but a short message with an amount and no question
                      r"|^(?![^\n]*\?)(?!\s*(what|when|how|why|is|are|was|did|does|do)\b)\W*(\S+\s+){0,4}?\S*\d+(\.\d+)? ?"
                      r"(ml|cups?|l|litres?|liters?|oz)\b(\s+\S+){0,3}\s*$")
@@ -3945,6 +4214,10 @@ CANT_OFFER = [
     (re.compile(r"(?i)[^.!?\n]*\b(I can|I could|I'll|I will|shall I|would you like (me )?to|do you want (me )?to|"
                 r"want me to|let me)\b[^.!?\n]*\b((re)?calibrat\w*|update the firmware|flash|broadcast)\b[^.!?\n]*[.!?]?"),
      "Calibration, firmware and swarm-wide modes are done on the admin page, not from this chat."),
+    # "Would you like to check the node's clock or set it to the correct time?" - the admin does that itself.
+    (re.compile(r"(?i)[^.!?\n]*\b(I can|I could|I'll|I will|shall i|should i|would you like (me )?to|do you want (me )?to|"
+                r"want me to|let me)\b[^.!?\n]*\bclock\b[^.!?\n]*[.!?]?"),
+     "The admin sets a node's clock by itself (as soon as the node reports none, and every few hours)."),
 ]
 
 
@@ -4076,6 +4349,8 @@ def ask(hive, messages, q, on_tool=None):
     except RuntimeError:
         st = {}
     nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
+    lit = [n["id"] for n in nodes if has_light(hive, n.get("kind"))]
+    ONLY_LIGHT[:] = lit if len(lit) == 1 else []
     q2 = corrected_request(nodes, q) or followup_question(q)
     if q2:
         q = q2
@@ -4342,7 +4617,7 @@ def ask(hive, messages, q, on_tool=None):
             fixed = soil_temp_reply(hive, sn[0])
     if not fixed and DELETE_Q.search(q):
         fixed = DELETE_REPLY
-    if not fixed and DRY_RATE_Q.search(q) and is_question(q) and not COMMAND.search(q):
+    if not fixed and DRY_RATE_Q.search(q) and DRY_RANK_Q.search(q) and is_question(q) and not COMMAND.search(q):
         try:
             fixed = dry_rate_reply(hive, st)
         except RuntimeError:
@@ -4458,9 +4733,28 @@ def ask(hive, messages, q, on_tool=None):
             messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
             return a
         # Water/pump/stop only make sense for a node with a pump: offer just those.
-        pick = pumps if re.search(r"(?i)^\s*(please\s+)?(water|pump|stop)\b", q) and pumps else nodes
+        lights = [n for n in nodes if has_light(hive, n.get("kind"))]
+        if LIGHT_WORDS.search(q) and not lights:
+            a = ("No node in the hive has a grow light - only a GrowNode switches one, and the hive has: %s. "
+                 "Nothing was sent." % ", ".join("%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in nodes))
+            messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+            return a
+        unknown = unknown_plant(q)
+        if unknown and not any(unknown in (n.get("kind") or "").lower() or unknown in (n.get("name") or "").lower()
+                               for n in nodes + list(st.get("silent") or [])):
+            a = "There's no plant called \"%s\" in the hive. " % unknown
+            if re.search(r"(?i)^\s*(please\s+)?(water|pump|stop)\b", q) and pumps:
+                a += "These have a pump: %s - which one do you mean? Nothing was sent." % ", ".join(
+                    "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in pumps)
+            else:
+                a += "The hive has: %s. Nothing was sent." % ", ".join(
+                    "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in nodes)
+            messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+            return a
+        pick = pumps if re.search(r"(?i)^\s*(please\s+)?(water|pump|stop)\b", q) and pumps else \
+            lights if LIGHT_WORDS.search(q) and lights else nodes
         a = "Which one do you mean? %s: %s." % (
-            "These have a pump" if pick is pumps else "The hive has",
+            "These have a pump" if pick is pumps else "These have a grow light" if pick is lights else "The hive has",
             ", ".join("%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]) for n in pick))
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
@@ -4584,6 +4878,7 @@ def ask(hive, messages, q, on_tool=None):
                         r"(help|fix|resolve|clear|solve|reset)\b[^.!?\n]*[.!?]?" + tail, "", answer)
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(try|trying|consider|considering|recommend|suggest)\w*\b[^.!?\n]*\breboot\w*\b[^.!?\n]*[.!?]?" + tail,
                         "", answer)
+    answer = no_false_agree(q, answer)
     try:
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
@@ -4595,6 +4890,25 @@ def ask(hive, messages, q, on_tool=None):
             m.group(1), float(m.group(1)) / 25.4), answer)
     LAST_ANSWER[:] = [answer]
     return answer
+
+
+CLAIM_Q = re.compile(r"(?i)\b(right|correct|true|yeah|yes|ok|okay)\s*\?|\b(is|isn't|was|wasn't) (that|it|this) (right|correct|true|so)\b|"
+                     r"\b(am i|i('m| am)) (right|correct|wrong)\b|^\W*(so|and so)\b|\b(i think|i thought|i believe|i guess|i bet)\b|"
+                     r"\b(isn't|doesn't|wasn't|didn't|hasn't|aren't) (it|that|they|he|she)\b|"
+                     r"\b(i|we) (just |already )?(watered|changed|repotted|moved|added|put|soaked|gave|swapped|replaced)\b")
+AGREE_OPENER = re.compile(r"(?i)^\W*(yes|yep|yeah)?,?\s*(that('s| is) (correct|right|true)|correct|you('re| are) (correct|right)|"
+                          r"exactly|indeed|absolutely)[.!,]\s+(?=\S)")
+
+
+def no_false_agree(q, answer):
+    """ "That is correct. The Larkspur was last watered by hand on Mon 12 Oct" to "when was the larkspur last
+    watered?": nothing was claimed, so there was nothing to agree with. A yes/no question keeps a plain "Yes."."""
+    if CLAIM_Q.search(q) or not AGREE_OPENER.search(answer):
+        return answer
+    rest = AGREE_OPENER.sub("", answer, count=1)
+    if re.match(r"(?i)^\W*(is|are|was|were|does|do|did|has|have|can|could|will|would|should)\b", q):
+        return "Yes. " + rest
+    return rest[:1].upper() + rest[1:]
 
 
 def no_card_offers(answer):
@@ -4699,8 +5013,10 @@ def must_say(hive, q, answer):
                          r"(temperature )?(data|readings?)\b|not available|isn't functioning|not functioning", answer):
                 answer = ""
             add.append(line)
+    others = [m.get("name") for m in st.get("nodes", []) if m.get("name") and not m.get("hidden")]
     for n in named:
         name = n.get("name") or "node %s" % n["id"]
+        answer = fix_trend_claim(hive, n, answer, len(named) == 1, others)
         if has_pump(hive, n.get("kind")):
             b = water_budget(hive, n) if BUDGET.search(q) and not REQUEST.search(q) else None
             m = re.search(r"(\d+) ml more is allowed", b or "")

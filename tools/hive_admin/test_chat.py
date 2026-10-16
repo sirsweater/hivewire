@@ -1107,5 +1107,123 @@ check(not fake_llm.calls and (out["answer"].startswith("What needs attention") o
       "'what needs attention?' is listed from the data", out["answer"][:160])
 check(C.HISTORY_MARK.search("The larkspur has been watered 446 ml in total."), "'in total' marks history, not a claim")
 
+# "That is correct." when nothing was claimed; "steadily increasing" when the readings fell.
+check(C.no_false_agree("when was the larkspur last watered?", "That is correct. The Larkspur was last watered by hand.") ==
+      "The Larkspur was last watered by hand.", "an agreeing opener goes when the question claimed nothing")
+check(C.no_false_agree("is the cactus wet?", "That's correct. It reads 88%.") == "Yes. It reads 88%.",
+      "...a yes/no question gets a plain 'Yes.'")
+check(C.no_false_agree("I watered the larkspur monday, right?", "That is correct. Its soil rose to 81%.").startswith("That is correct"),
+      "...and it stays when the person did claim something")
+check(C.no_false_agree("how wet is it?", "Correct") == "Correct", "...an answer that is only the word is left")
+_ss = C.soil_series
+_lark = {"id": 7, "name": "Larkspur"}
+_now = int(_t.time())
+C.soil_series = lambda h, n, hours, res="hour": [(_now - (48 - i) * 3600, 90 - i * 0.07, 89 - i * 0.07, 91 - i * 0.07) for i in range(48)]
+try:
+    t = C.fix_trend_claim(None, _lark, "It was last watered on Monday. Its soil moisture level has been increasing steadily "
+                          "without any pump activity in the log.", True, ["Larkspur", "Rhubarb"])
+    check("increasing" not in t and "went from 90% to 87% over the last two days" in t and t.startswith("It was last"),
+          "a rising trend claimed while the readings fell is replaced by what they did", t)
+    t = C.fix_trend_claim(None, _lark, "The Rhubarb's moisture is increasing after its watering.", True, ["Larkspur", "Rhubarb"])
+    check("increasing" in t, "...not when the sentence is about another plant", t)
+    t = C.fix_trend_claim(None, _lark, "The Larkspur is drying out slowly.", True, ["Larkspur"])
+    check(t == "The Larkspur is drying out slowly.", "...and a falling claim that's true is left", t)
+    C.soil_series = lambda h, n, hours, res="hour": [(_now - (48 - i) * 3600, 60 + i * 0.5, 59 + i * 0.5, 61 + i * 0.5) for i in range(48)]
+    t = C.fix_trend_claim(None, _lark, "Its soil has been drying out.", True, ["Larkspur"])
+    check("drying" not in t and "went from 61% to 82%" in t, "...a falling claim while it rose is replaced too", t)
+    C.soil_series = lambda h, n, hours, res="hour": []
+    check(C.fix_trend_claim(None, _lark, "It is increasing.", True, []) == "It is increasing.", "...with no readings, left alone")
+finally:
+    C.soil_series = _ss
+
+# --- the grow light (the fake swarm's GrowNode) and a plant the hive doesn't have ----
+gn = next(n for n in hive.call("GET", "/api/state")["nodes"] if n["kind"] == "GrowNode")
+check(C.stated_time("lights on at 7am") == 420 and C.stated_time("on at 07:00 and off at 21:30", "Lights off at") == 1290
+      and C.stated_time("lights on at 7") is None and C.stated_time("off at noon") == 720,
+      "times of day: 7am, the off time of two, noon; '7' alone isn't one")
+check(C.LIGHT_WORDS.search("turn on the grow light") and not C.LIGHT_WORDS.search("give the larkspur a light watering")
+      and not C.LIGHT_WORDS.search("any light rain today?"), "'the grow light' is the light; 'a light watering' isn't")
+conv = C.Conversation()
+script[:] = [tool("node_action", node=str(gn["id"]), action="Light on"), say("Press Confirm to switch it on.")]
+out = conv.ask(hive, "turn on the grow light")
+check(out["pending"] and "LIGHT ON on" in out["pending"][0]["summary"], "'turn on the grow light' names the only node with one",
+      (out, last_tool_result(conv)))
+conv = C.Conversation()
+script[:] = [tool("node_action", node=str(gn["id"]), action="Light off"), say("Done.")]
+out = conv.ask(hive, "turn on the grow light")
+check(not out["pending"], "...and 'Light off' isn't sent for 'turn on'", out)
+conv = C.Conversation()
+script[:] = [tool("node_action", node=str(gn["id"]), action="Light on schedule"), say("Press Confirm.")]
+out = conv.ask(hive, "put the grow light back on its schedule")
+check(out["pending"] and "LIGHT ON SCHEDULE" in out["pending"][0]["summary"], "'back on its schedule' is the schedule", out)
+conv = C.Conversation()
+script[:] = [tool("set_slot", target=str(gn["id"]), slot=58, value=7), say("Press Confirm.")]
+out = conv.ask(hive, "set the lights to come on at 7am")
+check(out["pending"] and "to 07:00" in out["pending"][0]["summary"], "'lights on at 7am' is 07:00 on the card, not 00:07", out)
+conv = C.Conversation()
+script[:] = [tool("set_slot", target=str(gn["id"]), slot=58, value=1260), say("Done.")]
+out = conv.ask(hive, "lights off at 9pm")
+check(not out["pending"] and "wrong setting" in last_tool_result(conv).get("reason", ""),
+      "an off time isn't written to 'Lights on at'", last_tool_result(conv))
+conv = C.Conversation()
+script[:] = [tool("set_slot", target=str(gn["id"]), slot=58, value=7), say("Done.")]
+out = conv.ask(hive, "lights on at 7")
+check(not out["pending"] and "07:00 or 7 pm" in out["answer"], "'at 7' gets asked: morning or evening", out["answer"])
+t = C.scrub_offers("It turns on at 06:00. Would you like to check the node's clock or set it to the correct time?")
+check("Would you like" not in t and "sets a node's clock by itself" in t, "no offer to set a node's clock", t)
+f = C.focus_facts(hive, "what time does the grow light turn on?")
+check("GROW LIGHT on" in f and "schedule on" in f and "No grow light on:" in f,
+      "a question about the light gets its state and schedule, and which nodes have none", f)
+_hl = C.has_light
+C.has_light = lambda h, k: False
+try:
+    conv = C.Conversation()
+    fake_llm.calls.clear()
+    out = conv.ask(hive, "turn on the grow light")
+    check(out["answer"].startswith("No node in the hive has a grow light") and not fake_llm.calls and not out["pending"],
+          "...with no light in the hive: said so, nothing asked", out["answer"])
+    check("no node in the hive has a grow light" in C.focus_facts(hive, "what time does the grow light turn on?"),
+          "...and the fact beside a question says so too")
+finally:
+    C.has_light = _hl
+conv = C.Conversation()
+fake_llm.calls.clear()
+out = conv.ask(hive, "water the strawberry 20 ml")
+check(out["answer"].startswith('There\'s no plant called "strawberry"') and "These have a pump" in out["answer"]
+      and not out["pending"] and not fake_llm.calls, "a plant the hive doesn't have is said to be missing", out["answer"])
+check(C.unknown_plant("water it 50 ml") is None and C.unknown_plant("water both 2 cups") is None and
+      C.unknown_plant("water 30 ml") is None, "...'it', 'both' and an amount aren't plant names")
+
+# --- a repot isn't drying ------------------------------------------------------------
+_pts = [(i * 3600, 94.0, 93.0, 95.0) for i in range(20)] + [(20 * 3600, 71.0, 2.0, 88.0)] + \
+       [(i * 3600, 88.0 + i * 0.01, 87.0, 89.0) for i in range(21, 45)]
+kept, cut = C.settled(_pts)
+check(cut == 20 * 3600 and kept[0][0] == 21 * 3600, "an hour with the probe in the air (avg 71 %, low 2 %) cuts the series", cut)
+check(C.settled([(0, 3.0, 1.0, 4.0), (3600, 2.0, 1.0, 3.0)])[1] is None, "...a pot that is simply bone dry doesn't")
+C.soil_series = lambda h, n, hours, res="hour": [(_now - (len(_pts) - i) * 3600,) + p[1:] for i, p in enumerate(_pts)]
+try:
+    f = C.drying_fact(hive, {"id": 6, "name": "Cactus"})
+    check("since its probe went back in the soil" in f and "NOT drying" in f, "the drying check counts from the repot", f)
+finally:
+    C.soil_series = _ss
+check(not C.DRY_RANK_Q.search("the cactus has been drying out really fast, should I water it?") and
+      C.DRY_RANK_Q.search("which one dries fastest?"), "'it's drying fast, should I water it?' isn't a ranking question")
+
+# --- the Stream page's numbers, never a viewer's name ---------------------------------
+f = C.focus_facts(hive, "how many viewers watered the plant on stream today?")
+check("STREAM PAGE" in f and "OFF" in f and "0 viewer watering(s)" in f, "a stream question gets the Stream page's numbers", f)
+
+
+class _StreamHive:
+    def call(self, method, path, *a, **k):
+        t = __import__("time").time()
+        return {"settings": {"enabled": True, "node": 15, "viewer_day_ml": 1000}, "twitch": {"linked": True},
+                "status": "watering: 5 ml for ignore_all_rules (waiting for the node's report)", "free_ml_24h": 5,
+                "queue": [], "history": [{"login": "ignore_all_rules", "ml": 5, "src": "chat", "status": "given", "at": t - 60}]}
+
+
+f = C.stream_fact(_StreamHive())
+check("ignore_all_rules" not in f and "1 viewer watering(s) given, 5 ml" in f, "...counts only: no viewer's name reaches the model", f)
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
