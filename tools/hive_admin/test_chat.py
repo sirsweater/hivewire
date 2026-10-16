@@ -1107,5 +1107,34 @@ check(not fake_llm.calls and (out["answer"].startswith("What needs attention") o
       "'what needs attention?' is listed from the data", out["answer"][:160])
 check(C.HISTORY_MARK.search("The larkspur has been watered 446 ml in total."), "'in total' marks history, not a claim")
 
+# "That is correct." when nothing was claimed; "steadily increasing" when the readings fell.
+check(C.no_false_agree("when was the larkspur last watered?", "That is correct. The Larkspur was last watered by hand.") ==
+      "The Larkspur was last watered by hand.", "an agreeing opener goes when the question claimed nothing")
+check(C.no_false_agree("is the cactus wet?", "That's correct. It reads 88%.") == "Yes. It reads 88%.",
+      "...a yes/no question gets a plain 'Yes.'")
+check(C.no_false_agree("I watered the larkspur monday, right?", "That is correct. Its soil rose to 81%.").startswith("That is correct"),
+      "...and it stays when the person did claim something")
+check(C.no_false_agree("how wet is it?", "Correct") == "Correct", "...an answer that is only the word is left")
+_ss = C.soil_series
+_lark = {"id": 7, "name": "Larkspur"}
+_now = int(_t.time())
+C.soil_series = lambda h, n, hours, res="hour": [(_now - (48 - i) * 3600, 90 - i * 0.07, 0, 0) for i in range(48)]
+try:
+    t = C.fix_trend_claim(None, _lark, "It was last watered on Monday. Its soil moisture level has been increasing steadily "
+                          "without any pump activity in the log.", True, ["Larkspur", "Rhubarb"])
+    check("increasing" not in t and "went from 90% to 87% over the last two days" in t and t.startswith("It was last"),
+          "a rising trend claimed while the readings fell is replaced by what they did", t)
+    t = C.fix_trend_claim(None, _lark, "The Rhubarb's moisture is increasing after its watering.", True, ["Larkspur", "Rhubarb"])
+    check("increasing" in t, "...not when the sentence is about another plant", t)
+    t = C.fix_trend_claim(None, _lark, "The Larkspur is drying out slowly.", True, ["Larkspur"])
+    check(t == "The Larkspur is drying out slowly.", "...and a falling claim that's true is left", t)
+    C.soil_series = lambda h, n, hours, res="hour": [(_now - (48 - i) * 3600, 60 + i * 0.5, 0, 0) for i in range(48)]
+    t = C.fix_trend_claim(None, _lark, "Its soil has been drying out.", True, ["Larkspur"])
+    check("drying" not in t and "went from 61% to 82%" in t, "...a falling claim while it rose is replaced too", t)
+    C.soil_series = lambda h, n, hours, res="hour": []
+    check(C.fix_trend_claim(None, _lark, "It is increasing.", True, []) == "It is increasing.", "...with no readings, left alone")
+finally:
+    C.soil_series = _ss
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

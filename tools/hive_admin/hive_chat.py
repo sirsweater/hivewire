@@ -2255,6 +2255,47 @@ BAND_TIME_Q = re.compile(r"(?i)\bhow long\b[^?]*\b(too wet|too dry|soggy|waterlo
                          r"\bsince when\b[^?]*\b(wet|dry)\b")
 
 
+
+RISING_CLAIM = re.compile(r"(?i)[^.!?\n]*\b(has been|have been|is|are|keeps|kept|been|was)\s+(\w+ly\s+)?(increasing|rising|"
+                          r"going up|climbing|getting wetter)\b[^.!?\n]*[.!?]?")
+FALLING_CLAIM = re.compile(r"(?i)[^.!?\n]*\b(has been|have been|is|are|keeps|kept|been|was)\s+(\w+ly\s+)?(decreasing|falling|"
+                           r"dropping|going down|declining|getting drier|drying( out)?)\b[^.!?\n]*[.!?]?")
+
+
+def fix_trend_claim(hive, n, answer, only_one, others=()):
+    """ "Its soil moisture level has been increasing steadily without any pump activity" for the Larkspur, whose
+    reading eased from 90 to 87 % over the two days before (a hand watering three days back was its last rise).
+    A sentence about this plant's soil moving one way while the last 48 hours moved the other is replaced by
+    what the readings did."""
+    if not (RISING_CLAIM.search(answer) or FALLING_CLAIM.search(answer)):
+        return answer
+    pts = soil_series(hive, n, 48)
+    if len(pts) < 24:
+        return answer
+    first = sum(p[1] for p in pts[:6]) / 6.0
+    last = sum(p[1] for p in pts[-6:]) / 6.0
+    name = n.get("name") or "node %s" % n["id"]
+    nm = re.compile(r"(?i)\b%s\b" % re.escape(name))
+
+    def about_it(sent):
+        if nm.search(sent):
+            return True
+        return only_one and not any(re.search(r"(?i)\b%s\b" % re.escape(o), sent) for o in others if o != name)
+
+    def soil_words(sent):
+        return re.search(r"(?i)\b(soil|moisture|reading|readings|level|wetness|it|its)\b", sent)
+    said = "%s's reading went from %.0f%% to %.0f%% over the last two days." % (name, first, last)
+
+    def fix(m, wrong):
+        sent = m.group(0)
+        if wrong and about_it(sent) and soil_words(sent):
+            lead = re.match(r"\s*", sent).group(0)
+            return lead + said
+        return sent
+    answer = RISING_CLAIM.sub(lambda m: fix(m, last - first <= -1.5), answer)
+    answer = FALLING_CLAIM.sub(lambda m: fix(m, last - first >= 3), answer)
+    return answer
+
 def band_duration(hive, n, band):
     soil = (n.get("derived") or {}).get("soil")
     if soil is None or not band:
@@ -4584,6 +4625,7 @@ def ask(hive, messages, q, on_tool=None):
                         r"(help|fix|resolve|clear|solve|reset)\b[^.!?\n]*[.!?]?" + tail, "", answer)
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(try|trying|consider|considering|recommend|suggest)\w*\b[^.!?\n]*\breboot\w*\b[^.!?\n]*[.!?]?" + tail,
                         "", answer)
+    answer = no_false_agree(q, answer)
     try:
         answer = must_report_silent(hive, q, answer)
     except RuntimeError:
@@ -4595,6 +4637,25 @@ def ask(hive, messages, q, on_tool=None):
             m.group(1), float(m.group(1)) / 25.4), answer)
     LAST_ANSWER[:] = [answer]
     return answer
+
+
+CLAIM_Q = re.compile(r"(?i)\b(right|correct|true|yeah|yes|ok|okay)\s*\?|\b(is|isn't|was|wasn't) (that|it|this) (right|correct|true|so)\b|"
+                     r"\b(am i|i('m| am)) (right|correct|wrong)\b|^\W*(so|and so)\b|\b(i think|i thought|i believe|i guess|i bet)\b|"
+                     r"\b(isn't|doesn't|wasn't|didn't|hasn't|aren't) (it|that|they|he|she)\b|"
+                     r"\b(i|we) (just |already )?(watered|changed|repotted|moved|added|put|soaked|gave|swapped|replaced)\b")
+AGREE_OPENER = re.compile(r"(?i)^\W*(yes|yep|yeah)?,?\s*(that('s| is) (correct|right|true)|correct|you('re| are) (correct|right)|"
+                          r"exactly|indeed|absolutely)[.!,]\s+(?=\S)")
+
+
+def no_false_agree(q, answer):
+    """ "That is correct. The Larkspur was last watered by hand on Mon 12 Oct" to "when was the larkspur last
+    watered?": nothing was claimed, so there was nothing to agree with. A yes/no question keeps a plain "Yes."."""
+    if CLAIM_Q.search(q) or not AGREE_OPENER.search(answer):
+        return answer
+    rest = AGREE_OPENER.sub("", answer, count=1)
+    if re.match(r"(?i)^\W*(is|are|was|were|does|do|did|has|have|can|could|will|would|should)\b", q):
+        return "Yes. " + rest
+    return rest[:1].upper() + rest[1:]
 
 
 def no_card_offers(answer):
@@ -4699,8 +4760,10 @@ def must_say(hive, q, answer):
                          r"(temperature )?(data|readings?)\b|not available|isn't functioning|not functioning", answer):
                 answer = ""
             add.append(line)
+    others = [m.get("name") for m in st.get("nodes", []) if m.get("name") and not m.get("hidden")]
     for n in named:
         name = n.get("name") or "node %s" % n["id"]
+        answer = fix_trend_claim(hive, n, answer, len(named) == 1, others)
         if has_pump(hive, n.get("kind")):
             b = water_budget(hive, n) if BUDGET.search(q) and not REQUEST.search(q) else None
             m = re.search(r"(\d+) ml more is allowed", b or "")
