@@ -3830,8 +3830,9 @@ def light_fact(hive, nodes, request=False):
     given a light it doesn't have. Each grow light's state and schedule, as the node reports them."""
     lit = [n for n in nodes if has_light(hive, n.get("kind"))]
     if not lit:
-        return ("GROW LIGHTS: no node in the hive has a grow light (only a GrowNode switches one). Say so plainly; "
-                "don't give a schedule or propose a change.")
+        return ("GROW LIGHTS: no node in the hive has a grow light. Say so plainly; don't give a schedule, propose a "
+                "change, or send the person to the admin page for it: a light is switched by a GrowNode (a node "
+                "flashed with the GrowNode firmware, the light wired to it), and the hive has none.")
     out = []
     for n in lit:
         sl, kind = n.get("slots") or {}, n.get("kind")
