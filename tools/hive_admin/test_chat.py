@@ -1169,6 +1169,8 @@ conv = C.Conversation()
 script[:] = [tool("set_slot", target=str(gn["id"]), slot=58, value=7), say("Done.")]
 out = conv.ask(hive, "lights on at 7")
 check(not out["pending"] and "07:00 or 7 pm" in out["answer"], "'at 7' gets asked: morning or evening", out["answer"])
+t = C.scrub_offers("It turns on at 06:00. Would you like to check the node's clock or set it to the correct time?")
+check("Would you like" not in t and "sets a node's clock by itself" in t, "no offer to set a node's clock", t)
 f = C.focus_facts(hive, "what time does the grow light turn on?")
 check("GROW LIGHT on" in f and "schedule on" in f and "No grow light on:" in f,
       "a question about the light gets its state and schedule, and which nodes have none", f)

@@ -3842,7 +3842,8 @@ def light_fact(hive, nodes, request=False):
             hive.fmt(kind, 57, val(57)) if val(57) is not None else "unknown",
             hive.fmt(kind, 58, val(58)) if val(58) is not None else "unknown",
             hive.fmt(kind, 59, val(59)) if val(59) is not None else "unknown",
-            "NOT SET - on its schedule the light stays off until the admin sends the time" if clock in (None, 65535)
+            "NOT SET - the admin sends the time by itself within a minute or two of hearing the node; until then "
+            "the light stays off on its schedule. Nothing to do about it from this chat" if clock in (None, 65535)
             else hive.fmt(kind, 60, clock)))
     others = [n.get("name") or n.get("kind") for n in nodes if n not in lit]
     if others:
@@ -4171,6 +4172,10 @@ CANT_OFFER = [
     (re.compile(r"(?i)[^.!?\n]*\b(I can|I could|I'll|I will|shall I|would you like (me )?to|do you want (me )?to|"
                 r"want me to|let me)\b[^.!?\n]*\b((re)?calibrat\w*|update the firmware|flash|broadcast)\b[^.!?\n]*[.!?]?"),
      "Calibration, firmware and swarm-wide modes are done on the admin page, not from this chat."),
+    # "Would you like to check the node's clock or set it to the correct time?" - the admin does that itself.
+    (re.compile(r"(?i)[^.!?\n]*\b(I can|I could|I'll|I will|shall i|should i|would you like (me )?to|do you want (me )?to|"
+                r"want me to|let me)\b[^.!?\n]*\bclock\b[^.!?\n]*[.!?]?"),
+     "The admin sets a node's clock by itself (as soon as the node reports none, and every few hours)."),
 ]
 
 
