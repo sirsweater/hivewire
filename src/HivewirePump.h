@@ -244,6 +244,14 @@ class HivewirePump {
   // inside the last AUTO_JUMP_WINDOW judgements, or the probe dropping out,
   // starts AUTO_SETTLE_MS of not watering; a probe put back in the soil reads
   // wet again long before that runs out.
+  //
+  // Except straight after a watering. A fast-draining mix (lava rock, pumice,
+  // perlite) can shed the water past the probe inside ten minutes, and that dry
+  // jump looks exactly like a probe being pulled. Within AUTO_DRAIN_GRACE_MS of
+  // a dose ending, a jump that only brings the reading back to about where the
+  // pot was before the watering is drainage, not a disturbance (drainingBack()).
+  // A pulled probe reads air, far drier than any pot it was taken from, so it
+  // still trips the wait.
   void autoLoop(bool soilOk, uint16_t raw) {
     uint32_t now = millis();
     if (_autoCheckAt && (int32_t)(now - _autoCheckAt) < 0) return;
@@ -260,12 +268,17 @@ class HivewirePump {
       if (!_settleUntil) _settleUntil = 1;
       return;
     }
+    _lastJudgedRaw = raw;
     uint16_t lowest = raw;
     for (uint8_t i = 0; i < _histN; i++) if (_hist[i] < lowest) lowest = _hist[i];
     _hist[_histAt] = raw;
     _histAt = (_histAt + 1) % AUTO_JUMP_WINDOW;
     if (_histN < AUTO_JUMP_WINDOW) _histN++;
-    if (raw >= lowest + AUTO_JUMP_RAW) {
+    if (raw >= lowest + AUTO_JUMP_RAW && drainingBack(now, raw)) {
+      if (!_drainLogged) _node.log("auto: soil %u -> %u after a watering, draining back to %u: not a disturbance",
+                                   lowest, raw, _preWaterRaw);
+      _drainLogged = true;
+    } else if (raw >= lowest + AUTO_JUMP_RAW) {
       if (!_settleUntil) _node.log("auto: soil jumped %u -> %u, probe disturbed: waiting", lowest, raw);
       _settleUntil = now + AUTO_SETTLE_MS;
       if (!_settleUntil) _settleUntil = 1;
@@ -300,6 +313,18 @@ class HivewirePump {
     _autoState = HW_AUTO_WATERING;
   }
   uint32_t lastDoseEndedAt() const { return _endedAt; }
+
+  // True when a dry jump is the pot draining after a watering rather than the
+  // probe being moved: the last dose ended under AUTO_DRAIN_GRACE_MS ago, and
+  // the reading is no drier than the judgement before that watering began
+  // (plus AUTO_DRAIN_MARGIN_RAW of probe noise). Needs a judgement from before
+  // the watering, so it is false until autoLoop has seen the soil once.
+  bool drainingBack(uint32_t now, uint16_t raw) const {
+    if (!_preWaterRaw || !_endedAt) return false;
+    int32_t age = (int32_t)(now - _endedAt);  // _endedAt can move under stop() from onSafe
+    if (age < 0) age = 0;
+    return (uint32_t)age < AUTO_DRAIN_GRACE_MS && raw <= _preWaterRaw + AUTO_DRAIN_MARGIN_RAW;
+  }
 
   // 0 empty, 1 ok, 2 no float switch configured.
   uint8_t reservoir() const {
@@ -416,8 +441,15 @@ class HivewirePump {
   static const uint32_t AUTO_CHECK_MS = 60000;
   static const uint8_t  AUTO_DRY_CONFIRM = 15;            // judgements (minutes)
   static const uint8_t  AUTO_JUMP_WINDOW = 10;            // judgements looked back over
-  static const uint16_t AUTO_JUMP_RAW = 150;              // drying never moves this fast
+  static const uint16_t AUTO_JUMP_RAW = 150;              // drying never moves this fast (draining can: drainingBack())
   static const uint32_t AUTO_SETTLE_MS = 60UL * 60 * 1000;
+  // After a watering, how long a dry jump may be drainage, and how far past
+  // the pre-watering reading it may land. NOT MEASURED: chosen for a gritty
+  // mix from one data point (2026-10-12, a cactus pot soaked to 100% in four
+  // minutes, then bounced at 82-87% as water drained past the probe). Tune on
+  // a real fast-draining pot and write the numbers here.
+  static const uint32_t AUTO_DRAIN_GRACE_MS = 30UL * 60 * 1000;
+  static const uint16_t AUTO_DRAIN_MARGIN_RAW = 50;
   static const uint32_t AUTO_PULSE_GAP_MS = 3UL * 60 * 1000;
   static const uint16_t AUTO_PULSE_MIN_ML = 10;
   enum { REQ_NONE, REQ_DOSE, REQ_RUN, REQ_STOP };
@@ -456,6 +488,17 @@ class HivewirePump {
     _hitCeiling = runMs > MAX_RUN_MS;
     if (_hitCeiling) runMs = MAX_RUN_MS;
     _runMs = runMs;
+    // The judgement before a watering is what drainage can fall back to. A run
+    // that starts within AUTO_DRAIN_GRACE_MS of the last one is the same
+    // watering (an automatic one's pulses, a burst of doses from stream chat),
+    // so it keeps the reading from before the first.
+    {
+      int32_t since = (int32_t)(now - _endedAt);
+      if (!_endedAt || since < 0 || (uint32_t)since >= AUTO_DRAIN_GRACE_MS) {
+        _preWaterRaw = _lastJudgedRaw;
+        _drainLogged = false;
+      }
+    }
     _startedAt = now;
     _deliveredMl = 0;
     _lastDoseAuto = _reqAuto;
@@ -512,6 +555,8 @@ class HivewirePump {
   uint16_t _hist[AUTO_JUMP_WINDOW] = {0};
   uint8_t  _histN = 0, _histAt = 0;
   uint32_t _settleUntil = 0;
+  uint16_t _lastJudgedRaw = 0, _preWaterRaw = 0;   // see drainingBack()
+  bool     _drainLogged = false;
   uint16_t _belowRaw = 0, _autoMl = 0, _gapMin = 720;
   uint32_t _lastAutoAt = 0, _autoCheckAt = 0;
   bool     _gapPending = false, _lastDoseAuto = false;

@@ -173,6 +173,11 @@ HivewirePump pump(node, PUMP_PIN, FLOAT_PIN);
 // Application code (1000-1999, described in kinds.json): a dose the soil
 // probe never saw arrive.
 #define WATER_E_DOSE_NOT_SEEN 1001
+// The check takes the WETTEST reading from the start of a watering to
+// DOSE_CHECK_MS after it, not one reading at the end: in a fast-draining mix the
+// water can be past the probe again inside the 15 minutes, and a watering that
+// plainly arrived would read as missed and lock automatic watering off. A probe
+// pulled out into the air never reads wetter at all, so that still trips 1001.
 static const uint32_t DOSE_CHECK_MS   = 15UL * 60 * 1000;
 static const uint16_t DOSE_CHECK_MIN_ML = 50;     // smaller doses may not move the probe
 static const uint16_t DOSE_SEEN_DROP  = 30;       // raw counts: wetter reads LOWER
@@ -859,37 +864,43 @@ void loop() {
   // Automatic watering judges the same reading the slots publish; bit 1 of
   // sensorOk says the probe is really there (a floating pin is not "dry").
   pump.autoLoop((sensorOk & 2) != 0, soilRaw);
-  // Did the water arrive? Soil raw at the start of a dose, compared 15 min
-  // after it ends. A capacitive probe reads LOWER when wetter. An automatic
-  // watering given in pulses is one dose here: from before the first pulse to
-  // 15 min after the last, judged on everything it gave.
+  // Did the water arrive? Soil raw at the start of a dose, compared with the
+  // wettest reading up to 15 min after it ends. A capacitive probe reads LOWER
+  // when wetter. An automatic watering given in pulses is one dose here: from
+  // before the first pulse to 15 min after the last, judged on everything it
+  // gave -- and so are doses that follow each other inside that window.
   {
     static bool was = false;
-    static uint16_t rawBefore = 0;
+    static uint16_t rawBefore = 0, wettest = 0;
     static uint32_t checkAt = 0;
     static uint16_t doseMl = 0;
     static bool wasAuto = false;
     bool on = pump.running() || pump.pulsing();
-    if (on && !was) rawBefore = soilRaw;
+    // A dose that starts while the last one is still being checked is the same
+    // watering (stream chat sends them in bursts): judged together against the
+    // reading from before the first, instead of each against soil the one
+    // before had already wetted.
+    if (on && !was && !checkAt) { rawBefore = soilRaw; wettest = soilRaw; doseMl = 0; wasAuto = false; }
+    if ((on || checkAt) && (sensorOk & 2) && soilRaw && (!wettest || soilRaw < wettest)) wettest = soilRaw;
     if (!on && was && pump.state() == HW_PUMP_DONE && pump.lastWateringMl() >= DOSE_CHECK_MIN_ML &&
         (sensorOk & 2)) {
       checkAt = millis() + DOSE_CHECK_MS;
-      doseMl = pump.lastWateringMl();
-      wasAuto = pump.lastDoseWasAuto();
+      doseMl += pump.lastWateringMl();
+      wasAuto = wasAuto || pump.lastDoseWasAuto();
       if (!checkAt) checkAt = 1;
     }
     was = on;
-    if (checkAt && (int32_t)(millis() - checkAt) >= 0) {
+    if (checkAt && !on && (int32_t)(millis() - checkAt) >= 0) {
       checkAt = 0;
-      if ((sensorOk & 2) && soilRaw + DOSE_SEEN_DROP > rawBefore) {
-        hwErr(node, WATER_E_DOSE_NOT_SEEN, HW_PUMP_SLOT_DOSE, "dose %u ml not seen: soil %u -> %u",
-              doseMl, rawBefore, soilRaw);
+      if ((sensorOk & 2) && wettest + DOSE_SEEN_DROP > rawBefore) {
+        hwErr(node, WATER_E_DOSE_NOT_SEEN, HW_PUMP_SLOT_DOSE, "dose %u ml not seen: soil %u, wettest %u",
+              doseMl, rawBefore, wettest);
         // Only an AUTOMATIC watering locks automatic watering off: a manual
         // one into a measuring cup is supposed to miss the soil.
         if (wasAuto) pump.autoLockout();
       }
       else
-        node.log("dose %u ml seen: soil %u -> %u", doseMl, rawBefore, soilRaw);
+        node.log("dose %u ml seen: soil %u, wettest %u, now %u", doseMl, rawBefore, wettest, soilRaw);
     }
   }
 #endif

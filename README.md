@@ -708,8 +708,10 @@ whatever the calibration says; and an optional float switch (`E307` when the
 supply is empty). Two firmware families use it, each its own image:
 
 - **WaterNode** — SoilNode built with `-DHW_WITH_PUMP=1`: the soil sensor and a
-  pump on one board. After each dose it checks the probe saw the water arrive,
-  and raises application code 1001 if not.
+  pump on one board. After each dose it checks the probe saw the water arrive
+  (its wettest reading from the start of the dose to 15 min after it), and
+  raises application code 1001 if not. Doses that follow each other inside that
+  window are judged as one watering.
 - **PumpNode** — a pump alone, for one bucket feeding a bed.
 
 Slots 40–48: `40` water N ml now (0 stops), `41` run N seconds (to calibrate
@@ -719,6 +721,30 @@ mode. Wiring: switch input on GPIO4, float switch on GPIO5 to GND.
 
 **Not yet run on hardware.** Built and exercised against the admin's simulated
 swarm only, until a pump is on the bench.
+
+### Fast-draining pots
+
+A gritty mix (lava rock, pumice, perlite) can let a watering run past the probe
+and back out within minutes. Two checks were written for ordinary potting mix
+and would misread that:
+
+- **"Did the water arrive?"** used to compare one reading taken 15 min after the
+  dose; in a fast-draining pot the probe can already read dry again, so a
+  watering that plainly arrived raised 1001 and switched automatic watering off.
+  It now takes the wettest reading in that window. A probe pulled out into the
+  air never reads wetter at all, so that still raises 1001.
+- **"Was the probe moved?"** treats a dry jump of `AUTO_JUMP_RAW` inside ten
+  minutes as a disturbance and stops automatic watering for an hour. A pot
+  draining after a watering makes the same jump. Within `AUTO_DRAIN_GRACE_MS`
+  (30 min) of a dose ending, a jump that only brings the reading back to about
+  where the pot was before the watering (`AUTO_DRAIN_MARGIN_RAW`, 50 counts) is
+  logged as drainage instead; a probe in the air reads far drier than that and
+  still waits.
+
+Both constants are **not measured** yet; they rest on one soak of an ordinary
+cactus pot (see "Seed mode and field capacity" below). The logic is covered by
+`tools/host_tests` (`test_pump.cpp`), not by hardware. For a fast pot, also
+lower the minimum gap between automatic waterings (slot 52, default 720 min).
 
 ### A grow light on the same board (GrowNode)
 
@@ -901,6 +927,11 @@ with the node unplugged.
 - Firmware *data* is not relayed, only the replies: a pushed node must hear the
   hive directly, and one it cannot hear is updated by seeding from a peer of its
   own family.
+- The fast-draining allowances (`AUTO_DRAIN_GRACE_MS`, `AUTO_DRAIN_MARGIN_RAW`
+  in HivewirePump.h) are guesses until a gritty pot has been logged through a
+  few waterings. Too short a grace or too small a margin and drainage reads as a
+  disturbance again; too long or too large and a probe pulled during the grace
+  is only caught by the 1001 check after the next automatic watering.
 - Relay has now been exercised where a node really was reachable only through
   another — a unit on the far side of a house, deafened to the coordinator, so
   `coordinator → relay → node` was the only path. It adopted two successive

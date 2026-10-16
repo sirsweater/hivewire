@@ -784,7 +784,7 @@
   "errors": {
    "1001": {
     "title": "A watering never reached the soil",
-    "cause": "The pump ran a dose, but 15 minutes later the soil probe showed no rise: an empty bucket the float switch missed, a tube off its stake, or a pump that is not pumping.",
+    "cause": "The pump ran a dose, but the soil probe never read wetter, at any point from the start of the dose to 15 minutes after it: an empty bucket the float switch missed, a tube off its stake, or a pump that is not pumping.",
     "fix": "Check the bucket, the tube from pump to pot, and that the pump runs (the Run 30 s button). If it all looks right, the probe may be too far from where the water lands.",
     "severity": "warning"
    }
@@ -1158,7 +1158,7 @@
   "errors": {
    "1001": {
     "title": "A watering never reached the soil",
-    "cause": "The pump ran a dose, but 15 minutes later the soil probe showed no rise: an empty bucket the float switch missed, a tube off its stake, or a pump that is not pumping.",
+    "cause": "The pump ran a dose, but the soil probe never read wetter, at any point from the start of the dose to 15 minutes after it: an empty bucket the float switch missed, a tube off its stake, or a pump that is not pumping.",
     "fix": "Check the bucket, the tube from pump to pot, and that the pump runs (the Run 30 s button). If it all looks right, the probe may be too far from where the water lands.",
     "severity": "warning"
    }
