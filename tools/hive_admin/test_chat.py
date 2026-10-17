@@ -633,6 +633,30 @@ if len(_two) == 2:
 check(C.SAME_FW_Q.search("do the rhubarb and the strawberry run the same firmware?") and
       not C.SAME_FW_Q.search("when was the firmware last pushed?"), "...a firmware comparison, not any firmware question")
 
+a = C.reservoir_dry_reply(hive)
+check(a and "never runs on forever" in a and ("E1001" in a or "E307" in a) and "Larkspur" not in a,
+      "'what if the reservoir ran dry?': the firmware's answer with this hive's pumps, in code", a)
+conv = C.Conversation()
+script[:] = [say("Move it out of the sun. Would you like to try any of these steps? If not, I can reboot the node or "
+                 "provide more information on its current state.")]
+out = conv.ask(hive, "node %d is dying!!! do something" % nopump["id"])
+check("reboot" not in out["answer"].lower() and "out of the sun" in out["answer"],
+      "'I can reboot the node' is dropped from a plant problem (it's not what helps a plant)", out["answer"])
+_kf2 = os.path.join(tmp, "ki2.json")
+json.dump({str(pump["id"]): "PUMP NOT TRUSTED. PROBE OUT OF THE SOIL since tonight"}, open(_kf2, "w"))
+_old_ki2 = C.KNOWN_ISSUES_FILE
+C.KNOWN_ISSUES_FILE = _kf2
+_st2 = {"nodes": [dict(n) for n in hive.call("GET", "/api/state")["nodes"]]}
+for n in _st2["nodes"]:
+    if n["id"] == pump["id"]:
+        n["derived"] = dict(n.get("derived") or {}, soil=None)
+        n["warnings"] = list(n.get("warnings") or []) + [C.PROBE_OUT_WARNING]
+a = C.water_all_reply(hive, _st2, "water every plant 500 ml") or ""
+_pn = app.cfg.node(pump["id"]).get("name") or "node %d" % pump["id"]
+check(("probe is out of the soil" in a and "known fault" in a) or a == "",
+      "'water every plant': a plant with its probe out is listed with why, not dropped", a)
+C.KNOWN_ISSUES_FILE = _old_ki2
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send

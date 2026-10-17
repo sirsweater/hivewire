@@ -948,10 +948,15 @@ def water_all_reply(hive, st, q):
     lines, ok = [], []
     for n in st.get("nodes", []):
         soil, band = (n.get("derived") or {}).get("soil"), band_of(cfg.get(str(n["id"])))
-        if n.get("hidden") or soil is None:
-            continue
         name = n.get("name") or "node %s" % n["id"]
         issue = known_issue(n["id"]) or ""
+        if not n.get("hidden") and soil is None and PROBE_OUT_WARNING in (n.get("warnings") or []):
+            # (it had dropped the Rhubarb from the list without a word, 2026-10-17)
+            lines.append("- **%s**: its probe is out of the soil, so there's no reading to judge by%s - I won't water it "
+                         "from here." % (name, ", and its pump has a known fault" if "NOT TRUSTED" in issue.upper() else ""))
+            continue
+        if n.get("hidden") or soil is None:
+            continue
         if not has_pump(hive, n.get("kind")):
             lines.append("- **%s**: no pump - it can only be watered by hand%s." % (
                 name, " (and at %.0f%% against %s-%s%% it doesn't need it)" % (soil, band[0], band[1])
@@ -3269,9 +3274,29 @@ RESERVOIR_DRY_FACT = (
     "IF A RESERVOIR RUNS DRY (from the firmware - use this, add nothing): every watering stops by itself after its "
     "set amount (worked out from the pump's flow), so the pump never runs on forever. With a float switch fitted, "
     "the node sees the empty reservoir and doesn't start (or stops) the watering: error E307 'An output's supply is "
-    "empty'. With NO float switch (Rhubarb and Larkspur now), the pump runs its dose dry - no water reaches the "
+    "empty'. With NO float switch (%s now), the pump runs its dose dry - no water reaches the "
     "plant, and running dry is hard on most small pumps; 15 minutes later the node sees no rise in the soil and "
     "raises E1001 'A watering never reached the soil', and automatic watering locks out until someone checks it.")
+
+
+def reservoir_dry_reply(hive):
+    """ "What would happen if the reservoir ran dry?" got "it will continue to attempt to pump water until it runs
+    dry" beside the firmware's own answer (2026-10-17) - and the fact still named the Larkspur by hand. The firmware's
+    behaviour, with this hive's pumps, in code."""
+    r = reservoirs(hive) or {}
+    blind = [nm for nm, v in r.items() if v == "no float switch"]
+    switched = [nm for nm, v in r.items() if v != "no float switch"]
+    lines = ["Every watering stops by itself after its set amount (worked out from the pump's flow), so a pump never "
+             "runs on forever."]
+    if switched:
+        lines.append("With a float switch (%s), the node sees the empty reservoir and won't start or finish the watering: "
+                     "error E307 \"An output's supply is empty\"." % ", ".join(switched))
+    if blind:
+        lines.append("With no float switch (%s), the pump runs its dose dry - no water reaches the plant, and running dry "
+                     "is hard on most small pumps. 15 minutes later the node sees no rise in the soil, raises E1001 \"A "
+                     "watering never reached the soil\", and its automatic watering locks out until someone checks it." %
+                     " and ".join(blind))
+    return " ".join(lines)
 
 
 FEELS_Q = re.compile(r"(?i)\bfeels? (like|colder|warmer|hotter|cooler)\b|\bfeels?[- ]like\b|\bheat index\b|\bwind ?chill\b|"
@@ -3486,16 +3511,25 @@ def dry_rate_reply(hive, st):
     last 3 days (risings - waterings, soaks - left out)."""
     rows, recent = [], []
     for n in st.get("nodes", []):
-        if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
+        nm = n.get("name") or "node %s" % n["id"]
+        if n.get("hidden"):
+            continue
+        if (n.get("derived") or {}).get("soil") is None:
+            if PROBE_OUT_WARNING in (n.get("warnings") or []):
+                recent.append("- %s: no reading - its probe is out of the soil" % nm)
             continue
         pts, cut = settled(soil_series(hive, n, 96))
         if cut and len(pts) < 36:
             if len(pts) >= 6:
-                recent.append("- %s: too soon to say - its probe was out of the soil %s (a repot); since then %.0f%% -> "
-                              "%.0f%%" % (n.get("name") or "node %s" % n["id"], time.strftime("%a %d %b %H:%M",
-                                          time.localtime(cut)), pts[0][1], pts[-1][1]))
+                recent.append("- %s: too soon to say - its probe was out of the soil %s (a repot or a new probe); since "
+                              "then %.0f%% -> %.0f%%" % (nm, time.strftime("%a %d %b %H:%M", time.localtime(cut)),
+                                                       pts[0][1], pts[-1][1]))
             continue
         if len(pts) < 24:
+            # (the Strawberry's history began at 22:58 on Oct 16, when it was cleared: no ranking, and no silence)
+            if len(pts) >= 3:
+                recent.append("- %s: too soon to say - its readings only go back to %s; since then %.0f%% -> %.0f%%" % (
+                    nm, time.strftime("%a %d %b %H:%M", time.localtime(pts[0][0])), pts[0][1], pts[-1][1]))
             continue
         # day by day: an hourly sum counted a probe's +-3 point jitter as drying
         per = {}
@@ -3507,6 +3541,9 @@ def dry_rate_reply(hive, st):
         drop = sum(a - b for a, b in zip(daily, daily[1:]) if b < a)
         rows.append((drop / (len(daily) - 1), n.get("name") or "node %s" % n["id"]))
     if not rows:
+        if recent:
+            return ("Too soon to say which dries fastest - none of them has a few settled days of readings yet:\n%s" %
+                    "\n".join(recent))
         return None
     rows.sort(reverse=True)
     lines = "\n".join(["- %s: %s" % (nm, "about %.1f points a day" % r if r >= 0.5 else "hardly drying (under half a point a day)")
@@ -3952,7 +3989,8 @@ def hive_wide_facts(hive, st, named, q):
         if t:
             out.append(t)
     if RESERVOIR_DRY_Q.search(q):
-        out.append(RESERVOIR_DRY_FACT)
+        out.append(RESERVOIR_DRY_FACT % (" and ".join(nm for nm, v in (reservoirs(hive) or {}).items()
+                                                       if v == "no float switch") or "none"))
     if BEST_TIME_Q.search(q):
         out.append(BEST_TIME_FACT)
     if URGENT_Q.search(q) and not named:
@@ -4948,6 +4986,11 @@ def ask(hive, messages, q, on_tool=None):
             fixed = seed_dry_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
+    if not fixed and is_question(q) and RESERVOIR_DRY_Q.search(q):
+        try:
+            fixed = reservoir_dry_reply(hive)
+        except RuntimeError:
+            fixed = None
     if not fixed and is_question(q) and SAME_FW_Q.search(q):
         try:
             fixed = firmware_compare_reply(hive, nodes, q)
@@ -5230,6 +5273,9 @@ def ask(hive, messages, q, on_tool=None):
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\breboot\w*\b[^.!?\n]*\b(can|might|may|could|would|should|will)( \w+)? "
                         r"(help|fix|resolve|clear|solve|reset)\b[^.!?\n]*[.!?]?" + tail, "", answer)
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(try|trying|consider|considering|recommend|suggest)\w*\b[^.!?\n]*\breboot\w*\b[^.!?\n]*[.!?]?" + tail,
+                        "", answer)
+        # "If not, I can reboot the node or provide more information on its current state." (2026-10-17)
+        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(I|we) (can|could|will|'ll|might)\b[^.!?\n]*\breboot\w*\b[^.!?\n]*[.!?]?",
                         "", answer)
     answer = no_false_agree(q, answer)
     try:
