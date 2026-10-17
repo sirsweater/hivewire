@@ -712,6 +712,33 @@ check(a and a.startswith("There's no node 242 in the hive") and str(pump["id"]) 
 check(C.ghost_node_reply(hive, hive.call("GET", "/api/state"), "how is node %d doing?" % pump["id"]) is None,
       "...a real node isn't a ghost")
 
+# Fixed replies the model had got wrong: no barometer (it sent people to "websites"), and how adaptive watering works
+# (it joined the probe-moved hold-off and the never-reached lockout into "holds off for an hour").
+_st = hive.call("GET", "/api/state")
+a = C.ask(hive, [{"role": "system", "content": ""}], "is the air pressure rising or falling?")
+check(a == C.BAROMETER_REPLY, "air pressure: no barometer, said in code", a)
+check(not C.BAROMETER_Q.search("what's the water pressure on the pump?") or C.BAROMETER_NOT.search(
+    "what's the water pressure on the pump?"), "...water pressure isn't the barometer")
+a = C.ask(hive, [{"role": "system", "content": ""}], "what does adaptive watering actually do?")
+check(a and a.startswith(C.ADAPTIVE_HOW_REPLY) and not re.search(r"holds? off[^.]*\bhour\b", a),
+      "how adaptive watering works: in code, no 'holds off for an hour'", a)
+check(not (C.ADAPTIVE_HOW_Q.search("has adaptive watering learned anything about the cactus?") and not
+           C.ADAPTIVE_HOW_NOT.search("has adaptive watering learned anything about the cactus?")),
+      "...a node's learned amount isn't the how-it-works answer")
+
+# A germinating pot over its top isn't a to-do: germination mode is holding its doses.
+_n = {"id": pump["id"], "name": "Seedpot", "kind": "WaterNode", "derived": {"soil": 85.0}, "warnings": []}
+_orig, _orig_stage = C.band_of, C.stage_name
+C.band_of = lambda meta: [60, 80]
+C.stage_name = lambda meta: "germination"
+try:
+    a = C.attention_reply(hive, {"nodes": [_n], "silent": []})
+finally:
+    C.band_of, C.stage_name = _orig, _orig_stage
+_line = [x for x in a.splitlines() if "node %s)" % _n["id"] in x and "soil" in x]
+check(_line and "holding its doses" in _line[0] and "No action needed" in a and "above its" not in _line[0],
+      "a germinating pot over its top is 'no action needed', not an attention item", a)
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send

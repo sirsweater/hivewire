@@ -2611,6 +2611,54 @@ ADAPTIVE_FACT = (
     "past the cap) so one watering lifts the soil from the \"water below\" level to the middle of the band. It "
     "never adds extra waterings. It's switched on or off on the admin page.")
 
+# "what does adaptive watering actually do?" - said from ADAPTIVE_FACT, not reworded: the model joined the probe-moved
+# hold-off and the never-reached lockout into "adaptive watering will hold off for an hour" (hive-full23, 2026-10-17).
+ADAPTIVE_HOW_Q = re.compile(r"(?i)\b(what (does|do|is|'s)|what exactly|how (does|do)|explain|tell me about|what's the "
+                            r"(point|difference))\b[^?]{0,30}\b(adaptive|automatic|auto)[- ]?water\w*\b")
+ADAPTIVE_HOW_NOT = re.compile(r"(?i)\b(learn(ed|t)|now|today|tonight|yesterday|status|switched|turn|enable|disable|"
+                              r"stop|start|off|on for|set|setting|change|how much|how many|how often|when)\b")
+ADAPTIVE_HOW_REPLY = (
+    "There are two parts:\n"
+    "- **Automatic watering** runs on the node itself: it waters when its probe reads drier than its \"water below\" "
+    "level (the low end of the plant's band). It gives its automatic amount in pulses (4 by default, 3 minutes apart) so "
+    "the water soaks in, and always keeps its per-watering cap, its 24-hour cap and a minimum gap between waterings. It "
+    "holds off when the probe has just been moved, and locks itself out if a watering never reaches the probe.\n"
+    "- **Adaptive watering** (in the admin) changes only the amount: after each automatic watering it measures how far "
+    "the soil rose per ml and how fast it dried afterwards, and once it has seen 2 waterings it adjusts the amount - by "
+    "at most 40 % at a time, never past the cap - so one watering lifts the soil from the \"water below\" level to the "
+    "middle of the band. It never adds extra waterings. It's switched on or off on the admin page.")
+
+
+def adaptive_how_reply(hive, nodes):
+    out = ADAPTIVE_HOW_REPLY
+    try:
+        cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    except Exception:
+        cfg = {}
+    for n in nodes:
+        stg = ((cfg.get(str(n["id"])) or {}).get("grow_stage") or {}).get("stage")
+        nm = n.get("name") or "node %s" % n["id"]
+        if stg == "germination":
+            sm = (cfg.get(str(n["id"])) or {}).get("seed_mode") or {}
+            out += ("\n\nRight now %s is in germination mode, so neither runs there: the admin gives it %s ml every %s h "
+                    "while its probe reads below %s %%." % (nm, sm.get("ml", "?"), sm.get("every_h", "?"),
+                                                            sm.get("skip_above", "?")))
+        elif stg == "seedling":
+            out += "\n\nRight now %s is in seedling mode: its automatic watering runs at the seedling settings." % nm
+    return out
+
+
+# "is the air pressure rising or falling?": the weather station has no barometer. Said here - with the hint alone the
+# model still sent the person to "external weather services or websites".
+BAROMETER_Q = re.compile(r"(?i)\b(air|barometric|atmospheric) pressure\b|\bbarometer\b|\b(pressure|millibars?|hpa|inhg)\b[^?]*"
+                         r"\b(rising|falling|dropping|going (up|down)|weather|front|storm|today|now|outside)\b|"
+                         r"\b(rising|falling|dropping)\b[^?]*\bpressure\b")
+BAROMETER_NOT = re.compile(r"(?i)\b(water|pump|tire|tyre|blood|pressure (cooker|canner|wash\w*)|psi|hose|line)\b")
+BAROMETER_REPLY = ("The weather station has no air pressure sensor (barometer), so the hive can't tell you the pressure "
+                   "or whether it's rising or falling. It measures air temperature, humidity, wind (speed, gusts and "
+                   "direction) and rain.")
+
+
 PER_ML_Q = re.compile(r"(?i)\bhow (much|far)\b[^?]*\b(raise|raises|lift|lifts|increase|increases|change|changes|move|"
                       r"moves|bump|bumps|rise|go up)\b[^?]*\b(soil|moisture|reading|%)|\bper (\d+ ?)?ml\b")
 
@@ -4100,15 +4148,20 @@ ATTENTION_Q = re.compile(r"(?i)\b(needs?|need) (attention|looking at|a look|chec
 def attention_reply(hive, st):
     """ "What needs attention in the hive?" sometimes left out the Cactus at 96 % against 5-20 %. Every item, from data."""
     cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
-    items = []
+    items, fine = [], []
     for n in st.get("nodes", []):
         if n.get("hidden"):
             continue
         nm = "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"])
         soil, band = (n.get("derived") or {}).get("soil"), band_of(cfg.get(str(n["id"])))
         if soil is not None and band and not band[0] <= soil <= band[1]:
-            items.append("%s: soil %.0f%%, %s its %s-%s%% band" % (nm, soil, "above" if soil > band[1] else "BELOW",
-                                                                 band[0], band[1]))
+            if soil > band[1] and stage_name(cfg.get(str(n["id"]))) == "germination":
+                # a seed pot over its top is germination mode doing its job (doses held) - not a to-do
+                fine.append("%s: soil %.0f%% - germination mode is holding its doses until the probe reads below %s%%"
+                            % (nm, soil, band[1]))
+            else:
+                items.append("%s: soil %.0f%%, %s its %s-%s%% band" % (nm, soil, "above" if soil > band[1] else "BELOW",
+                                                                     band[0], band[1]))
         issue = known_issue(n["id"])
         if issue:
             items.append("%s: known issue - %s" % (nm, issue.split(". ")[0].rstrip(".")))
@@ -4122,9 +4175,11 @@ def attention_reply(hive, st):
     p = t_list_problems(hive)
     if p["active_now"] != "none":
         items.append("active problems: %s" % p["active_now"])
+    also = ("\n\nNo action needed:\n%s" % "\n".join("- " + x for x in fine)) if fine else ""
     if not items:
-        return "Nothing needs attention: every plant is inside its band, every node is reporting and no problems are active."
-    return "What needs attention:\n%s" % "\n".join("- " + x for x in items)
+        return ("Nothing needs attention: every plant is inside its band%s, every node is reporting and no problems are "
+                "active.%s" % (" (or held there on purpose)" if fine else "", also))
+    return "What needs attention:\n%s%s" % ("\n".join("- " + x for x in items), also)
 
 
 def hive_wide_facts(hive, st, named, q):
@@ -4909,7 +4964,13 @@ def ask(hive, messages, q, on_tool=None):
         if notes and not confirmed:
             fixed = "No - you declined it, so nothing was sent: %s." % "; ".join(
                 re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
-    if FORECAST_Q.search(q) and not COMMAND.search(q) and not (
+    if not fixed and not COMMAND.search(q) and BAROMETER_Q.search(q) and not BAROMETER_NOT.search(q):
+        fixed = BAROMETER_REPLY
+    if not fixed and not COMMAND.search(q) and ADAPTIVE_HOW_Q.search(q) and not ADAPTIVE_HOW_NOT.search(q) and not [
+            n for n in nodes if n.get("name") and re.search(r"(?i)\b%s\b" % re.escape(n["name"]), q)] and not \
+            re.search(r"(?i)\bnode\s*#?\s*\d", q):
+        fixed = adaptive_how_reply(hive, nodes)
+    if not fixed and FORECAST_Q.search(q) and not COMMAND.search(q) and not (
             re.search(r"(?i)\b(were|was|did|has|have|had|been|yesterday|last (night|week)|so far|ago)\b", q) and
             not re.search(r"(?i)\b(will|going to|gonna|tomorrow|tonight|forecast)\b", q)):
         try:
