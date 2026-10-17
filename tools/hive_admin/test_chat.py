@@ -622,6 +622,17 @@ check(C.derived(hive, {"kind": pump["kind"], "derived": {"soil": None}, "warning
       .get("Soil moisture", "").startswith("no reading - the probe is out"), "...and it's described that way, not 'not calibrated'")
 C.KNOWN_ISSUES_FILE = _old_ki
 
+# --- round 17 (2026-10-17): node_7, same firmware, no "too wet for 4 days" off a probe in the air --------
+check(C.resolve_node(hive, "node_%d" % pump["id"])[0] and C.resolve_node(hive, "node_%d" % pump["id"])[0]["id"] == pump["id"],
+      "'node_7' as a tool argument finds node 7")
+_two = [n for n in hive.call("GET", "/api/state")["nodes"] if C.slot_by_label(hive, n.get("kind"), "Firmware CRC")][:2]
+if len(_two) == 2:
+    _q = "do node %d and node %d run the same firmware?" % (_two[0]["id"], _two[1]["id"])
+    a = C.firmware_compare_reply(hive, hive.call("GET", "/api/state")["nodes"], _q)
+    check(a and (a.startswith("Yes - ") or a.startswith("No - ")) and "CRC" in a, "'same firmware?' is answered from both CRCs", a)
+check(C.SAME_FW_Q.search("do the rhubarb and the strawberry run the same firmware?") and
+      not C.SAME_FW_Q.search("when was the firmware last pushed?"), "...a firmware comparison, not any firmware question")
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send

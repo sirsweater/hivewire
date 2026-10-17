@@ -348,7 +348,8 @@ def stage_text(st, sm=None):
                 "reads BELOW %s %% - at %s %% or more the dose is skipped, because soggy seed mix rots seeds. The "
                 "node's own automatic watering is OFF meanwhile. Marking the seeds germinated (the node's Grow stage "
                 "card on the admin page) moves it to seedling mode, where the node's own automatic watering comes back "
-                "ON at seedling settings; this chat can't see seeds or mark them%s" % (
+                "ON at seedling settings (water below 55 %%, 10 ml in 2 pulses, 3 h apart - not the grown plant's band); "
+                "this chat can't see seeds or mark them%s" % (
                     when, sm.get("ml", "?"), sm.get("every_h", "?"), sm.get("skip_above", "?"), sm.get("skip_above", "?"),
                     ". Doses are ON HOLD right now: the soil is that wet" if sm.get("skipping") else ""))
     if st.get("stage") == "seedling":
@@ -631,7 +632,7 @@ def resolve_node(hive, ref, st=None):
     st = st or hive.call("GET", "/api/state")
     nodes = st.get("nodes", [])
     ref = str(ref).strip()
-    m = re.fullmatch(r"(?i)(?:node|id|#)\s*#?\s*(\d+)", ref)      # "node 14", "#14", "id 14"
+    m = re.fullmatch(r"(?i)(?:node|id|#)[\s_\-#]*(\d+)", ref)      # "node 14", "#14", "id 14", "node_7"
     if m:
         ref = m.group(1)
     # "5 Rhubarb" (the way the error below lists them) or "Rhubarb (node 5)": the id decides,
@@ -2764,6 +2765,36 @@ def seed_dry_reply(hive, nodes, q):
             "\"give the %s 5 ml\") and I'll set it up for you to confirm. %s" % (nm, soil, nm.lower(), timer))
 
 
+SAME_FW_Q = re.compile(r"(?i)\b(same|different|identical|matching|match)\b[^?]{0,40}\b(firmware|build|version|crc)\b|"
+                       r"\b(firmware|build|version)\b[^?]{0,40}\b(same|different|identical|match)\b")
+
+
+def firmware_compare_reply(hive, nodes, q):
+    """ "Do the rhubarb and the strawberry run the same firmware?" got three node_detail calls and a dump of node 7,
+    no answer (2026-10-17): the two Firmware CRCs, compared in code."""
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    if len(named) < 2:
+        return None
+    rows = []
+    for n in named:
+        sid = slot_by_label(hive, n.get("kind"), "Firmware CRC")
+        v = (n.get("slots") or {}).get(sid) if sid else None
+        if v is None:
+            return None
+        rows.append((n, "%08x" % (int(v) & 0xFFFFFFFF)))
+    nm = lambda n: n.get("name") or "node %s" % n["id"]  # noqa: E731
+    crcs = {c for _, c in rows}
+    if len(crcs) == 1:
+        return "Yes - %s run the same firmware build (%s, CRC %s)." % (
+            " and ".join(nm(n) for n, _ in rows), "/".join(sorted({n.get("kind") or "?" for n, _ in rows})), crcs.pop())
+    return "No - they run different builds: %s." % "; ".join("%s (%s) CRC %s" % (nm(n), n.get("kind"), c) for n, c in rows)
+
+
 ANYONE_WATERED_Q = re.compile(r"(?i)\b(did|has|have)\b[^?]{0,30}\b(anyone|anybody|someone|somebody)\b[^?]{0,30}\bwater")
 
 
@@ -3938,7 +3969,12 @@ def hive_wide_facts(hive, st, named, q):
             band = band_of(meta)
         elif band and meta.get("soil_fc") and meta.get("band_scale") == "fc":
             band = [round(band[0] * meta["soil_fc"] / 100.0, 1), round(band[1] * meta["soil_fc"] / 100.0, 1)]
-        if BAND_TIME_Q.search(q):
+        if BAND_TIME_Q.search(q) and PROBE_OUT_WARNING in (n.get("warnings") or []):
+            # "How long has the rhubarb been too wet?" with its probe out: "too wet for about 4 days" (2026-10-17)
+            out.append("NO SOIL READING for %s: its probe is out of the soil (known issue: %s) - it isn't too wet or too "
+                       "dry; there's no reading of the pot, so give no duration in or out of its band." % (
+                           n.get("name") or "node %s" % n["id"], (known_issue(n["id"]) or "")[:160]))
+        elif BAND_TIME_Q.search(q):
             t = band_duration(hive, n, band)
             if t:
                 out.append(t)
@@ -4910,6 +4946,11 @@ def ask(hive, messages, q, on_tool=None):
             and not SYMPTOM.search(q) and not REQUEST.search(q) and not REQUEST_CLAUSE.search(q):
         try:
             fixed = seed_dry_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
+    if not fixed and is_question(q) and SAME_FW_Q.search(q):
+        try:
+            fixed = firmware_compare_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
     if not fixed and is_question(q) and ANYONE_WATERED_Q.search(q):
