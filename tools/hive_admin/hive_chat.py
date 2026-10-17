@@ -2466,7 +2466,10 @@ def soil_series(hive, n, hours, res="hour"):
 # desired" at 81 %) while it had been drying (hive-full23, 2026-10-17). The last 48 hours, from the readings.
 WET_DRY_Q = re.compile(r"(?i)\b(getting|gotten|going|becoming|been getting|growing)\s+(wetter|drier|dryer|more (wet|dry)|"
                        r"less (wet|dry))\b|\b(wetter|drier|dryer) or (wetter|drier|dryer)\b|\b(drying|draining) (out|up)\b|"
-                       r"\bis\b[^?]*\b(drying|draining)\b")
+                       r"\bis\b[^?]*\b(drying|draining)\b|"
+                       # Gregory, 2026-10-16: "How does the draining of the strawberry node look"
+                       r"\b(draining|drainage|drying|dry-?down)\b[^?]*\b(look|looking|going|doing|coming along)\b|"
+                       r"\bhow('s| is| does)\b[^?]*\b(draining|drying)\b")
 WET_DRY_NOT = re.compile(r"(?i)\b(how (fast|quickly|long|soon)|fastest|slowest|which|when|rate|per (hour|day)|should i|"
                          r"since yesterday|last week|this week|month)\b")
 

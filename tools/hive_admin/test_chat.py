@@ -763,6 +763,10 @@ check(C.FILLER_END.sub("", "The cactus reads 56%.\n\nIf you need further details
       "The pump is fine; feel free to ask me to water it.",
       "the 'feel free to ask!' closer goes; a real question stays")
 
+check(all(C.WET_DRY_Q.search(x) and not C.WET_DRY_NOT.search(x) for x in (
+    "How does the draining of the strawberry node look", "how's the cactus drying?", "is the strawberry getting wetter or drier?"))
+    and C.WET_DRY_NOT.search("which plant is drying fastest?"), "wetter/drier phrasings (Gregory's own included)")
+
 # A germinating pot over its top isn't a to-do: germination mode is holding its doses.
 _n = {"id": pump["id"], "name": "Seedpot", "kind": "WaterNode", "derived": {"soil": 85.0}, "warnings": []}
 _orig, _orig_stage = C.band_of, C.stage_name
