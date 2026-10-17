@@ -3965,11 +3965,32 @@ HIDDEN_Q = re.compile(r"(?i)\b(hidden|retired|hide)\b[^?]*\bnodes?\b|\bnodes?\b[
 FW_LAST_Q = re.compile(r"(?i)\b(last|latest|recent|when)\b[^?]*\b(firmware|ota|update|flash\w*|push\w*)\b(?![^?]*\b(running|version|same|which)\b)")
 SEED_Q = re.compile(r"(?i)\bseed mode\b")
 # "What mode is it in", not "how long do strawberries take to germinate": the node facts carry the stage for those.
-STAGE_Q = re.compile(r"(?i)\b(?:germination|seedling) mode\b|\bgrow(?:th)? stage\b|\bwhat stage\b")
+STAGE_Q = re.compile(r"(?i)\b(?:germination|seedling) mode\b|\bgrow(?:th)? stage\b|\bwhat (stage|mode)\b")
 FC_Q = re.compile(r"(?i)\bfield capacity\b")
 BAND_SRC_Q = re.compile(r"(?i)\b(where|how)\b[^?]*\b(target|band|range)\b[^?]*\b(come from|set|decided|chosen|get)\b|\bwho (set|sets|chose)\b[^?]*\b(band|target)\b")
 BAND_SET_Q = re.compile(r"(?i)\b(change|set|make|raise|lower|adjust)\b[^?]*\b(target|band|range)\b[^?]*\d")
 EXPORT_Q = re.compile(r"(?i)\b(download|export|spreadsheet|csv|excel)\b")
+
+
+TROUBLE_Q = re.compile(r"(?i)\btroubleshoot\w*\b|\b(live|real[- ]?time|faster|quicker|instant\w*)\b[^?]{0,30}\b(readings?|updates?|"
+                       r"refresh\w*|values?)\b|\b(page|admin|readings?)\b[^?]{0,40}\b(slow|takes (a|so) (while|long)|lag\w*|"
+                       r"not updat\w*|stale|behind)\b")
+TROUBLE_REPLY = (
+    "Open the node's page on the admin and press **Troubleshoot**. While that page is open it checks every 2 seconds, "
+    "the Pi asks the gateway every 2 seconds instead of every minute, and every reading shows how long ago it last "
+    "changed, beside the sensor checks and warnings - so a wire you just moved shows up within seconds. It runs until you "
+    "press Stop, and ends by itself about 2 minutes after the page is closed or hidden. The node also reports every "
+    "change within a few seconds once it runs firmware from Oct 16 2026 or later; older firmware still reports at its "
+    "normal pace (about once a minute).")
+GROW_HOW_Q = re.compile(r"(?i)\bhow (do|can|would|should) (i|we|you)\b[^?]{0,40}\b(germination|seedling|grow(th)? stage)\b|"
+                        r"\bhow does (germination|seedling) mode\b|\bwhat (is|does) (germination|seedling) mode\b")
+GROW_HOW_REPLY = (
+    "Germination and seedling modes are on the admin page - a water node's **Grow stage** card - not this chat. "
+    "**Germination**: small doses on a timer (5 ml every 6 hours by default), given only while the probe reads below 80 % "
+    "- soggy seed mix rots seeds - with the node's own automatic watering off; it runs until you mark the seeds "
+    "germinated (60 days at most). **Seedling**: press \"Seeds germinated: seedling mode\" and the node's own automatic "
+    "watering comes back on at seedling settings (water below 55 %, 10 ml in two pulses, at least 3 hours apart, 60 ml a "
+    "day). **Grown**: \"back to normal watering\" hands it to the plant's own band and the learned amount.")
 
 
 def admin_reply(hive, st, nodes, q):
@@ -3983,6 +4004,10 @@ def admin_reply(hive, st, nodes, q):
     nm = lambda n: n.get("name") or "node %s" % n["id"]  # noqa: E731
     if CAL_HOW_Q.search(q):
         return CAL_HOW_REPLY
+    if TROUBLE_Q.search(q):
+        return TROUBLE_REPLY
+    if GROW_HOW_Q.search(q):
+        return GROW_HOW_REPLY
     if EXPORT_Q.search(q):
         return ("Yes - on the admin page, open a node: its chart section has a **CSV** download for the reading and the "
                 "dates you pick, which opens in any spreadsheet. This chat can't make files.")
@@ -5056,7 +5081,8 @@ def ask(hive, messages, q, on_tool=None):
         except RuntimeError:
             fixed = None
     if not fixed and (CAL_HOW_Q.search(q) or EXPORT_Q.search(q) or BAND_SET_Q.search(q) or BAND_SRC_Q.search(q) or
-                      SEED_Q.search(q) or FC_Q.search(q) or HIDDEN_Q.search(q) or FW_LAST_Q.search(q) or GATEWAY_Q.search(q)) \
+                      SEED_Q.search(q) or FC_Q.search(q) or HIDDEN_Q.search(q) or FW_LAST_Q.search(q) or GATEWAY_Q.search(q)
+                      or TROUBLE_Q.search(q) or GROW_HOW_Q.search(q) or (STAGE_Q.search(q) and is_question(q))) \
             and (not COMMAND.search(q) or BAND_SET_Q.search(q)):
         try:
             fixed = admin_reply(hive, st, nodes, q)

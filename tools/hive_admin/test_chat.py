@@ -700,6 +700,13 @@ check(C.PUMPED_DAY_Q.search("how much water has the strawberry had in the last 2
 a = C.pumped_day_reply(hive, hive.call("GET", "/api/state")["nodes"], "how much water has node %d had in the last 24 hours?" % pump["id"])
 check(a is None or "the node's own count" in a, "...answered from the node's own 24-hour count", a)
 
+# How-to answers for the Troubleshoot button and the grow stages (2026-10-17)
+a = C.admin_reply(hive, hive.call("GET", "/api/state"), hive.call("GET", "/api/state")["nodes"],
+                  "how do I troubleshoot the weather station?")
+check(a and "Troubleshoot" in a and "2 seconds" in a, "'how do I troubleshoot a node?': the node page's Troubleshoot button", a)
+a = C.admin_reply(hive, hive.call("GET", "/api/state"), hive.call("GET", "/api/state")["nodes"], "how does germination mode work?")
+check(a and "Grow stage" in a and "below 80 %" in a and "55 %" in a, "'how does germination mode work?': the stages, in code", a)
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send
