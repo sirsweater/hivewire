@@ -2813,6 +2813,28 @@ def seed_dry_reply(hive, nodes, q):
             "\"give the %s 5 ml\") and I'll set it up for you to confirm. %s" % (nm, soil, nm.lower(), timer))
 
 
+# ("node 42" only: a bare "#1" is as likely "the #1 plant" as a node)
+NODE_NUM = re.compile(r"(?i)\bnode\s*#?\s*(\d{1,3})\b")
+
+
+def ghost_node_reply(hive, st, q):
+    """ "How is node 42 doing?" got "node 42 does not appear in the live status - could you specify?": a node number the
+    hive has never had is said plainly, with the nodes it does have."""
+    ids = {int(a) for a in NODE_NUM.findall(q)}
+    if not ids:
+        return None
+    known = {n["id"] for n in st.get("nodes", [])} | {x["id"] for x in st.get("silent") or []}
+    try:
+        known |= {int(k) for k in ((hive.call("GET", "/api/config") or {}).get("nodes") or {}) if str(k).isdigit()}
+    except RuntimeError:
+        pass
+    if ids & known:
+        return None
+    have = ", ".join("%s%s" % (n["id"], " %s" % n["name"] if n.get("name") else " (%s)" % n.get("kind"))
+                     for n in st.get("nodes", []) if not n.get("hidden"))
+    return "There's no node %s in the hive. Its nodes are: %s." % (" or ".join(str(i) for i in sorted(ids)), have)
+
+
 SAME_FW_Q = re.compile(r"(?i)\b(same|different|identical|matching|match)\b[^?]{0,40}\b(firmware|build|version|crc)\b|"
                        r"\b(firmware|build|version)\b[^?]{0,40}\b(same|different|identical|match)\b")
 
@@ -5128,6 +5150,11 @@ def ask(hive, messages, q, on_tool=None):
             and not SYMPTOM.search(q) and not REQUEST.search(q) and not REQUEST_CLAUSE.search(q):
         try:
             fixed = seed_dry_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
+    if not fixed and NODE_NUM.search(q):
+        try:
+            fixed = ghost_node_reply(hive, st, q)
         except RuntimeError:
             fixed = None
     if not fixed and is_question(q) and RESERVOIR_DRY_Q.search(q):

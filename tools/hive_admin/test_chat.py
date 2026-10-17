@@ -707,6 +707,11 @@ check(a and "Troubleshoot" in a and "2 seconds" in a, "'how do I troubleshoot a 
 a = C.admin_reply(hive, hive.call("GET", "/api/state"), hive.call("GET", "/api/state")["nodes"], "how does germination mode work?")
 check(a and "Grow stage" in a and "below 80 %" in a and "55 %" in a, "'how does germination mode work?': the stages, in code", a)
 
+a = C.ghost_node_reply(hive, hive.call("GET", "/api/state"), "how is node 242 doing?")
+check(a and a.startswith("There's no node 242 in the hive") and str(pump["id"]) in a, "a node number the hive never had: said, with its nodes", a)
+check(C.ghost_node_reply(hive, hive.call("GET", "/api/state"), "how is node %d doing?" % pump["id"]) is None,
+      "...a real node isn't a ghost")
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send
