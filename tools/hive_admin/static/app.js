@@ -1187,6 +1187,118 @@ views.stream = async (el) => {
   views.stream._t = setInterval(() => { if (route().name !== "stream") { clearInterval(views.stream._t); return; } refresh(); }, 4000);
 };
 
+// ---------------------------------------------------------------------------
+// Kitchen: the foods in the house, a week of meals from them, and what to buy
+// ---------------------------------------------------------------------------
+// A file as the kitchen service wants it. A photo is drawn onto a canvas first: smaller (2000 px on the long side is
+// plenty to read), always JPEG (a phone's HEIC too, where the browser can show it), and no location data.
+async function kitchenPayload(file) {
+  const b64 = (buf) => {
+    let s = ""; const a = new Uint8Array(buf);
+    for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  if ((file.type || "").startsWith("image/") || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(file.name)) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error("this browser can't open that image")); i.src = url; });
+      const k = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.88));
+      return { name: file.name.replace(/\.[^.]+$/, "") + ".jpg", type: "image/jpeg", data: b64(await blob.arrayBuffer()) };
+    } finally { URL.revokeObjectURL(url); }
+  }
+  if (file.size > 12 << 20) throw new Error("that file is over 12 MB");
+  return { name: file.name, type: file.type || "", data: b64(await file.arrayBuffer()) };
+}
+
+function kitchenPlanHtml(k) {
+  const p = k.plan;
+  if (!p) return '<p class="muted">No plan yet. List what you have, then press Plan my week.</p>';
+  if (p.error) return `<p class="err">${esc(p.error)}</p>`;
+  const meals = (p.meals || []).map((m, i) => `<details class="note" style="margin:0"><summary><b>${i + 1}. ${esc(m.title)}</b>
+      <span class="small"> - uses your ${esc(m.have.join(", "))}${m.need.length ? '; <b>needs</b> ' + esc(m.need.join(", ")) : "; nothing to buy"}</span></summary>
+      <div class="small" style="margin-top:8px"><b>Ingredients</b><ul>${(m.ingredients || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+      <b>Steps</b><ol>${(m.steps || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
+      ${m.url ? `<a href="${esc(/^https?:/.test(m.url) ? m.url : "https://" + m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.source || "source")}</a>` : esc(m.source || "")}</div></details>`).join("");
+  const shop = (p.shopping || []).map((x) => `<li><b>${esc(x.item)}</b> <span class="muted small">for ${esc(x.for.join("; "))}</span></li>`).join("");
+  const unlock = (p.unlock || []).map((x) => `<li>${esc(x.item)} <span class="muted small">- ${x.recipes} more recipes need only that</span></li>`).join("");
+  return `<div class="stack">
+    <div class="muted small">${(p.meals || []).length} meals, planned ${fmtAge(STATE ? STATE.time - k.plan_at : 0)} ago from ${(p.considered || 0).toLocaleString()} recipes that use your foods. ${esc(p.assumed || "")} taken as given.</div>
+    ${meals || '<p class="muted">No recipe uses at least two of your foods with four or fewer things to buy - add a few more foods.</p>'}
+    <div><b>Shopping list</b>${shop ? `<ul>${shop}</ul>` : '<p class="muted small">Nothing to buy - every meal uses only what you have.</p>'}</div>
+    ${unlock ? `<div><b>Worth adding</b><ul>${unlock}</ul></div>` : ""}
+    ${(p.unused || []).length ? `<div class="muted small">Not used this week: ${esc(p.unused.join(", "))}</div>` : ""}</div>`;
+}
+
+views.kitchen = async (el) => {
+  let k = await api("/api/kitchen");
+  el.innerHTML = `<div class="head"><h1>Kitchen</h1><div class="muted small">What's in the house, a week of meals from it, and what to buy. The recipes come from the kitchen bot's collection on the devbox.</div></div>
+    ${k.enabled ? "" : '<div class="card err">Set the Chat page\'s model server first - the Kitchen asks the same machine.</div>'}
+    <div class="grid cols-2">
+      <div class="card stack">
+        <div class="spread"><b>Foods I have</b><span class="muted small" id="k-saved">${k.updated ? "saved " + fmtAge(STATE ? STATE.time - k.updated : 0) + " ago" : ""}</span></div>
+        <textarea id="k-have" rows="12" style="width:100%" placeholder="One per line - e.g.&#10;chicken breasts&#10;rice&#10;broccoli&#10;cheddar">${esc((k.have || []).join("\n"))}</textarea>
+        <div class="row"><button class="primary" id="k-save">Save</button><span class="muted small">Salt, pepper, oil and water are taken as given.</span></div>
+        <label class="drop" id="k-drop">Drop a receipt here - a PDF, a saved e-mail (.eml) or web page - or tap to take a photo of a paper one
+          <input type="file" id="k-file" accept="image/*,.pdf,.eml,.html,.htm,.txt,application/pdf,message/rfc822,text/html,text/plain" hidden></label>
+        <div id="k-receipt"></div>
+      </div>
+      <div class="card stack">
+        <div class="row"><b>This week</b>
+          <select id="k-meals">${[3, 4, 5, 6, 7].map((n) => `<option ${n === (k.plan_meals || 7) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="small muted">meals</span>
+          <input id="k-avoid" placeholder="leave out, e.g. mushrooms, pork" style="flex:1;min-width:150px" value="${esc((k.avoid || []).join(", "))}">
+          <button class="primary" id="k-plan">Plan my week</button></div>
+        <div id="k-plan-out">${kitchenPlanHtml(k)}</div>
+      </div>
+    </div>`;
+  const lines = () => $("#k-have").value.split(/\n|,/).map((x) => x.trim()).filter(Boolean);
+  const save = async () => {
+    k = await api("/api/kitchen/have", { have: lines() });
+    $("#k-have").value = k.have.join("\n"); $("#k-saved").textContent = "saved just now";
+  };
+  $("#k-save").onclick = async () => { try { await save(); toast("Saved " + k.have.length + " foods"); } catch (e) { toast(e.message, 6000); } };
+  $("#k-plan").onclick = async () => {
+    const b = $("#k-plan");
+    b.disabled = true; $("#k-plan-out").innerHTML = '<p class="muted">Planning - a few seconds…</p>';
+    try {
+      await save();
+      k = await api("/api/kitchen/plan", { meals: +$("#k-meals").value, avoid: $("#k-avoid").value.split(",").map((x) => x.trim()).filter(Boolean) });
+      $("#k-plan-out").innerHTML = kitchenPlanHtml(k);
+    } catch (e) { $("#k-plan-out").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+    b.disabled = false;
+  };
+  const out = $("#k-receipt");
+  const read = async (file) => {
+    if (!file) return;
+    out.innerHTML = `<p class="muted">Reading ${esc(file.name)}${/^image\//.test(file.type) ? " - a photo takes about a minute" : ""}…</p>`;
+    try {
+      const r = await api("/api/kitchen/receipt", await kitchenPayload(file));
+      if (!(r.items || []).length) { out.innerHTML = `<p class="muted">${esc(r.note || "No food items were found on it.")}</p>`; return; }
+      out.innerHTML = `<div class="note stack" style="margin:0"><b>Found on the receipt</b> <span class="small">- untick anything wrong</span>
+        <div>${r.items.map((it, i) => `<label class="row small" style="gap:6px"><input type="checkbox" data-i="${i}" ${it.already ? "" : "checked"}>
+          <span><b>${esc(it.food)}</b> <span class="muted mono">${esc(it.line)}</span>${it.already ? ' <span class="muted">(already listed)</span>' : ""}</span></label>`).join("")}</div>
+        <div class="row"><button class="primary" id="k-add">Add ticked foods</button><button id="k-skip">Dismiss</button></div></div>`;
+      $("#k-skip").onclick = () => (out.innerHTML = "");
+      $("#k-add").onclick = async () => {
+        const add = [...out.querySelectorAll("input[data-i]:checked")].map((c) => r.items[+c.dataset.i].food);
+        try {
+          k = await api("/api/kitchen/have", { add });
+          $("#k-have").value = k.have.join("\n"); $("#k-saved").textContent = "saved just now";
+          out.innerHTML = ""; toast("Added " + add.length + " foods");
+        } catch (e) { toast(e.message, 6000); }
+      };
+    } catch (e) { out.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  };
+  const drop = $("#k-drop"), inp = $("#k-file");
+  inp.onchange = () => { read(inp.files[0]); inp.value = ""; };
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); read(e.dataTransfer.files[0]); };
+};
+
 views.chat = async (el) => {
   const cfg = await api("/api/chat/config");
   const setup = `

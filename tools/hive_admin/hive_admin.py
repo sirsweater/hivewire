@@ -2000,6 +2000,64 @@ def _configure_chat(app):
                         known_issues_file=os.path.join(d, "known_issues.json"))
 
 
+# --- kitchen --------------------------------------------------------------------
+# The Kitchen tab: the foods in the house (kept here, hive_data/kitchen.json), a week of meals from them with what to
+# buy (planned by the kitchen bot on the devbox - reached through ollama-proxy with the Chat page's own server address
+# and key), and foods read off a receipt photo or a digital receipt (shown for ticking: nothing is added until saved).
+KITCHEN_FILE = "kitchen.json"
+
+
+def kitchen_load(app):
+    try:
+        with open(os.path.join(app.args.data, KITCHEN_FILE), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("have", [])
+    return d
+
+
+def kitchen_save(app, d):
+    p = os.path.join(app.args.data, KITCHEN_FILE)
+    with open(p + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1)
+    os.replace(p + ".tmp", p)
+
+
+def kitchen_items(xs):
+    """Foods as typed, tidied: one each, at most 200 of 80 characters."""
+    out, seen = [], set()
+    for x in xs or []:
+        t = re.sub(r"\s+", " ", str(x)).strip(" ,;-\t")[:80]
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out[:200]
+
+
+def kitchen_call(app, path, body, timeout):
+    """POST to the kitchen bot on the devbox: the Chat page's model server host (ollama-proxy), with its key."""
+    c = chat_cfg(app)
+    m = re.match(r"^(https?://[^/\s]+)", c["url"] or "")
+    if not m:
+        raise RuntimeError("set the Chat page's model server first - the Kitchen uses the same machine")
+    headers = {"Content-Type": "application/json"}
+    if c["api_key"]:
+        headers["Authorization"] = "Bearer " + c["api_key"]
+    req = urllib.request.Request(m.group(1) + path, data=json.dumps(body).encode(), method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error")
+        except ValueError:
+            msg = None
+        raise RuntimeError("the kitchen service said: %s" % (msg or "HTTP %d" % e.code))
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError("can't reach the kitchen service at %s (%s)" % (m.group(1), type(e).__name__))
+
+
 class LocalHive(hive_chat.Hive):
     """The chat's view of the hive, served by this admin's own routes in-process:
     same handlers, same checks, no HTTP round trip and no second login."""
@@ -2360,6 +2418,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             t1 = int(q.get("to") or now())
             t0 = int(q.get("from") or t1 - 86400)
             return self.send_json(app.store.notes(t0, t1))
+        if path == "/api/kitchen":
+            d = kitchen_load(app)
+            d["enabled"] = bool(re.match(r"^https?://", chat_cfg(app)["url"] or ""))
+            return self.send_json(d)
         if path == "/api/chat/config":
             c = chat_cfg(app)
             d = app.args.data
@@ -2723,6 +2785,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/chat/reset":
             app.chats.pop(self.chat_key(), None)
             return self.send_json({"ok": True})
+        if path == "/api/kitchen/have":
+            b = self.jbody()
+            d = kitchen_load(app)
+            if "have" in b:
+                d["have"] = kitchen_items(b.get("have"))
+            if b.get("add"):
+                d["have"] = kitchen_items(d["have"] + list(b["add"]))
+            if b.get("remove"):
+                gone = {str(x).strip().lower() for x in b["remove"]}
+                d["have"] = [x for x in d["have"] if x.lower() not in gone]
+            d["updated"] = now()
+            kitchen_save(app, d)
+            return self.send_json(d)
+        if path == "/api/kitchen/plan":
+            b = self.jbody()
+            d = kitchen_load(app)
+            if len(d["have"]) < 2:
+                raise ValueError("list at least two foods you have first")
+            meals = max(1, min(7, int(b.get("meals") or 7)))
+            avoid = kitchen_items(b.get("avoid"))[:30]
+            r = kitchen_call(app, "/kitchen/plan", {"have": d["have"], "meals": meals, "avoid": avoid}, 180)
+            d.update(plan=r, plan_at=now(), plan_meals=meals, avoid=avoid)
+            kitchen_save(app, d)
+            app.store.event("kitchen", "planned %d meals from %d foods" % (len(r.get("meals") or []), len(d["have"])))
+            return self.send_json(d)
+        if path == "/api/kitchen/receipt":
+            b = json.loads(self.body(24 << 20) or b"{}")         # a photo, base64
+            if not b.get("data"):
+                raise ValueError("no file sent")
+            r = kitchen_call(app, "/kitchen/receipt", {"name": str(b.get("name") or "")[:200],
+                                                       "type": str(b.get("type") or "")[:100],
+                                                       "data": str(b["data"])}, 420)
+            have = {x.lower() for x in kitchen_load(app)["have"]}
+            for it in r.get("items") or []:
+                it["already"] = it.get("food", "").lower() in have
+            return self.send_json(r)
         if path == "/api/chat/config":
             b = self.jbody()
             c = chat_cfg(app)

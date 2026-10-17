@@ -780,6 +780,67 @@ _line = [x for x in a.splitlines() if "node %s)" % _n["id"] in x and "soil" in x
 check(_line and "holding its doses" in _line[0] and "No action needed" in a and "above its" not in _line[0],
       "a germinating pot over its top is 'no action needed', not an attention item", a)
 
+# --- Kitchen tab: the foods list, and the plan/receipt calls through the chat's server address and key ----------
+import http.server as _hs  # noqa: E402
+import threading as _th  # noqa: E402
+h = H._Capture(app, {"have": [" chicken breasts ", "Rice", "rice", "", "broccoli"]})
+h.route_post("/api/kitchen/have", {})
+check(h.out[0]["have"] == ["chicken breasts", "Rice", "broccoli"], "the foods list is tidied: trimmed, one each", h.out)
+h = H._Capture(app, {"add": ["cheddar", "RICE"], "remove": ["broccoli"]})
+h.route_post("/api/kitchen/have", {})
+check(h.out[0]["have"] == ["chicken breasts", "Rice", "cheddar"], "...add and remove", h.out)
+_seen = {}
+
+
+class _FakeKitchen(_hs.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        _seen["path"], _seen["auth"], _seen["body"] = self.path, self.headers.get("Authorization"), b
+        r = ({"meals": [{"title": "Chicken Rice Bake", "have": ["chicken breasts", "rice"], "need": ["onion"]}],
+              "shopping": [{"item": "onion", "for": ["Chicken Rice Bake"]}], "unused": ["cheddar"], "unlock": []}
+             if self.path == "/kitchen/plan" else {"kind": "text", "items": [{"food": "rice", "line": "RICE 2LB"},
+                                                                             {"food": "whole milk", "line": "WHL MILK"}]})
+        body = json.dumps(r).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+_srv = _hs.HTTPServer(("127.0.0.1", 0), _FakeKitchen)
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+_keep_chat = dict(app.cfg.data.get("chat") or {})
+app.cfg.data["chat"] = dict(H.CHAT_DEFAULTS, url="http://127.0.0.1:%d/v1" % _srv.server_port, model="m", api_key="k123")
+try:
+    h = H._Capture(app, {"meals": 5, "avoid": ["pork"]})
+    h.route_post("/api/kitchen/plan", {})
+    check(h.out[0]["plan"]["meals"][0]["title"] == "Chicken Rice Bake" and _seen["path"] == "/kitchen/plan" and
+          _seen["auth"] == "Bearer k123" and _seen["body"]["meals"] == 5 and _seen["body"]["avoid"] == ["pork"] and
+          _seen["body"]["have"] == ["chicken breasts", "Rice", "cheddar"],
+          "plan: the foods go to the chat server's host with its key; the plan is kept", (h.out, _seen))
+    h = H._Capture(app, {})
+    h.route_get("/api/kitchen", {})
+    check(h.out[0]["plan"]["shopping"][0]["item"] == "onion" and h.out[0]["enabled"], "...and comes back with the page", h.out)
+    h = H._Capture(app, {"name": "r.txt", "type": "text/plain", "data": "UklDRQ=="})
+    h.route_post("/api/kitchen/receipt", {})
+    check([(i["food"], i["already"]) for i in h.out[0]["items"]] == [("rice", True), ("whole milk", False)],
+          "receipt: its foods come back marked if they're already listed (nothing added yet)", h.out)
+finally:
+    app.cfg.data["chat"] = _keep_chat
+    _srv.shutdown()
+app.cfg.data["chat"] = dict(H.CHAT_DEFAULTS)
+try:
+    h = H._Capture(app, {"meals": 3})
+    h.route_post("/api/kitchen/plan", {})
+    _err = None
+except RuntimeError as e:
+    _err = str(e)
+check(_err and "model server first" in _err, "no chat server: the Kitchen says to set it first", _err)
+app.cfg.data["chat"] = _keep_chat
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send

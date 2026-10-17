@@ -1860,7 +1860,14 @@ def scrub_wet_offers(hive, answer):
         if n.get("hidden") or not has_pump(hive, n.get("kind")) or not named_by_person(n):
             continue
         if stage_name(cfg.get(str(n["id"]))) == "germination":
-            continue                # a wet probe isn't a wet surface: seeds may still want a small dose
+            # A wet probe isn't a wet surface, so seeds may still want a small dose - but an offhand "would you like to
+            # try watering it now?" while the doses are held as too wet (hive-full24) says why instead.
+            band, soil = band_of(cfg.get(str(n["id"]))), (n.get("derived") or {}).get("soil")
+            if band and soil is not None and soil >= band[1]:
+                wet.append("%s's doses are on hold: its probe reads %.0f%%, at or above the %s%% where germination mode "
+                           "stops them (soggy seed mix rots seeds). If the surface looks dry, mist it, or ask for a "
+                           "small dose of 5-10 ml." % (n.get("name") or "node %s" % n["id"], soil, band[1]))
+            continue
         p = plant(cfg.get(str(n["id"])) or {}, n)
         if p.get("soil_vs_target", "").startswith("TOO WET"):
             wet.append("%s doesn't need water now: its soil is %s, above its %s target." % (
@@ -4813,10 +4820,11 @@ FLOW_WRONG = re.compile(r"(?i)\bflow\b[^.?!]*\b(wrong|off|incorrect|inaccurate|n
 # question with past rain) that a fixed reply is the reliable one.
 FIXED_REPLIES = [
     # Other assistants' jobs ("what should I cook for dinner?" got "soup, since your plants are too wet").
-    (re.compile(r"(?i)^(?!.*\b(water\w*|pump\w*|stop|reboot|rename|set|soil|node|probe|sensor)\b).*\b(cook|recipe|dinner|lunch|"
-                r"breakfast|bake|baking|meal)\b"),
-     "Recipes are the kitchen assistant's job (the `recipes` bot on the devbox) - this chat runs the garden's sensors "
-     "and pumps."),
+    (re.compile(r"(?i)^(?!.*\b(water\w*|pump\w*|stop|reboot|rename|set|soil|node|probe|sensor)\b).*\b(cook|recipes?|dinner|lunch|"
+                r"breakfast|bake|baking|meals?|groceries|grocery|shopping list|receipt)\b"),
+     "Recipes are the kitchen assistant's job - this chat runs the garden's sensors and pumps. This page's Kitchen tab "
+     "keeps the foods you have (type them, or drop in a receipt), plans a week of meals from them and lists what to "
+     "buy; the `recipes` bot on the devbox answers cooking questions."),
     (re.compile(r"(?i)\bwhen (should|do|can|could) (i|we) (plant|sow|transplant|start)\b|\bcompanion plant|\bwhat (can|should) "
                 r"(i|we) (plant|grow|sow)\b|\bhow far apart\b|\bdays to harvest\b"),
      "Planting dates, spacing and companions are the plant assistant's job (the `plants` bot on the devbox, which has "
