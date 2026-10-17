@@ -2021,7 +2021,7 @@ class LocalHive(hive_chat.Hive):
         obj, code = h.out or (None, 500)
         if code >= 400:
             raise RuntimeError("hive admin %s %s: HTTP %d %s" % (method, path, code, (obj or {}).get("error", "")))
-        return obj
+        return hive_chat.adjust_reply(path, obj)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

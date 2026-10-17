@@ -503,7 +503,7 @@ app.cfg.set_node(pump["id"], {"plant_band": [45, 75], "soil_dry": 4000, "soil_we
                               "seed_mode": {"ml": 5, "every_h": 6, "until": _now + 86400, "stage": "germination",
                                             "skip_above": 80.0, "skipping": True}})
 f = C.focus_facts(hive, "how is node %d doing?" % pump["id"])
-check("GERMINATION mode since" in f and "(day 3)" in f and "5 ml every 6 h" in f and "on hold right now" in f,
+check("GERMINATION mode since" in f and "(day 3)" in f and "5 ml every 6 h" in f and "ON HOLD right now" in f,
       "germination mode shows beside a question about the node, with its day and the hold", f)
 check("target 60.0-80.0 %" in f and "germination stage's range" in f and "45-75 %" in f,
       "...and its range stands in for the grown plant's band", f)
@@ -551,6 +551,58 @@ app.cfg.set_node(pump["id"], {"soil_dry": None, "soil_wet": None, "adaptive": No
 for _k, _v in _had.items():
     if _v is None:
         _sl.pop(_k, None)
+
+# --- round 16 (2026-10-16 night): the Strawberry seed pot's answers -------------------
+_now = int(_tm.time())
+_pname = app.cfg.node(pump["id"]).get("name")
+app.cfg.set_node(pump["id"], {"name": "Berrytest", "soil_dry": 4000, "soil_wet": 1000, "plant_band": [45, 75],
+                              "grow_stage": {"stage": "germination", "since": _now - 3600, "band": [60.0, 80.0]},
+                              "seed_mode": {"ml": 5, "every_h": 6, "until": _now + 86400, "stage": "germination",
+                                            "skip_above": 80.0, "skipping": True}})
+_st = hive.call("GET", "/api/state")
+_n = next(x for x in _st["nodes"] if x["id"] == pump["id"])
+_soil = (_n.get("derived") or {}).get("soil")
+f = C.focus_facts(hive, "how is the berrytest doing?")
+check("given ONLY while the probe reads BELOW 80.0 %" in f and "comes back ON at seedling settings" in f,
+      "the germination fact can't be read backwards: doses only below the hold, seedling mode turns the watering ON", f)
+a = C.germinated_reply(hive, _st["nodes"], "have the berrytest seeds germinated yet?")
+check(a and a.startswith("The hive can't see seeds") and "day 1" in a and "comes back on" in a,
+      "'have the seeds germinated?': the hive can't see seeds, still in germination, how to move on", a)
+check(C.GERMINATED_Q.search("have the strawberry seeds germinated yet?") and
+      not C.GERMINATED_Q.search("how long do strawberry seeds take to germinate?"),
+      "...asked whether they have, not how long they take")
+if _soil is not None:
+    a = C.when_dry_reply(hive, _st, _n)
+    check(a and "germination mode" in a and "below 80.0%" in a and "45%" not in a,
+          "'when will it need water next?' in germination: the hold rule, not the grown plant's 45 %", a)
+app.store.event("command", "set %d 40 10 -> ACK set 40=10" % pump["id"])
+a = C.anyone_watered_reply(hive, _st["nodes"], "did anyone water the berrytest in the last 2 days?")
+check(a and a.startswith("Yes") and "10 ml sent as \"water now\"" in a,
+      "'did anyone water it?': a watering sent from the hive is a yes", a)
+check(C.watered_window("did anyone water it in the last 6 hours?")[0] == 6 * 3600 and
+      C.watered_window("did anyone water it today?")[1] == "today", "...over the window the question names")
+f = C.focus_facts(hive, "the berrytest seed pot looks dry on top, give it 10 ml")
+check("SEEDS:" in f and "FEELS DRY TO THE PERSON" not in f,
+      "'looks dry on top' on a germinating pot: a dry surface matters for seeds, no skewer test", f)
+check(C.scrub_wet_offers(hive, "Would you like me to water the berrytest?") == "Would you like me to water the berrytest?"
+      or "doesn't need water" not in C.scrub_wet_offers(hive, "Would you like me to water the berrytest?"),
+      "...and an offer to water a germinating pot isn't swapped for 'doesn't need water'")
+app.cfg.set_node(pump["id"], {"name": _pname, "grow_stage": None, "seed_mode": None, "plant_band": None,
+                              "soil_dry": None, "soil_wet": None})
+# A probe the known issues say is out of the soil reads air: no soil %, a warning, and only while it reads like air.
+_kf = os.path.join(tmp, "ki.json")
+json.dump({str(pump["id"]): "PROBE OUT OF THE SOIL since tonight"}, open(_kf, "w"))
+_old_ki = C.KNOWN_ISSUES_FILE
+C.KNOWN_ISSUES_FILE = _kf
+x = C.adjust_reply("/api/state", {"nodes": [{"id": pump["id"], "derived": {"soil": 2.0}, "warnings": []},
+                                            {"id": nopump["id"], "derived": {"soil": 2.0}, "warnings": []}]})
+check(x["nodes"][0]["derived"]["soil"] is None and C.PROBE_OUT_WARNING in x["nodes"][0]["warnings"] and
+      x["nodes"][1]["derived"]["soil"] == 2.0, "a probe the known issues say is out: no soil %, and why", x)
+x = C.adjust_reply("/api/state", {"nodes": [{"id": pump["id"], "derived": {"soil": 47.0}, "warnings": []}]})
+check(x["nodes"][0]["derived"]["soil"] == 47.0, "...back in the soil (47 %), its reading counts again by itself", x)
+check(C.derived(hive, {"kind": pump["kind"], "derived": {"soil": None}, "warnings": [C.PROBE_OUT_WARNING]})
+      .get("Soil moisture", "").startswith("no reading - the probe is out"), "...and it's described that way, not 'not calibrated'")
+C.KNOWN_ISSUES_FILE = _old_ki
 
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
