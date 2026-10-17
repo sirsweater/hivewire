@@ -2733,6 +2733,37 @@ def germinated_reply(hive, nodes, q):
     return None
 
 
+def seed_dry_reply(hive, nodes, q):
+    """ "My strawberry pot feels really dry" on a germinating pot: two answers in three said not to water at all (its
+    probe read 84 % further down) and one wrote out water_now calls as JSON (2026-10-16). Seeds sit in the top
+    centimetre: the reading, why the surface matters, and what the timer will do - no card unless they ask."""
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n) and stage_name(cfg.get(str(n["id"]))) == "germination"]
+    finally:
+        SAID[:] = keep
+    if len(named) != 1:
+        return None
+    n = named[0]
+    sm = (cfg.get(str(n["id"])) or {}).get("seed_mode") or {}
+    soil, skip = (n.get("derived") or {}).get("soil"), sm.get("skip_above")
+    if soil is None:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    if skip is not None and soil >= skip:
+        timer = ("Germination mode is holding its own %s ml doses while the probe reads %s%% or more, so its timer won't "
+                 "water it until the reading drops below that." % (sm.get("ml", "?"), skip))
+    else:
+        nxt = (sm["last"] + sm.get("every_h", 6) * 3600) if sm.get("last") else None
+        timer = "Its next timed %s ml dose is due %s." % (sm.get("ml", "?"), "about %s" % time.strftime(
+            "%H:%M", time.localtime(nxt)) if nxt and nxt > time.time() else "within a minute or two")
+    return ("%s's probe reads %.0f%% further down, so the pot itself isn't dry - but its seeds sit in the top centimetre, "
+            "and for seeds a dry surface matters. Mist the surface, or ask me for a small dose (5-10 ml - for example "
+            "\"give the %s 5 ml\") and I'll set it up for you to confirm. %s" % (nm, soil, nm.lower(), timer))
+
+
 ANYONE_WATERED_Q = re.compile(r"(?i)\b(did|has|have)\b[^?]{0,30}\b(anyone|anybody|someone|somebody)\b[^?]{0,30}\bwater")
 
 
@@ -4498,6 +4529,11 @@ def scrub_tool_talk(answer):
                      r"use|using)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
+    # A tool call written out as JSON, fenced or bare ({"name": "water_now", "arguments": {...}}) - 2026-10-16
+    out = re.sub(r"(?is)```(?:json)?\s*\{[^`]*?\"name\"\s*:\s*\"(%s)\"[^`]*?\}\s*```\s*" % names, "", out)
+    out = re.sub(r"(?m)^[ \t]*\{\s*\"name\"\s*:\s*\"(%s)\"[^\n]*\}[ \t]*$\n?" % names, "", out)
+    # "Call `water_now` with an amount if you'd like to proceed manually."
+    out = re.sub(r"(?i)[ \t]*[^.!?\n]*\bcall\b[^.!?\n]*`(%s)`[^.!?\n]*[.!?]?" % names, "", out)
     # "(can be watered with `water_now`)", "**Tool: `water_now`**"
     out = re.sub(r"\s*\([^()\n]*`?\b(%s)\b`?[^()\n]*\)" % names, "", out)
     out = re.sub(r"(?i)\*{0,2}\s*tool:?\s*`?(%s)`?\s*\*{0,2}:?\s*" % names, "", out)
@@ -4868,6 +4904,12 @@ def ask(hive, messages, q, on_tool=None):
     if not fixed and is_question(q) and GERMINATED_Q.search(q):
         try:
             fixed = germinated_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
+    if not fixed and FEELS_DRY.search(q) and not re.match(r"(?i)\s*(is|are|does|do|how|what|which|when|should|can)\b", q) \
+            and not SYMPTOM.search(q) and not REQUEST.search(q) and not REQUEST_CLAUSE.search(q):
+        try:
+            fixed = seed_dry_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
     if not fixed and is_question(q) and ANYONE_WATERED_Q.search(q):

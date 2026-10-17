@@ -596,6 +596,15 @@ for q, hit in (("the strawberry seed pot looks dry on top, give it 10 ml", True)
                ("the reservoir is full, water levels are fine", False), ("when it's dry, should I water it?", False),
                ("the soil is 40%, give it a rest", False)):
     check(bool(C.REQUEST_CLAUSE.search(q)) == hit, "a watering after a comma is a request: %r -> %s" % (q, hit))
+if _soil is not None:
+    a = C.seed_dry_reply(hive, _st["nodes"], "my berrytest pot feels really dry")
+    check(a and "seeds sit in the top centimetre" in a and "skewer" not in a and
+          (("holding its own 5 ml doses" in a) if _soil >= 80 else ("next timed 5 ml dose" in a)),
+          "'my seed pot feels dry' in germination: the probe, why the surface matters, and what the timer does next", a)
+_j = C.scrub_tool_talk('Not now.\n\n```json\n{"name": "water_now", "arguments": {"node": "7", "amount": 5}}\n```\n\n'
+                       '{"name": "water_now", "arguments": {"node": "7", "amount": 10}}\n\nCall `water_now` with an amount '
+                       'if you like.')
+check("water_now" not in _j and "Not now." in _j, "tool calls written out as JSON are removed from an answer", _j)
 app.cfg.set_node(pump["id"], {"name": _pname, "grow_stage": None, "seed_mode": None, "plant_band": None,
                               "soil_dry": None, "soil_wet": None})
 # A probe the known issues say is out of the soil reads air: no soil %, a warning, and only while it reads like air.
