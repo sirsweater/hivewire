@@ -1223,7 +1223,9 @@ function kitchenPlanHtml(k) {
       <div class="small" style="margin-top:8px"><b>Ingredients</b><ul>${(m.ingredients || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
       <b>Steps</b><ol>${(m.steps || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
       ${m.url ? `<a href="${esc(/^https?:/.test(m.url) ? m.url : "https://" + m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.source || "source")}</a>` : esc(m.source || "")}</div></details>`).join("");
-  const shop = (p.shopping || []).map((x) => `<li><b>${esc(x.item)}</b> <span class="muted small">for ${esc(x.for.join("; "))}</span></li>`).join("");
+  // (the recipes' own lines say what each item is: the collection's tags can be rough - "pods" is cardamom pods)
+  const shop = (p.shopping || []).map((x) => `<li><b>${esc(x.item)}</b>${(x.lines || []).length ? ` <span class="small">- ${esc(x.lines.join("; "))}</span>` : ""}
+      <span class="muted small">(for ${esc(x.for.join("; "))})</span></li>`).join("");
   const unlock = (p.unlock || []).map((x) => `<li>${esc(x.item)} <span class="muted small">- ${x.recipes} more recipes need only that</span></li>`).join("");
   return `<div class="stack">
     <div class="muted small">${(p.meals || []).length} meals, planned ${fmtAge(STATE ? STATE.time - k.plan_at : 0)} ago from ${(p.considered || 0).toLocaleString()} recipes that use your foods. ${esc(p.assumed || "")} taken as given.</div>
