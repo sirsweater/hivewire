@@ -3339,9 +3339,10 @@ AUTO_SWITCH_Q = re.compile(r"(?i)\b(turn|switch|shut|set)\b[^?]{0,30}\b(off|on)\
                            r"\b(disable|enable|stop|pause|resume|deactivate|activate)\b[^?]{0,30}\bauto(matic)?[- ]?water\w*")
 
 
-def auto_switch_reply(nodes, q):
+def auto_switch_reply(nodes, q, hive=None):
     """ "Turn off automatic watering for the rhubarb" - it tried to write slot 10 (the battery %), then suggested
-    setting the 24-hour cap to 0. Switching it is the admin page's job."""
+    setting the 24-hour cap to 0. Switching it is the admin page's job. A node in a grow stage gets why, too:
+    germination keeps the node's own watering off on purpose (potcare.GrowStages)."""
     keep = SAID[:]
     SAID[:] = [q]
     try:
@@ -3349,8 +3350,24 @@ def auto_switch_reply(nodes, q):
     finally:
         SAID[:] = keep
     who = " for %s" % ", ".join(n.get("name") or "node %s" % n["id"] for n in named) if named else ""
+    note = ""
+    if hive is not None and named:
+        try:
+            cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+        except Exception:
+            cfg = {}
+        for n in named:
+            st = ((cfg.get(str(n["id"])) or {}).get("grow_stage") or {}).get("stage")
+            nm = n.get("name") or "node %s" % n["id"]
+            if st == "germination":
+                note += (" %s is in germination mode: the admin gives it small doses on a timer, and its own automatic "
+                         "watering stays off until you mark the seeds germinated on its Grow stage card - switching it "
+                         "on as well would water it twice." % nm)
+            elif st == "seedling":
+                note += (" %s is in seedling mode: its Grow stage card set its automatic watering for seedlings, so change "
+                         "it there." % nm)
     return ("Automatic watering%s is switched on and off on the admin page (the node's Automatic watering card) - "
-            "this chat can't change it, and I won't work around it with other settings. Nothing was changed." % who)
+            "this chat can't change it, and I won't work around it with other settings. Nothing was changed.%s" % (who, note))
 
 
 SOIL_TEMP_NOW_Q = re.compile(r"(?i)\bsoil\b[^?]{0,30}\b(temp\w*|warm|hot|cold|cool|degrees)\b|\b(temp\w*|warm|hot|cold|cool)\b[^?]{0,30}\bsoil\b")
@@ -4648,7 +4665,7 @@ def ask(hive, messages, q, on_tool=None):
                     m.group(1), m.group(3), m.group(4), "" if m.group(4) == "1" else "s", m.group(2),
                     "." + (t.split("(Worked out")[1].split(")", 1)[1] if ")" in t.split("(Worked out")[1] else ""))
     if not fixed and AUTO_SWITCH_Q.search(q):
-        fixed = auto_switch_reply(nodes, q)
+        fixed = auto_switch_reply(nodes, q, hive)
     if not fixed and is_question(q) and SOIL_TEMP_NOW_Q.search(q) and not DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) \
             and not EXTREME_WORD.search(q) and not re.search(r"(?i)\b(high|low|average|get|got|was|did)\b", q):
         keep = SAID[:]

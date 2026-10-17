@@ -515,6 +515,11 @@ app.cfg.set_node(pump["id"], {"grow_stage": {"stage": "seedling", "since": _now 
 f = C.focus_facts(hive, "how is node %d doing?" % pump["id"])
 check("SEEDLING mode since" in f and "10 ml in 2 pulses" in f and "germinated after 11 days" in f,
       "seedling mode shows, with how long germination took", f)
+app.cfg.set_node(pump["id"], {"grow_stage": {"stage": "germination", "since": _now, "band": [60.0, 80.0]}})
+_nm = (app.cfg.node(pump["id"]).get("name") or "node %d" % pump["id"])
+_a = C.auto_switch_reply(hive.call("GET", "/api/state")["nodes"], "turn on automatic watering for node %d" % pump["id"], hive)
+check("germination mode" in _a and "twice" in _a and "Nothing was changed" in _a,
+      "switching automatic watering on a germinating node: the admin page, and why it's off", _a)
 app.cfg.set_node(pump["id"], {"grow_stage": None, "plant_band": None, "soil_dry": None, "soil_wet": None})
 # The route: refused without a calibrated probe, then germination -> seedling -> done.
 _sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
