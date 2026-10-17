@@ -587,6 +587,15 @@ check("SEEDS:" in f and "FEELS DRY TO THE PERSON" not in f,
 check(C.scrub_wet_offers(hive, "Would you like me to water the berrytest?") == "Would you like me to water the berrytest?"
       or "doesn't need water" not in C.scrub_wet_offers(hive, "Would you like me to water the berrytest?"),
       "...and an offer to water a germinating pot isn't swapped for 'doesn't need water'")
+check(C.plant({"adaptive": {"on": True}, "grow_stage": {"stage": "germination", "band": [60, 80]}},
+              {"slots": {"49": 1}, "derived": {}}).get("automatic_watering", "").startswith("OFF - germination"),
+      "a germinating pot's automatic watering is said OFF (the timer waters it), whatever the adaptive settings say")
+check(C.plant({"adaptive": {"on": True}}, {"slots": {"49": 0}, "derived": {}}).get("automatic_watering") == "off",
+      "...and otherwise it's the node's own switch")
+for q, hit in (("the strawberry seed pot looks dry on top, give it 10 ml", True), ("it looks dry, water it", True),
+               ("the reservoir is full, water levels are fine", False), ("when it's dry, should I water it?", False),
+               ("the soil is 40%, give it a rest", False)):
+    check(bool(C.REQUEST_CLAUSE.search(q)) == hit, "a watering after a comma is a request: %r -> %s" % (q, hit))
 app.cfg.set_node(pump["id"], {"name": _pname, "grow_stage": None, "seed_mode": None, "plant_band": None,
                               "soil_dry": None, "soil_wet": None})
 # A probe the known issues say is out of the soil reads air: no soil %, a warning, and only while it reads like air.

@@ -315,8 +315,17 @@ def plant(meta, n):
                                      "within target, near the wet end" if pos >= 0.8 else
                                      "within target, near the dry end" if pos <= 0.2 else "within target")
     if "adaptive" in meta:
-        out["automatic_watering"] = "on" if (meta["adaptive"].get("on") and
-                                             not meta["adaptive"].get("user_off")) else "off"
+        # The node's own switch (slot 49) when it reports one: the adaptive settings said "on" for a seed pot whose
+        # watering germination mode had switched off, and the answer said "automatic watering is ON" (2026-10-16).
+        sl = n.get("slots") or {}
+        live = sl.get("49", sl.get(49))
+        if (meta.get("grow_stage") or {}).get("stage") == "germination":
+            out["automatic_watering"] = "OFF - germination mode: the admin's timer waters it instead"
+        elif live is not None:
+            out["automatic_watering"] = "on" if live else "off"
+        else:
+            out["automatic_watering"] = "on" if (meta["adaptive"].get("on") and
+                                                 not meta["adaptive"].get("user_off")) else "off"
     st = meta.get("grow_stage") or {}
     if st.get("stage"):
         out["grow_stage"] = stage_text(st, meta.get("seed_mode"))
@@ -4171,8 +4180,8 @@ def focus_facts(hive, q):
              if sp.get("writable") and int(sid) not in SET_SLOT_BLOCKED]
         # (not when the same message asks for water: "it's bone dry... water it 200 ml" then got no card at all)
         # ("looks dry on top, give it 10 ml" asks for water too: the clause after the comma is the request)
-        asked = (REQUEST.search(q) and re.search(r"(?i)\b(water|pump|give)\b|\bml\b|\bcups?\b", q)) or re.search(
-            r"(?i)[,;:]\s*(please\s+)?(water|give|pump)\b[^.?!]{0,25}\b\d+(\.\d+)?\s*(ml|cups?|tbsp|tablespoons?)\b", q)
+        asked = (REQUEST.search(q) and re.search(r"(?i)\b(water|pump|give)\b|\bml\b|\bcups?\b", q)) or \
+            REQUEST_CLAUSE.search(q)
         if FEELS_DRY.search(q) and stage_name(cfg.get(str(n["id"]))) == "germination":
             out.append("SEEDS: %s is in germination mode - its seeds sit in the top centimetre, so a dry surface matters "
                        "even while the probe, further down, reads wet. Don't send them to check with a skewer. If they "
@@ -4365,6 +4374,11 @@ HISTORY_MARK = re.compile(r"(?i)\b(\d+|once|twice|zero|no|several|many) times?\b
 
 # A request for a change, as opposed to a question: an imperative verb at the start
 # of a sentence, or after "can you / please / go ahead and ...".
+# A watering asked for after a comma: "the strawberry seed pot looks dry on top, give it 10 ml" was taken for a
+# question (REQUEST wants the verb to open a sentence), so it got read-only tools and no card could be made.
+REQUEST_CLAUSE = re.compile(r"(?i)[,;:]\s*(and\s+)?(please\s+)?(water|give|pump)\b[^.?!]{0,30}\b\d+(\.\d+)?\s*"
+                            r"(ml|millilit\w*|cups?|tbsp|tablespoons?|teaspoons?|tsp|oz|ounces?)\b|"
+                            r"[,;:]\s*(and\s+)?(please\s+)?(water|give)\s+(it|them)\b(?! (a )?(rest|break|time|chance)\b)")
 REQUEST = re.compile(r"(?i)(^|[.!?]\s+|\b(can|could|would|will) you\s+|\bplease\s+|\bgo ahead and\s+|"
                      r"\bi (want|need) you to\s+|\bok(ay)?,?\s+|\bjust\s+|\bnow\s+|\bactually,?\s+|\bthen\s+)"
                      r"(water|pump|stop|reboot|restart|reset|set|rename|turn|run|change|add|note|log|mark|give|"
@@ -5017,7 +5031,7 @@ def ask(hive, messages, q, on_tool=None):
     messages.append({"role": "user", "content": q + focus_facts(hive, q)})
     msg, writes, nudged = {}, [], False
     done_writes = set()
-    asking = not REQUEST.search(q)      # a question gets read-only tools
+    asking = not (REQUEST.search(q) or REQUEST_CLAUSE.search(q))      # a question gets read-only tools
     if SYMPTOM.search(q) and not re.search(r"(?i)\b(water|pump|reboot|restart|reset|set|rename|stop|turn|give)\b", q):
         # "the cactus is dying!!! do something" isn't a request for any one action: it had tried a reboot
         asking = True
