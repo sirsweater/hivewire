@@ -922,6 +922,14 @@ def when_dry_reply(hive, st, n):
                     "the next dose waits until it's below %s%%" % skip if skip is not None and soil >= skip else
                     "the next dose is due %s" % ("about %s" % time.strftime("%H:%M", time.localtime(nxt))
                                                  if nxt and nxt > time.time() else "within a minute or two")))
+    if soil is None and PROBE_OUT_WARNING in (n.get("warnings") or []):
+        # "And when will it need water?" about the Rhubarb with its probe in the air: "the last known reading was 4 %,
+        # which indicates that the soil is very dry" (2026-10-17) - that 4 % was air.
+        return ("%s has no reading right now - its probe is out of the soil (%s), so I can't tell when it will need water. "
+                "Readings near 0%% from then on are the probe in the air, not a dry bed. Check the bed with a finger, and "
+                "once the probe is back in, its readings count again." % (
+                    name, re.sub(r"(?i)^.*?(PROBE OUT OF THE SOIL[^.;]*).*$", r"\1", known_issue(n["id"]) or "known issue")
+                    .lower()))
     if soil is None or not band:
         return None
     issue = known_issue(n["id"]) or ""
@@ -4672,7 +4680,7 @@ def scrub_tool_talk(answer):
     chat's own, not the person's. Such sentences go, with a "do that?" question after one."""
     names = "|".join(re.escape(t) for t in TOOLS)
     pat = re.compile(r"(?i)[ \t]*[^.!?\n]*\b(you can use|you could use|use the|I will call|I'll call|call the|"
-                     r"run the|running the|by running|trigger\w*|try the|using the|with the|via the|through the|I can call|"
+                     r"run the|running the|by running|calling|trigger\w*|try the|using the|with the|via the|through the|I can call|"
                      r"I could call|I can run|I could run|call that|run that|"
                      r"use|using)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
@@ -4979,12 +4987,14 @@ def ask(hive, messages, q, on_tool=None):
     if not fixed and (PUMP_RAN_Q.search(q) or WHEN_DRY_Q.search(q)) and not COMMAND.search(q):
         keep = SAID[:]
         SAID[:] = [q]
+        # (a probe out of the soil has no soil % but still gets an answer: that there's no reading)
+        has = lambda n: (n.get("derived") or {}).get("soil") is not None or PROBE_OUT_WARNING in (n.get("warnings") or [])  # noqa: E731
         try:
-            pn = [n for n in nodes if named_by_person(n) and (n.get("derived") or {}).get("soil") is not None]
+            pn = [n for n in nodes if named_by_person(n) and has(n)]
         finally:
             SAID[:] = keep
         if not pn:
-            pn = [n for n in pronoun_nodes(st, q) if (n.get("derived") or {}).get("soil") is not None]
+            pn = [n for n in pronoun_nodes(st, q) if has(n)]
         if len(pn) == 1:
             try:
                 fixed = pump_ran_reply(hive, pn[0], q) if PUMP_RAN_Q.search(q) else when_dry_reply(hive, st, pn[0])
