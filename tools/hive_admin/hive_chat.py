@@ -1075,6 +1075,29 @@ def t_watering_advice(hive, node):
            "hours between waterings": rec.get("hours_between"),
            "recommended change": "%s ml per watering" % rec["ml"] if rec.get("ml") else "none",
            "why": rec.get("why") or r.get("error")}
+    meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
+    st = meta.get("grow_stage") or {}
+    if st.get("stage") == "germination":
+        # (it read the grown plant's 45-75 % and "starts below 45.8 %" off a seed pot whose own watering is off, and
+        # suggested running water_now "to help adaptive watering learn" - 2026-10-17)
+        sm = meta.get("seed_mode") or {}
+        for k in ("automatic amount now", "automatic watering starts when soil falls below", "aims to bring the soil up to",
+                  "recommended change", "hours between waterings"):
+            out.pop(k, None)
+        out["grow stage"] = ("GERMINATION: %s ml every %s h from the admin's timer, given only while the probe reads "
+                             "below %s %%; the node's own automatic watering and its learning are paused" % (
+                                 sm.get("ml", "?"), sm.get("every_h", "?"), sm.get("skip_above", "?")))
+        out["plant's target band"] = "%s-%s %% (the germination stage's range)" % tuple(st["band"]) if st.get("band") \
+            else out.get("plant's target band")
+        out["adaptive watering (adjusts the amount itself)"] = "paused (germination mode)"
+        out["why"] = "germination mode: nothing is learned until the seedling stage - don't suggest a test watering"
+    elif st.get("stage") == "seedling":
+        c = st.get("settings") or {}
+        out["grow stage"] = ("SEEDLING: the node waters %s ml in %s pulses below %s %%, at least %s h apart (set by the "
+                             "Grow stage card; learning paused)" % (c.get("ml"), c.get("pulses"), c.get("below_pct"),
+                                                                    c.get("gap_h")))
+        out["plant's target band"] = "%s-%s %% (the seedling stage's range)" % tuple(st["band"]) if st.get("band") \
+            else out.get("plant's target band")
     return {k: v for k, v in out.items() if v is not None}
 
 
@@ -2830,6 +2853,69 @@ def watered_window(q):
     return 2 * 86400, "in the last 2 days"
 
 
+def watering_events(hive, n, back):
+    """[(ts, ml, how)] for the last `back` seconds: waterings sent from the hive ("water now"), timed doses (germination /
+    seed mode - logged twice, as the dose and as its set, and counted once), pump runs neither explains (automatic),
+    and soil climbs no pump made (by hand or rain; ml None). Oldest first."""
+    t0 = time.time() - back
+    sent, doses = [], []
+    for e in hive.call("GET", "/api/events", {"limit": 3000}) or []:
+        if e.get("ts", 0) < t0:
+            continue
+        m = re.match(r"set %d 40 (\d+) -> ACK" % n["id"], e.get("text", ""))
+        if m and int(m.group(1)) > 0:
+            sent.append([e["ts"], int(m.group(1)), "sent as \"water now\" (from the hive or this chat)"])
+        m = re.match(r"node %d (germination mode|seed mode): (\d+) ml \(" % n["id"], e.get("text", ""))
+        if m:
+            doses.append((e["ts"], int(m.group(2)), "a %s dose" % m.group(1)))
+    for t, ml, how in doses:
+        twin = next((x for x in sent if abs(x[0] - t) <= 60 and x[1] == ml), None)
+        if twin:
+            twin[2] = how
+        else:
+            sent.append([t, ml, how])
+    out = [tuple(x) for x in sent]
+    sid = pumped_slot(hive, n.get("kind")) if has_pump(hive, n.get("kind")) else None
+    for t, ml in (pump_runs(hive, n, sid, days=max(1, int(back // 86400) + 1)) if sid else []):
+        if t >= t0 and not any(0 <= t - x[0] <= 600 for x in sent):
+            out.append((t, ml, "by the pump (automatic or sent)"))
+    try:
+        for a, b, lo, hi in soil_rises(hive, n, int(back // 3600) + 8):
+            if a >= t0:
+                out.append((a, None, "its soil climbed %.0f -> %.0f %% by %s with no pump run - by hand (or rain)" % (
+                    lo, hi, time.strftime("%H:%M", time.localtime(b)))))
+    except RuntimeError:
+        pass
+    return sorted(out)
+
+
+WATER_COUNT_Q = re.compile(r"(?i)\bhow many (times|waterings)\b[^?]*\b(water(ed|ing)?s?|pump(ed)?)\b|"
+                           r"\bhow often\b[^?]*\b(was|has|did)\b[^?]*\bwatered\b")
+
+
+def water_count_reply(hive, nodes, q):
+    """ "How many times was the strawberry watered this week?" got "4 ml... with 13 ml... 9.81 ml per day" (2026-10-17):
+    the waterings in the window, counted and listed in code."""
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+    finally:
+        SAID[:] = keep
+    if len(named) != 1:
+        return None
+    n = named[0]
+    back, words = watered_window(q if re.search(r"(?i)\b(today|last|past|this week)\b", q) else q + " this week")
+    ev = watering_events(hive, n, back)
+    nm = n.get("name") or "node %s" % n["id"]
+    when = lambda t: time.strftime("%a %d %b %H:%M", time.localtime(t))  # noqa: E731
+    if not ev:
+        return "%s wasn't watered %s: no pump run, no watering sent, and no climb in its soil from a hand watering." % (
+            nm, words)
+    return "%s was watered %d time%s %s:\n%s" % (nm, len(ev), "" if len(ev) == 1 else "s", words, "\n".join(
+        "- %s: %s" % (when(t), ("%d ml %s" % (ml, how)) if ml is not None else how) for t, ml, how in ev))
+
+
 def anyone_watered_reply(hive, nodes, q):
     """ "Did anyone water the strawberry in the last 2 days?" got "no manual watering commands were issued" beside two
     10 ml waterings sent at 22:22 and 22:24 (2026-10-16): the pump runs, the waterings sent and any climb a pump didn't
@@ -2845,34 +2931,9 @@ def anyone_watered_reply(hive, nodes, q):
     n = named[0]
     nm = n.get("name") or "node %s" % n["id"]
     back, words = watered_window(q)
-    t0 = time.time() - back
     when = lambda t: time.strftime("%a %d %b %H:%M", time.localtime(t))  # noqa: E731
-    got = []
-    sent = []
-    for e in hive.call("GET", "/api/events", {"limit": 3000}) or []:
-        if e.get("ts", 0) < t0:
-            continue
-        m = re.match(r"set %d 40 (\d+) -> ACK" % n["id"], e.get("text", ""))
-        if m and int(m.group(1)) > 0:
-            sent.append((e["ts"], int(m.group(1)), "sent as \"water now\" (from the hive or this chat)"))
-        m = re.match(r"node %d (germination mode|seed mode): (\d+) ml \(" % n["id"], e.get("text", ""))
-        if m:
-            sent.append((e["ts"], int(m.group(2)), "a %s dose" % m.group(1)))
-    sid = pumped_slot(hive, n.get("kind")) if has_pump(hive, n.get("kind")) else None
-    runs = [r for r in (pump_runs(hive, n, sid, days=max(1, int(back // 86400) + 1)) if sid else []) if r[0] >= t0]
-    for t, ml, how in sorted(sent):
-        got.append("%s ml %s at %s" % (ml, how, when(t)))
-    for t, ml in runs:
-        # a run that follows a sent watering within 10 minutes is that watering, not another one
-        if not any(0 <= t - s[0] <= 600 for s in sent):
-            got.append("%d ml by the pump at %s (automatic or sent)" % (ml, when(t)))
-    try:
-        rises = [r for r in soil_rises(hive, n, int(back // 3600) + 8) if r[0] >= t0]
-    except RuntimeError:
-        rises = []
-    for a, b, lo, hi in rises:
-        got.append("its soil climbed %.0f -> %.0f %% between %s and %s with no pump run - a watering by hand (or rain)" % (
-            lo, hi, when(a), time.strftime("%H:%M", time.localtime(b))))
+    got = [("%s ml %s at %s" % (ml, how, when(t))) if ml is not None else "%s (%s)" % (how, when(t))
+           for t, ml, how in watering_events(hive, n, back)]
     if got:
         return "Yes - %s %s: %s." % (nm, words, "; ".join(got))
     return ("No - nothing %s for %s: no pump run, no watering sent from the hive or this chat, and no climb in its soil "
@@ -4611,7 +4672,8 @@ def scrub_tool_talk(answer):
     chat's own, not the person's. Such sentences go, with a "do that?" question after one."""
     names = "|".join(re.escape(t) for t in TOOLS)
     pat = re.compile(r"(?i)[ \t]*[^.!?\n]*\b(you can use|you could use|use the|I will call|I'll call|call the|"
-                     r"run the|try the|using the|with the|via the|through the|I can call|I could call|I can run|I could run|call that|run that|"
+                     r"run the|running the|by running|trigger\w*|try the|using the|with the|via the|through the|I can call|"
+                     r"I could call|I can run|I could run|call that|run that|"
                      r"use|using)\b[^.!?\n]*`?\b(%s)\b`?[^.!?\n]*[.!?]?"
                      r"(\s*(Would you like (me )?to do that|Shall I do that|Do you want (me )?to do that)\?)?" % names)
     out = pat.sub("", answer)
@@ -5006,6 +5068,11 @@ def ask(hive, messages, q, on_tool=None):
     if not fixed and is_question(q) and SAME_FW_Q.search(q):
         try:
             fixed = firmware_compare_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
+    if not fixed and is_question(q) and WATER_COUNT_Q.search(q):
+        try:
+            fixed = water_count_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
     if not fixed and is_question(q) and ANYONE_WATERED_Q.search(q):

@@ -671,6 +671,30 @@ except Exception as e:
     check(False, "next watering / why no water with a probe out of the soil don't crash", repr(e))
 C.KNOWN_ISSUES_FILE = _old_ki
 
+# A timed dose is logged twice (the dose, and its set): one watering. And "how many times" counts them in code.
+_t = int(_tm.time())
+app.store.event("command", "node %d germination mode: 5 ml (every 6 h until Dec 15)" % pump["id"])
+app.store.event("command", "set %d 40 5 -> ACK set 40=5" % pump["id"])
+_pn2 = app.cfg.node(pump["id"]).get("name")
+app.cfg.set_node(pump["id"], {"name": "Berrytwo"})
+_ev = C.watering_events(hive, next(x for x in hive.call("GET", "/api/state")["nodes"] if x["id"] == pump["id"]), 3600)
+_five = [e for e in _ev if e[1] == 5]
+check(len(_five) == 1 and "germination mode dose" in _five[0][2], "a timed dose logged as dose + set is one watering", _ev)
+a = C.water_count_reply(hive, hive.call("GET", "/api/state")["nodes"], "how many times was the berrytwo watered this week?")
+check(a and re.search(r"was watered \d+ times? in the last 7 days", a) and "germination mode dose" in a,
+      "'how many times was it watered this week?': counted and listed in code", a)
+app.cfg.set_node(pump["id"], {"name": _pn2})
+_j2 = C.scrub_tool_talk("It hasn't learned that yet. If you wish to test this further, you can manually trigger an automatic "
+                        "watering event by running the `water_now` tool. This will help.")
+check("water_now" not in _j2 and "hasn't learned" in _j2, "'by running the `water_now` tool' is removed", _j2)
+app.cfg.set_node(pump["id"], {"grow_stage": {"stage": "germination", "since": _t, "band": [60.0, 80.0]},
+                              "seed_mode": {"ml": 5, "every_h": 6, "until": _t + 86400, "stage": "germination",
+                                            "skip_above": 80.0}, "soil_dry": 4000, "soil_wet": 1000})
+_adv = C.t_watering_advice(hive, str(pump["id"]))
+check(_adv.get("grow stage", "").startswith("GERMINATION") and "automatic watering starts when soil falls below" not in _adv
+      and "germination stage" in _adv.get("plant's target band", ""), "the advice tool in germination: the stage, not the grown plant", _adv)
+app.cfg.set_node(pump["id"], {"grow_stage": None, "seed_mode": None, "soil_dry": None, "soil_wet": None})
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send
