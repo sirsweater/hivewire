@@ -753,6 +753,10 @@ finally:
 check(a and a.startswith("Drier: Seedpot's probe read 70% 47 hours ago") and "down 9 points" in a,
       "wetter or drier: from 48 h of readings", a)
 
+a = C.per_ml_reply(hive, pump, "how much does 10 ml raise its soil?")
+check(a and ("isn't known" in a or "has learned" in a) and "not possible through this chat" not in a,
+      "how much 10 ml raises the soil: learned, or why not yet - in code", a)
+
 # A germinating pot over its top isn't a to-do: germination mode is holding its doses.
 _n = {"id": pump["id"], "name": "Seedpot", "kind": "WaterNode", "derived": {"soil": 85.0}, "warnings": []}
 _orig, _orig_stage = C.band_of, C.stage_name

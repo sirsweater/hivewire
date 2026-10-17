@@ -3161,6 +3161,34 @@ def predict_reply(hive, n, q):
         "from automatic waterings). The soil reads %.0f %% now%s." % (name, soil, " (target %s)" % band if band else ""))
 
 
+def per_ml_reply(hive, n, q):
+    """ "How much does 10 ml of water raise the strawberry's soil moisture?" got "manual watering adjustments ... not
+    possible through this chat" (hive-full23) - watering IS this chat's job. What adaptive watering has learned, or why
+    nothing yet."""
+    a = t_watering_advice(hive, str(n["id"]))
+    name = n.get("name") or "node %s" % n["id"]
+    gain = a.get("soil rise per 10 ml")
+    m = re.search(r"(?i)(\d+(?:\.\d+)?)\s*(ml|millilit\w*)\b", q)
+    ml = float(m.group(1)) if m else 10.0
+    if gain:
+        try:
+            rise = float(gain.split()[0]) * ml / 10.0
+        except ValueError:
+            rise = None
+        return ("From what adaptive watering has learned, 10 ml raises %s's soil about %s%s, once it soaks in." % (
+            name, gain, "" if ml == 10 or rise is None else " - so %g ml about %.0f points" % (ml, rise)))
+    meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
+    if stage_name(meta) == "germination":
+        sm = meta.get("seed_mode") or {}
+        return ("That isn't known for %s yet. Adaptive watering learns how far a watering lifts the soil from the node's "
+                "own automatic waterings, and in germination mode those are off - the admin gives it %s ml doses on a "
+                "timer instead - so it starts learning in seedling mode." % (name, sm.get("ml", "small")))
+    why = re.sub(r"^learning: (\d+ of \d+) automatic waterings seen", r"has seen \1 automatic waterings",
+                 a.get("why") or "hasn't seen enough automatic waterings")
+    return ("That isn't known for %s yet: adaptive watering learns how far a watering lifts the soil from its automatic "
+            "waterings, and it %s." % (name, why))
+
+
 def hand_watering_fact(hive, n):
     """The Cactus has no pump; "when was it last watered?" can only be a jump in its soil."""
     pts = soil_series(hive, n, 24 * 14)
@@ -5065,6 +5093,9 @@ def ask(hive, messages, q, on_tool=None):
         try:
             if RAIN_RECORD_Q.search(q) and not plants_named:
                 fixed = rain_record_reply(hive, st, q)
+            elif PER_ML_Q.search(q) and len(plants_named) == 1 and has_pump(hive, plants_named[0].get("kind")) and \
+                    not PREDICT_Q.search(q):
+                fixed = per_ml_reply(hive, plants_named[0], q)
             elif PREDICT_Q.search(q) and len(plants_named) == 1:
                 fixed = predict_reply(hive, plants_named[0], q)
             elif WEATHER_Q.search(re.sub(r"(?i)\bweather (station|node)\b", "", q)) and NOW_WORD.search(q) and \
