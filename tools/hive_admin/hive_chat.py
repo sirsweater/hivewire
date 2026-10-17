@@ -384,6 +384,13 @@ def adjust_reply(path, obj):
     return obj
 
 
+def lead_num(s):
+    """The number a reading's text starts with ("83.0 %" -> 83.0), or None for one in words ("no reading - the
+    probe is out of the soil", "not calibrated")."""
+    m = re.match(r"\s*(-?\d+(?:\.\d+)?)", str(s or ""))
+    return float(m.group(1)) if m else None
+
+
 def known_issue(nid):
     """Faults the hive can't see for itself, from the site's known-issues file
     (JSON {"node id": "text"}; edit it freely)."""
@@ -2175,8 +2182,11 @@ def next_watering(hive, n):
                 n.get("name") or "node %s" % n["id"], "on" if auto else "OFF" if auto == 0 else "set on the node",
                 below, a.get("automatic amount now", "its automatic amount"), a.get("soil moisture now"),
                 a.get("plant's target band", "not set"),
-                ", so not yet" if a.get("soil moisture now") and float(a["soil moisture now"].split()[0]) > float(
-                    below.split()[0]) else ", so it's due now",
+                # (a reading in words - "no reading - the probe is out of the soil" - crashed this, 2026-10-17)
+                ", so not yet" if lead_num(a.get("soil moisture now")) is not None and lead_num(below) is not None and
+                lead_num(a["soil moisture now"]) > lead_num(below) else
+                ", so it's due now" if lead_num(a.get("soil moisture now")) is not None and lead_num(below) is not None
+                else "",
                 (" Over the last 7 days the soil went from %s to %s." % (pts[0]["avg"], pts[-1]["avg"])) if len(pts) > 1 else ""))
 
 
@@ -2537,7 +2547,9 @@ def why_no_water(hive, n):
     pts = soil_series(hive, n, 168)
     if not below or not pts:
         return None
-    b = float(below.split()[0])
+    b = lead_num(below)
+    if b is None:
+        return None
     low = min(p[2] for p in pts)
     auto = (n.get("slots") or {}).get("49")
     name = n.get("name") or "node %s" % n["id"]

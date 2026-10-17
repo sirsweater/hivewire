@@ -657,6 +657,20 @@ check(("probe is out of the soil" in a and "known fault" in a) or a == "",
       "'water every plant': a plant with its probe out is listed with why, not dropped", a)
 C.KNOWN_ISSUES_FILE = _old_ki2
 
+check(C.lead_num("83.0 %") == 83.0 and C.lead_num("-2.5 C") == -2.5 and C.lead_num("no reading - the probe is out") is None
+      and C.lead_num(None) is None, "a reading's number, or None for one in words")
+C.KNOWN_ISSUES_FILE = _kf
+_n_out = dict(next(x for x in hive.call("GET", "/api/state")["nodes"] if x["id"] == pump["id"]))
+_n_out["derived"] = dict(_n_out.get("derived") or {}, soil=None)
+_n_out["warnings"] = list(_n_out.get("warnings") or []) + [C.PROBE_OUT_WARNING]
+try:
+    C.next_watering(hive, _n_out)
+    C.why_no_water(hive, _n_out)
+    check(True, "next watering / why no water with a probe out of the soil don't crash")
+except Exception as e:
+    check(False, "next watering / why no water with a probe out of the soil don't crash", repr(e))
+C.KNOWN_ISSUES_FILE = _old_ki
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send
