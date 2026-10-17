@@ -366,7 +366,9 @@ def stage_text(st, sm=None):
 
 # A known-issues entry that says the probe is out of the soil (Gregory pulled the Rhubarb's on 2026-10-16 to
 # dry and seal it): its ~2 % is air, and "which plant needs water most urgently?" answered "the Rhubarb, at 2 %".
-PROBE_OUT = re.compile(r"(?i)\bPROBE OUT OF THE SOIL\b")
+# (capitals only - the marker the known-issues convention uses: the Cactus's note mentions "the probe out of the soil"
+# during its repot, a past event, and a dry cactus near 5 % would have been taken for a probe in the air)
+PROBE_OUT = re.compile(r"\bPROBE OUT OF THE SOIL\b")
 PROBE_OUT_WARNING = "probe out of the soil (known issue) - no reading of the pot"
 
 
@@ -2456,6 +2458,58 @@ def soil_series(hive, n, hours, res="hour"):
     pct = lambda raw: max(0.0, min(100.0, 100.0 * (dry - raw) / (dry - wet)))  # noqa: E731
     return [(x["ts"], pct(x["avg"]), pct(x["max"]), pct(x["min"])) for x in rows
             if None not in (x.get("avg"), x.get("min"), x.get("max"))]
+
+
+# "Is the strawberry getting wetter or drier?" was answered from the current reading alone ("getting wetter than
+# desired" at 81 %) while it had been drying (hive-full23, 2026-10-17). The last 48 hours, from the readings.
+WET_DRY_Q = re.compile(r"(?i)\b(getting|gotten|going|becoming|been getting|growing)\s+(wetter|drier|dryer|more (wet|dry)|"
+                       r"less (wet|dry))\b|\b(wetter|drier|dryer) or (wetter|drier|dryer)\b|\b(drying|draining) (out|up)\b|"
+                       r"\bis\b[^?]*\b(drying|draining)\b")
+WET_DRY_NOT = re.compile(r"(?i)\b(how (fast|quickly|long|soon)|fastest|slowest|which|when|rate|per (hour|day)|should i|"
+                         r"since yesterday|last week|this week|month)\b")
+
+
+def wet_dry_reply(hive, n):
+    """Wetter, drier or steady over the last 48 h (hour averages: the first hour against the last), or None."""
+    name = n.get("name") or "node %s" % n["id"]
+    if PROBE_OUT_WARNING in (n.get("warnings") or []) or PROBE_OUT.search(known_issue(n["id"]) or ""):
+        return "%s's probe is out of the soil, so its readings are air - there's no wetter or drier to read from them." % name
+    pts, cut = settled(soil_series(hive, n, 48))
+    if len(pts) < 6:
+        if cut:
+            return ("Too soon to say for %s: its probe was out of the soil %s (a repot or a new probe), and there are only "
+                    "%d hours of readings since." % (name, time.strftime("%a %d %b %H:%M", time.localtime(cut)), len(pts)))
+        return None
+    now, first = pts[-1][1], pts[0][1]
+    t24 = time.time() - 86400
+    mid = min(pts, key=lambda p_: abs(p_[0] - t24))
+    d = round(now) - round(first)       # (as the readings are shown: 83 % to 81 % is 2 points, not "within 1")
+    hrs = max(1.0, (pts[-1][0] - pts[0][0]) / 3600.0)
+    seen = "%.0f%% %d hours ago, %.0f%% 24 hours ago and %.0f%% now" % (first, round(hrs), mid[1], now) if \
+        abs(mid[0] - t24) < 3 * 3600 and hrs >= 30 else "%.0f%% %d hours ago and %.0f%% now" % (first, round(hrs), now)
+    # (the Cactus's old probe read 80-92 % in a pot that wasn't that wet; its new one went in Oct 16 ~15:00)
+    cut_note = (" (Its probe went back in the soil %s - a repot or a new probe - so earlier readings don't compare.)" %
+                time.strftime("%a %d %b %H:%M", time.localtime(cut))) if cut else ""
+    if d <= -3:
+        lead = "Drier: %s's probe read %s - down %.0f points." % (name, seen, -d)
+    elif d >= 3:
+        lead = "Wetter: %s's probe read %s - up %.0f points." % (name, seen, d)
+    else:
+        lead = "Holding steady: %s's probe read %s - %s." % (name, seen, "no change" if d == 0 else "%d point%s %s" % (
+            abs(d), "" if abs(d) == 1 else "s", "lower" if d < 0 else "higher"))
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    meta = cfg.get(str(n["id"])) or {}
+    band = band_of(meta)
+    if band:
+        if stage_name(meta) == "germination" and now > band[1]:
+            lead += " Germination mode is holding its doses until it reads below %s%%." % band[1]
+        elif now > band[1]:
+            lead += " That's above its %s-%s%% band." % (band[0], band[1])
+        elif now < band[0]:
+            lead += " That's below its %s-%s%% band." % (band[0], band[1])
+        else:
+            lead += " That's inside its %s-%s%% band." % (band[0], band[1])
+    return lead + cut_note
 
 
 def soil_rises(hive, n, hours=24 * 14):
@@ -5117,6 +5171,18 @@ def ask(hive, messages, q, on_tool=None):
                                                                                          m_.group(1)), fixed)
             if "Gust" in fixed or "Wind" in fixed:
                 fixed += " (A gust is the strongest 10-minute burst; the wind figure is a 2-minute average.)"
+    if not fixed and WET_DRY_Q.search(q) and not WET_DRY_NOT.search(q) and is_question(q) and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            wn2 = [n for n in nodes if named_by_person(n) and n.get("kind") != "WeatherNode"]
+        finally:
+            SAID[:] = keep
+        if len(wn2) == 1:
+            try:
+                fixed = wet_dry_reply(hive, wn2[0])
+            except RuntimeError:
+                fixed = None
     if not fixed and TREND_Q.search(q) and not COMMAND.search(q):
         keep = SAID[:]
         SAID[:] = [q]

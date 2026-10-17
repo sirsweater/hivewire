@@ -741,6 +741,18 @@ check(C.split_questions("is the barometric pressure dropping? feels like a storm
       len(C.split_questions("how wet is the cactus? is it going to rain tomorrow?")) == 2,
       "a remark after a question isn't split off as a second question; a second question still is")
 
+check(not C.PROBE_OUT.search("Readings of 2-4% at 19:48-20:04 that evening were the probe out of the soil.") and
+      C.PROBE_OUT.search("PROBE OUT OF THE SOIL since 2026-10-16 19:13"), "only the capitalised marker means the probe is out now")
+_orig_series = C.soil_series
+_now = H.now()
+C.soil_series = lambda hive_, n_, hours, res="hour": [(_now - (47 - i) * 3600, 70.0 - i * 0.2, 69.0 - i * 0.2, 71.0 - i * 0.2) for i in range(48)]
+try:
+    a = C.wet_dry_reply(hive, {"id": pump["id"], "name": "Seedpot", "warnings": []})
+finally:
+    C.soil_series = _orig_series
+check(a and a.startswith("Drier: Seedpot's probe read 70% 47 hours ago") and "down 9 points" in a,
+      "wetter or drier: from 48 h of readings", a)
+
 # A germinating pot over its top isn't a to-do: germination mode is holding its doses.
 _n = {"id": pump["id"], "name": "Seedpot", "kind": "WaterNode", "derived": {"soil": 85.0}, "warnings": []}
 _orig, _orig_stage = C.band_of, C.stage_name
