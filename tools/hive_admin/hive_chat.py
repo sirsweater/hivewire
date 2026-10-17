@@ -2897,6 +2897,40 @@ def watering_events(hive, n, back):
     return sorted(out)
 
 
+PUMPED_DAY_Q = re.compile(r"(?i)\bhow much\b[^?]{0,40}\b(water|ml|pumped)\b[^?]{0,40}\b(last|past|previous)\s+(24 ?h(ours)?|day)\b|"
+                          r"\bhow much\b[^?]{0,40}\b(water|ml)\b[^?]{0,30}\btoday\b")
+
+
+def pumped_day_reply(hive, nodes, q):
+    """ "How much water has the strawberry had in the last 24 hours?" got "9 to 13 ml... about 9.81 ml per hour" off the
+    pumped-in-24-h counter's hourly history (2026-10-17). The node's own count is the answer, with what was sent beside it
+    - and why the two can differ (a restart wipes the count)."""
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+    finally:
+        SAID[:] = keep
+    if len(named) != 1:
+        return None
+    n = named[0]
+    sid = pumped_slot(hive, n.get("kind"))
+    own = (n.get("slots") or {}).get(sid) if sid else None
+    if own is None:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    ev = [e for e in watering_events(hive, n, 86400) if e[1] is not None]
+    when = lambda t: time.strftime("%a %H:%M", time.localtime(t))  # noqa: E731
+    out = "%s's pump has delivered %d ml in the last 24 hours (the node's own count)." % (nm, own)
+    if ev:
+        sent = sum(ml for _, ml, how in ev if "pump (automatic" not in how)
+        out += " Waterings in that time: %s." % "; ".join("%d ml %s at %s" % (ml, how, when(t)) for t, ml, how in ev)
+        if sent > own + 3:
+            out += (" The count is lower than what was sent because the node restarted in between - a restart starts its "
+                    "24-hour count again.")
+    return out
+
+
 WATER_COUNT_Q = re.compile(r"(?i)\bhow many (times|waterings)\b[^?]*\b(water(ed|ing)?s?|pump(ed)?)\b|"
                            r"\bhow often\b[^?]*\b(was|has|did)\b[^?]*\bwatered\b")
 
@@ -5078,6 +5112,13 @@ def ask(hive, messages, q, on_tool=None):
     if not fixed and is_question(q) and SAME_FW_Q.search(q):
         try:
             fixed = firmware_compare_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
+    # (not "how much MORE can it get today?" - that's the allowance left, its own answer)
+    if not fixed and is_question(q) and PUMPED_DAY_Q.search(q) and not re.search(
+            r"(?i)\bhow much more\b|\b(left|remaining|allowance|room)\b|\bcan (it|they|I|we) (get|have|take|give)\b", q):
+        try:
+            fixed = pumped_day_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
     if not fixed and is_question(q) and WATER_COUNT_Q.search(q):

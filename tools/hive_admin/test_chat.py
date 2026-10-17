@@ -695,6 +695,11 @@ check(_adv.get("grow stage", "").startswith("GERMINATION") and "automatic wateri
       and "germination stage" in _adv.get("plant's target band", ""), "the advice tool in germination: the stage, not the grown plant", _adv)
 app.cfg.set_node(pump["id"], {"grow_stage": None, "seed_mode": None, "soil_dry": None, "soil_wet": None})
 
+check(C.PUMPED_DAY_Q.search("how much water has the strawberry had in the last 24 hours?") and
+      not C.PUMPED_DAY_Q.search("how much water has the strawberry had this week?"), "the 24-hour water question, not the week's")
+a = C.pumped_day_reply(hive, hive.call("GET", "/api/state")["nodes"], "how much water has node %d had in the last 24 hours?" % pump["id"])
+check(a is None or "the node's own count" in a, "...answered from the node's own 24-hour count", a)
+
 # --- troubleshooting: live until Stop or the page goes quiet ------------------------
 _sends = []
 _real_send = app.trouble_send
