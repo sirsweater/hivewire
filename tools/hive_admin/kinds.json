@@ -108,7 +108,7 @@
     "label": "Action",
     "writable": true,
     "min": 0,
-    "max": 5,
+    "max": 7,
     "action": true
    },
    "23": {
@@ -285,7 +285,7 @@
     "label": "Action",
     "writable": true,
     "min": 0,
-    "max": 5,
+    "max": 7,
     "action": true
    },
    "23": {
@@ -463,7 +463,7 @@
     "label": "Action",
     "writable": true,
     "min": 0,
-    "max": 5,
+    "max": 7,
     "action": true
    },
    "23": {
@@ -900,7 +900,7 @@
     "label": "Action",
     "writable": true,
     "min": 0,
-    "max": 5,
+    "max": 7,
     "action": true
    },
    "23": {
@@ -1199,7 +1199,7 @@
     "label": "Action",
     "writable": true,
     "min": 0,
-    "max": 5,
+    "max": 7,
     "action": true
    },
    "23": {
@@ -1481,7 +1481,7 @@
     "label": "Action",
     "writable": true,
     "min": 0,
-    "max": 5,
+    "max": 7,
     "action": true
    },
    "23": {

@@ -496,6 +496,90 @@ h.route_post("/api/fieldcap", {})
 app.cfg.set_node(pump["id"], {"plant_band": None})
 check(not app.cfg.node(pump["id"]).get("soil_fc"), "...and cleared")
 
+# --- grow stages reach the chat ----------------------------------------------------
+_now = int(_tm.time())
+app.cfg.set_node(pump["id"], {"plant_band": [45, 75], "soil_dry": 4000, "soil_wet": 1000,
+                              "grow_stage": {"stage": "germination", "since": _now - 2 * 86400, "band": [60.0, 80.0]},
+                              "seed_mode": {"ml": 5, "every_h": 6, "until": _now + 86400, "stage": "germination",
+                                            "skip_above": 80.0, "skipping": True}})
+f = C.focus_facts(hive, "how is node %d doing?" % pump["id"])
+check("GERMINATION mode since" in f and "(day 3)" in f and "5 ml every 6 h" in f and "on hold right now" in f,
+      "germination mode shows beside a question about the node, with its day and the hold", f)
+check("target 60.0-80.0 %" in f and "germination stage's range" in f and "45-75 %" in f,
+      "...and its range stands in for the grown plant's band", f)
+check("seed mode: ON" not in f, "...not also as plain seed mode", f)
+app.cfg.set_node(pump["id"], {"grow_stage": {"stage": "seedling", "since": _now - 86400, "band": [55.0, 75.0],
+                                             "germinated_at": _now - 86400, "germination_since": _now - 12 * 86400,
+                                             "settings": {"below_pct": 55.0, "ml": 10, "gap_h": 3.0, "day_ml": 60, "pulses": 2}},
+                              "seed_mode": None})
+f = C.focus_facts(hive, "how is node %d doing?" % pump["id"])
+check("SEEDLING mode since" in f and "10 ml in 2 pulses" in f and "germinated after 11 days" in f,
+      "seedling mode shows, with how long germination took", f)
+app.cfg.set_node(pump["id"], {"grow_stage": None, "plant_band": None, "soil_dry": None, "soil_wet": None})
+# The route: refused without a calibrated probe, then germination -> seedling -> done.
+_sl = app.poller.snapshot["nodes"][pump["id"]]["slots"]
+_had = {k: _sl.get(k) for k in (40, 49)}
+_sl.setdefault(40, 0)
+_sl.setdefault(49, 1)
+h = H._Capture(app, {"node": pump["id"], "stage": "germination"})
+try:
+    h.route_post("/api/stage", {})
+    _err = None
+except ValueError as e:
+    _err = str(e)
+check(_err and "calibrate" in _err and not app.cfg.node(pump["id"]).get("grow_stage"),
+      "germination is refused without a calibrated probe", _err)
+app.cfg.set_node(pump["id"], {"soil_dry": 4000, "soil_wet": 1000})
+h = H._Capture(app, {"node": pump["id"], "stage": "germination", "ml": 4})
+h.route_post("/api/stage", {})
+check(h.out[0].get("ok") and app.cfg.node(pump["id"])["grow_stage"]["stage"] == "germination" and
+      app.cfg.node(pump["id"])["seed_mode"]["ml"] == 4, "the stage route starts germination", h.out)
+check(app.auto_defaults(pump["id"], {42: 95}) == [], "...and the admin's default switch-on leaves it alone")
+h = H._Capture(app, {"node": pump["id"], "stage": "seedling", "below_pct": 50})
+h.route_post("/api/stage", {})
+check(h.out[0].get("ok") and app.cfg.node(pump["id"])["grow_stage"]["stage"] == "seedling" and
+      not app.cfg.node(pump["id"]).get("seed_mode"), "...then seedling", h.out)
+h = H._Capture(app, {"node": pump["id"], "stage": "done"})
+h.route_post("/api/stage", {})
+check(h.out[0].get("ok") and not app.cfg.node(pump["id"]).get("grow_stage"), "...then done", h.out)
+app.cfg.set_node(pump["id"], {"soil_dry": None, "soil_wet": None, "adaptive": None})
+for _k, _v in _had.items():
+    if _v is None:
+        _sl.pop(_k, None)
+
+# --- troubleshooting: live until Stop or the page goes quiet ------------------------
+_sends = []
+_real_send = app.trouble_send
+app.trouble_send = lambda nid, v: (_sends.append((nid, v)), True)[1]
+_t = H.now()
+h = H._Capture(app, {"node": pump["id"], "action": "start"})
+h.route_post("/api/troubleshoot", {})
+r = h.out[0]
+check(r["on"] and r["node"] and r["node"]["id"] == pump["id"] and "changed" in r and _sends == [(pump["id"], 6)],
+      "troubleshoot starts: the node is told to report fast (Action 6) and the view comes back", (r.get("on"), _sends))
+check(app.poller.fast_until > _t, "...and the Pi polls the gateway fast")
+app.troubleshoot(pump["id"], "ping", t=_t + 30)
+check(len(_sends) == 1, "a ping within a minute doesn't re-send", _sends)
+app.troubleshoot(pump["id"], "ping", t=_t + 65)
+check(len(_sends) == 2 and _sends[-1] == (pump["id"], 6), "...a minute on, the keep-alive goes again", _sends)
+r = app.troubleshoot(pump["id"], "ping", t=_t + 65 + app.TROUBLE_IDLE_S + 5)
+check(not r["on"] and app.poller.fast_until == 0 and len(_sends) == 2,
+      "no pings for two minutes (page closed): it ends, and the Pi polls at its normal pace again", r.get("on"))
+app.troubleshoot(pump["id"], "start")
+r = app.troubleshoot(pump["id"], "stop")
+check(not r["on"] and _sends[-1] == (pump["id"], 7) and not app.trouble, "Stop ends it and tells the node (Action 7)", _sends)
+try:
+    H._Capture(app, {"node": pump["id"], "action": "reboot"}).route_post("/api/troubleshoot", {})
+    check(False, "the troubleshoot route only takes start, ping or stop")
+except ValueError:
+    check(True, "the troubleshoot route only takes start, ping or stop")
+app.trouble_send = _real_send
+
+for q, hit in (("start germination mode on the strawberry", True), ("switch node 7 to seedling mode", True),
+               ("how long do strawberry seeds take to germinate?", False)):
+    a = next((r for pat, r in C.FIXED_REPLIES if pat.search(q)), None)
+    check(bool(a and "Grow stage card" in a) == hit, "grow stage request %r: %s" % (q, "admin page" if hit else "answered"), a)
+
 for q, hit in (("turn on seed mode for the larkspur", True), ("stop seed mode on node 7", True),
                ("save the cactus field capacity", True), ("what is seed mode?", False),
                ("is seed mode on for the larkspur?", False)):

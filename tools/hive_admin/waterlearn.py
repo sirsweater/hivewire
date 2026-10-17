@@ -258,6 +258,8 @@ class WaterLearner:
             conf = (self.cfg_node(nid).get("adaptive") or {})
             if not slots.get(49):
                 continue
+            if self.cfg_node(nid).get("grow_stage"):
+                continue                    # germinating or a seedling: the stage sets its watering (potcare.py)
             if conf.get("from_plant"):
                 want = self.below_raw_for_plant(nid)
                 dry, wet, _ = self.calibration(nid)

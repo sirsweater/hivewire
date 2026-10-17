@@ -49,7 +49,8 @@ sys.path.insert(0, HERE)
 from rollup import (Rollup, RollupThread, hour_floor, slot_gates_from_kind,  # noqa: E402
                     slot_modes_from_kind)
 from waterlearn import LearnThread, WaterLearner  # noqa: E402
-from potcare import SeedMode, SeedThread, analyze_soak, scaled_band  # noqa: E402
+import potcare  # noqa: E402
+from potcare import GrowStages, SeedMode, SeedThread, analyze_soak, scaled_band  # noqa: E402
 from forecasts import Forecasts, ForecastThread  # noqa: E402
 from streamplant import StreamPlant  # noqa: E402
 import hive_chat  # noqa: E402
@@ -561,6 +562,7 @@ def scrub(text):
 # ---------------------------------------------------------------------------
 class Poller(threading.Thread):
     daemon = True
+    FAST_POLL_S = 2
 
     def __init__(self, gw, store, cfg):
         super().__init__()
@@ -570,6 +572,13 @@ class Poller(threading.Thread):
         self.last_logged = {}           # (node, slot) -> (value, ts)
         self.wake = threading.Event()
         self.seen_nodes = set()
+        # Troubleshooting (App.troubleshoot): poll every FAST_POLL_S until this
+        # time, so a person watching the page sees a moved wire within seconds.
+        self.fast_until = 0
+        self.seen_val = {}              # (node, slot) -> last value in a dump, plausible or not
+        self.changed_at = {}            # (node, slot) -> when that value last changed
+        self.reports = {}               # node -> recent report times (from the gateway's ages)
+        self.fail_since = None
         # Writes the gateway acknowledged but no node has confirmed yet. The
         # gateway's ACK only means it SENT the write: one broadcast, which a
         # node at the edge of range misses often enough to matter (a soak
@@ -652,7 +661,8 @@ class Poller(threading.Thread):
                 print("%s poll: %s" % (time.strftime("%H:%M:%S"), self.last_error or "ok"),
                       flush=True)
                 reported = self.last_error
-            self.wake.wait(max(5, self.cfg.data.get("poll_seconds", 60)))
+            fast = time.time() < self.fast_until
+            self.wake.wait(self.FAST_POLL_S if fast else max(5, self.cfg.data.get("poll_seconds", 60)))
             self.wake.clear()
 
     def note_problems(self):
@@ -667,10 +677,13 @@ class Poller(threading.Thread):
         self.problems.clear(602)
         if not err:
             self.fails = 0
+            self.fail_since = None
             self.problems.clear(601)
         elif "another tool" not in err and "push" not in err:
             self.fails += 1
-            if self.fails >= 3:
+            self.fail_since = self.fail_since or time.time()
+            # Polling fast, three misses are seconds apart: a hiccup, not a missing gateway.
+            if self.fails >= 3 and (time.time() >= self.fast_until or time.time() - self.fail_since >= 60):
                 self.problems.raise_(601, "%d polls in a row failed: %s" % (self.fails, err))
 
     def poll(self):
@@ -715,6 +728,16 @@ class Poller(threading.Thread):
             # three hours still showed "last heard 3 min ago" and its frozen
             # readings were uploaded as current. Nothing from a quiet node is
             # new, so store nothing; the page still shows it, marked stale.
+            heard = t - rec["age"]
+            seen = self.reports.setdefault(nid, [])
+            if not seen or heard - seen[-1] > 1:
+                seen.append(heard)
+                del seen[:-8]
+            for sid, v in rec["slots"].items():
+                key = (nid, sid)
+                if key in self.seen_val and self.seen_val[key] != v:
+                    self.changed_at[key] = t
+                self.seen_val[key] = v
             if rec["age"] > stale:
                 continue
             for sid, v in list(rec["slots"].items()) + [(HOPS_SLOT, rec["hops"])]:
@@ -1381,7 +1404,12 @@ class App:
         # action: sent once, never re-sent like a setting.
         self.seed = None if self.flash_only else SeedMode(
             self.cfg, self.send_action, self.node_live, self.store.event,
-            slots=lambda nid: ((self.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {})
+            slots=lambda nid: ((self.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {},
+            soil=self.soil_now)
+        self.trouble, self.trouble_lock = {}, threading.Lock()
+        # Germination, then seedling, then the plant's own watering (potcare.py).
+        self.stages = None if self.flash_only else GrowStages(
+            self.cfg, self.seed, self.stage_auto, self.store.event, learn_from=self.learn_from)
         # Public model forecasts saved next to what the station measures, and
         # scored against it (forecasts.py). Off until the config has a place.
         # A plant on a Twitch stream that viewers can water (streamplant.py).
@@ -1522,7 +1550,7 @@ class App:
         Water below the plant's low end (or 40%), 100 ml, 6 h apart, at most
         600 ml a day. Returns the writes made, for the log."""
         conf = self.adaptive_node(nid)["adaptive"]
-        if conf.get("user_off") or slots.get(49) or not slots.get(42):
+        if conf.get("user_off") or slots.get(49) or not slots.get(42) or self.cfg.node(nid).get("grow_stage"):
             return []
         dry, wet, calibrated = self.calibration(nid)
         if not calibrated:
@@ -1665,6 +1693,111 @@ class App:
 
     def node_live(self, nid):
         return nid in ((self.poller.snapshot or {}).get("nodes") or {})
+
+    # --- troubleshooting: a node page that watches one node live ---------------
+    # The page pings every couple of seconds while it is open and visible. Each
+    # ping keeps the Pi polling the gateway fast and, every TROUBLE_RESEND_S,
+    # tells the node to keep reporting fast (Action 6: the node does it for
+    # three minutes, then falls back by itself). No timer: it ends when the
+    # person presses Stop, or TROUBLE_IDLE_S after the last ping (the page was
+    # closed, hidden or the phone locked). Nothing here persists.
+    TROUBLE_IDLE_S = 120
+    TROUBLE_RESEND_S = 60
+    ACTION_SLOT, TROUBLE_ON, TROUBLE_OFF = 22, 6, 7
+
+    def troubleshoot(self, nid, action, t=None):
+        t = t or now()
+        with self.trouble_lock:
+            for k, v in list(self.trouble.items()):
+                if t - v["ping"] > self.TROUBLE_IDLE_S:
+                    self.trouble.pop(k)
+                    self.store.event("command", "node %d troubleshooting ended: its page went quiet" % k)
+            s = self.trouble.get(nid)
+            if action == "stop":
+                if s:
+                    self.trouble.pop(nid)
+                    self.store.event("command", "node %d troubleshooting stopped" % nid)
+                self.trouble_send(nid, self.TROUBLE_OFF)
+            elif action == "start" or (action == "ping" and s):
+                if not s:
+                    s = self.trouble[nid] = {"since": t, "sent": 0, "acked": False}
+                    self.store.event("command", "node %d troubleshooting started" % nid)
+                s["ping"] = t
+                if t - s["sent"] >= self.TROUBLE_RESEND_S:
+                    s["acked"] = self.trouble_send(nid, self.TROUBLE_ON) or s["acked"]
+                    s["sent"] = t
+                if action == "start":
+                    self.poller.wake.set()
+            if any(t - v["ping"] <= self.TROUBLE_IDLE_S for v in self.trouble.values()):
+                self.poller.fast_until = t + self.TROUBLE_IDLE_S
+            else:
+                self.poller.fast_until = 0
+        return self.trouble_view(nid, t)
+
+    def trouble_send(self, nid, value):
+        """One write of the Action slot, not tracked or logged as a command:
+        it repeats every minute while the page is open, and a missed one only
+        means slower reports until the next."""
+        ack = self.gw.command("set %d %d %d" % (nid, self.ACTION_SLOT, value), r"ACK set|ERR")
+        return bool(ack and ack.startswith("ACK"))
+
+    def trouble_view(self, nid, t=None):
+        t = t or now()
+        s = self.trouble.get(nid)
+        st = self.state()
+        n = next((x for x in st["nodes"] if x["id"] == nid), None)
+        out = {"on": bool(s), "since": s["since"] if s else None, "node": n, "time": t,
+               "fast_polling": t < self.poller.fast_until}
+        if n:
+            out["changed"] = {str(sid): (round(t - self.poller.changed_at[(nid, sid)])
+                                         if (nid, sid) in self.poller.changed_at else None)
+                              for sid in n["slots"]}
+            seen = self.poller.reports.get(nid) or []
+            gaps = sorted(b - a for a, b in zip(seen, seen[1:]))
+            # The typical gap between the node's last few reports: about 5 s once
+            # its fast reports are on; its normal pace otherwise.
+            out["report_every"] = round(gaps[len(gaps) // 2]) if gaps else None
+        return out
+
+    def soil_now(self, nid):
+        """The probe's moisture % in the latest report, or None when it can't be
+        trusted: no calibration, or a raw value no probe in soil gives (0 is an
+        unplugged probe, not a flooded pot)."""
+        slots = ((self.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {}
+        raw = slots.get(3)
+        dry, wet, calibrated = self.calibration(nid)
+        if raw is None or not calibrated or not 200 < raw < 4000:
+            return None
+        return soil_pct(raw, dry, wet)
+
+    def learn_from(self, nid, ts):
+        conf = dict(self.cfg.node(nid).get("adaptive") or {})
+        conf["learn_from"] = int(ts)
+        self.cfg.set_node(nid, {"adaptive": conf})
+
+    def stage_auto(self, nid, enable, below_pct=None, ml=None, gap_min=None, day_ml=None, pulses=None):
+        """A grow stage's automatic-watering settings, sent like the Automatic
+        watering card sends them (settings first, the on switch last, each
+        tracked until the node confirms it). True only if every one was
+        acknowledged."""
+        writes = []
+        if enable:
+            dry, wet, calibrated = self.calibration(nid)
+            if not calibrated:
+                raise ValueError("calibrate this node's soil probe first (Settings: Use as dry, Use as wet)")
+            below_raw = max(1, min(4095, int(round(dry - below_pct / 100.0 * (dry - wet)))))
+            cap = (((self.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {}).get(43)
+            writes = [(51, ml), (52, gap_min), (50, below_raw), (44, day_ml), (55, pulses)]
+            if cap is not None and ml > cap:
+                writes.append((43, ml))
+        writes.append((49, 1 if enable else 0))
+        for slot, value in writes:
+            ack = self.gw.command("set %d %d %d" % (nid, slot, value), r"ACK set|ERR")
+            if not (ack and ack.startswith("ACK")):
+                self.store.event("command", "node %d grow stage: set %d=%d not acknowledged" % (nid, slot, value))
+                return False
+            self.poller.track_write(nid, slot, value)
+        return True
 
     def calibration(self, nid):
         """Both ends of the soil scale, and whether a person actually measured
@@ -2649,6 +2782,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json({"reply": ack, "confirming": tracking})
         if path == "/api/autowater":
             return self.send_json(self.autowater(self.jbody()))
+        if path == "/api/troubleshoot":
+            # {node, action: "start" | "ping" | "stop"} -> the node, live (App.troubleshoot)
+            b = self.jbody()
+            act = b.get("action", "ping")
+            if act not in ("start", "ping", "stop"):
+                raise ValueError("action is start, ping or stop")
+            if app.flash_only:
+                raise ValueError("troubleshooting needs the hive (not available in flash-only mode)")
+            return self.send_json(app.troubleshoot(int(b["node"]), act))
+        if path == "/api/stage":
+            # {node, stage: "germination" | "seedling" | "done", ...that stage's settings}
+            b = self.jbody()
+            nid = int(b["node"])
+            if not app.stages:
+                raise ValueError("grow stages need the hive (not available in flash-only mode)")
+            slots = ((app.poller.snapshot or {}).get("nodes", {}).get(nid) or {}).get("slots") or {}
+            if 40 not in slots or 49 not in slots:
+                raise ValueError("node %d has no pump with automatic watering" % nid)
+            stage = b.get("stage")
+            opt = lambda k, d: d if b.get(k) in (None, "") else b[k]   # noqa: E731
+            try:
+                if stage == "germination":
+                    if not app.calibration(nid)[2]:
+                        raise ValueError("calibrate the probe first: germination holds its doses while the probe "
+                                         "reads soggy")
+                    st = app.stages.germinate(nid, opt("ml", potcare.GERM_ML), opt("every_h", potcare.GERM_EVERY_H),
+                                              opt("skip_above", potcare.GERM_SKIP_ABOVE))
+                elif stage == "seedling":
+                    st = app.stages.seedling(nid, opt("below_pct", potcare.SEEDLING_BELOW), opt("ml", potcare.SEEDLING_ML),
+                                             opt("gap_hours", potcare.SEEDLING_GAP_H), opt("day_ml", potcare.SEEDLING_DAY_ML))
+                elif stage in ("done", "off"):
+                    return self.send_json({"ok": app.stages.finish(nid), "grow_stage": None})
+                else:
+                    raise ValueError("stage is germination, seedling or done")
+            except RuntimeError as e:
+                raise ValueError(str(e))
+            return self.send_json({"ok": True, "grow_stage": st, "seed_mode": app.cfg.node(nid).get("seed_mode")})
         if path == "/api/seedmode":
             b = self.jbody()
             nid = int(b["node"])

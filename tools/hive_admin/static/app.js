@@ -235,8 +235,15 @@ views.node = async (el, id) => {
     <div class="head spread"><div>
       <h1>${esc(nodeTitle(n))}</h1>
       <div class="muted small">#${n.id} · ${esc(n.kind || "unknown type")}${n.location ? " · " + esc(n.location) : ""} · heard ${fmtAge(n.age)}</div>
-    </div><div class="row"><button id="addmark">Add marker</button><a class="btn" href="#/settings">Edit name &amp; calibration</a></div></div>
-    ${n.warnings.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px">${n.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
+    </div><div class="row"><button id="ts-start">Troubleshoot</button><button id="addmark">Add marker</button><a class="btn" href="#/settings">Edit name &amp; calibration</a></div></div>
+    ${n.warnings.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px" id="node-warn">${n.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
+    <div class="card stack" id="ts-card" style="margin-bottom:16px" hidden>
+      <div class="spread"><h2>Troubleshooting</h2><button id="ts-stop">Stop</button></div>
+      <div id="ts-status" class="muted small">starting…</div>
+      <div id="ts-checks" class="row small"></div>
+      <div class="tablewrap"><table id="ts-table"></table></div>
+      <p class="muted small">Live: this page checks every 2 seconds, the Pi asks the gateway every 2 seconds, and the node reports any change every few seconds (firmware from Oct 16 on; older firmware reports at its normal pace). It keeps going until you press Stop, and ends by itself about 2 minutes after this page is closed or hidden.</p>
+    </div>
     <div id="node-cam" style="margin-bottom:16px" hidden></div>
     <div class="card stack">
       <div class="spread"><div class="tabs" id="metric-tabs"></div><div class="tabs" id="range-tabs"></div></div>
@@ -267,6 +274,21 @@ views.node = async (el, id) => {
           </form>
           <p class="muted small">The node decides on its own, even when the Pi is off. It waters only after two dry readings a minute apart, never sooner than the gap, never past the daily maximum, and switches itself off if a watering does not show up in the soil. Following the plant uses its moisture range on g4rden (wetter for seeds and seedlings): water below the low end, fill towards the middle. Learning adjusts only the amount, after two automatic waterings, by at most 40% at a time and never past the per-dose cap.</p>
           <div id="auto-reply" class="mono muted small"></div></div>` : ""}
+        ${(k.slots || {})["40"] && (k.slots || {})["49"] ? `<div class="card stack" id="stage-card"><h2>Grow stage</h2>
+          <div id="stage-status" class="muted"></div>
+          <form id="germ-form" class="row">
+            <label class="f">Each dose (ml)<input id="gm-ml" type="number" min="1" max="200" value="5" style="width:90px" required></label>
+            <label class="f">Every (hours)<input id="gm-every" type="number" min="1" max="72" step="0.5" value="6" style="width:90px" required></label>
+            <label class="f">Hold doses at or above (%)<input id="gm-skip" type="number" min="30" max="100" value="80" style="width:90px" required></label>
+            <button class="primary">Start germination</button></form>
+          <form id="seedling-form" class="row">
+            <label class="f">Water below (%)<input id="sl-below" type="number" min="20" max="90" value="55" style="width:90px" required></label>
+            <label class="f">Each time (ml)<input id="sl-ml" type="number" min="1" max="200" value="10" style="width:90px" required></label>
+            <label class="f">At least (hours apart)<input id="sl-gap" type="number" min="0.5" max="72" step="0.5" value="3" style="width:90px" required></label>
+            <label class="f">Per 24 h at most (ml)<input id="sl-day" type="number" min="1" max="2000" value="60" style="width:90px" required></label>
+            <button class="primary" id="sl-go">Seeds germinated: seedling mode</button></form>
+          <div class="row"><button type="button" id="stage-done">Grown: back to normal watering</button></div>
+          <p class="muted small">Germination: small doses on a timer for seeds in the top centimetre, held while the probe reads soggy (wet seed mix grows mould and rots seeds); the node's own automatic watering is off meanwhile, and the doses come from this Pi. It runs until you mark the seeds germinated (60 days at most). Seedling: the node's own automatic watering, set for seedlings: small doses in two pulses, a gap that lets the surface dry a little between (damping-off likes a surface that never dries). Back to normal: the plant's band and the learned amount take over.</p></div>` : ""}
         ${(k.slots || {})["40"] ? `<div class="card stack" id="seed-card"><h2>Seed mode</h2>
           <div id="seed-status" class="muted"></div>
           <form id="seed-form" class="row">
@@ -351,6 +373,105 @@ views.node = async (el, id) => {
         toast(r.ok ? "Automatic watering saved" : "Not all settings went through");
       } catch (err) { $("#auto-reply").textContent = err.message; toast(err.message); }
     };
+  }
+  // Troubleshooting: the node, live, until Stop or the page goes away (App.troubleshoot).
+  {
+    let tsTimer = null;
+    const here = () => route().name === "node" && +route().arg === nid && document.body.contains($("#ts-card"));
+    const tsEnd = async (send) => {
+      clearInterval(tsTimer); tsTimer = null;
+      if (send) { try { await api("/api/troubleshoot", { node: nid, action: "stop" }); } catch (_) {} }
+    };
+    const tsRender = (r) => {
+      const nn = r.node;
+      if (!nn) { $("#ts-status").textContent = "This node hasn't been heard since the admin started."; return; }
+      const every = r.report_every;
+      $("#ts-status").textContent = `Heard ${fmtAge(Math.round(nn.age))}` +
+        (every ? ` · reporting about every ${every} s` + (every > 15 ? " (its firmware may not have fast reports yet)" : "") : "") +
+        ` · checked ${new Date().toLocaleTimeString()}`;
+      const chips = [];
+      chips.push(nn.age <= 30 ? "✅ reporting" : `❌ not heard for ${fmtAge(Math.round(nn.age))}`);
+      const ok = (KINDS[nn.kind] || {}).ok_slot;
+      if (ok && nn.slots[ok.slot] !== undefined) {
+        const bits = slotSpec(nn.kind, ok.slot).bits || {};
+        for (const [b, name] of Object.entries(bits)) chips.push(`${nn.slots[ok.slot] & +b ? "✅" : "—"} ${esc(name)}`);
+      }
+      $("#ts-checks").innerHTML = chips.map((c) => `<span class="pill">${c}</span>`).join(" ") +
+        (nn.warnings.length ? nn.warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join("") : `<div class="muted">No warnings.</div>`);
+      const rows = [];
+      for (const [key, v] of Object.entries(nn.derived)) {
+        const sp = slotSpec(nn.kind, "d:" + key);
+        rows.push(`<tr><td>${esc(sp.label)} <span class="muted small">(calibrated)</span></td><td class="num">${esc(fmtVal(sp, v))}</td><td></td></tr>`);
+      }
+      for (const [sid, v] of Object.entries(nn.slots)) {
+        const sp = slotSpec(nn.kind, sid), ch = (r.changed || {})[sid];
+        const fresh = ch != null && ch < 10;
+        rows.push(`<tr${fresh ? ' style="background:var(--warn-bg, rgba(255,200,0,.15))"' : ""}><td>${esc(sp.label)} <span class="muted small">${sid}</span></td>` +
+                  `<td class="num">${esc(fmtVal(sp, v))}</td><td class="muted small num">${ch == null ? "" : "changed " + fmtAge(ch)}</td></tr>`);
+      }
+      $("#ts-table").innerHTML = `<tr><th>Reading</th><th class="num">Now</th><th class="num"></th></tr>` + rows.join("");
+    };
+    const tsTick = async (action) => {
+      if (!here()) { tsEnd(true); return; }
+      if (document.hidden && action === "ping") return;     // a hidden page doesn't keep it going
+      try {
+        const r = await api("/api/troubleshoot", { node: nid, action });
+        if (!r.on) {
+          tsEnd(false);
+          $("#ts-status").textContent = "Troubleshooting ended: this page was away for a couple of minutes. Press Troubleshoot to start again.";
+          $("#ts-start").hidden = false;
+          return;
+        }
+        tsRender(r);
+      } catch (err) { $("#ts-status").textContent = err.message; }
+    };
+    $("#ts-start").onclick = async () => {
+      $("#ts-card").hidden = false; $("#ts-start").hidden = true;
+      await tsTick("start");
+      clearInterval(tsTimer);
+      tsTimer = setInterval(() => tsTick("ping"), 2000);
+    };
+    $("#ts-stop").onclick = async () => {
+      await tsEnd(true);
+      $("#ts-card").hidden = true; $("#ts-start").hidden = false;
+      toast("Troubleshooting stopped");
+    };
+  }
+  if ($("#stage-form") || $("#germ-form")) {
+    const showStage = async () => {
+      const c = ((await api("/api/config")).nodes || {})[nid] || {};
+      const st = c.grow_stage, sm = c.seed_mode || {};
+      const since = st ? new Date(st.since * 1000).toLocaleString() : "";
+      const day = st ? Math.floor((Date.now() / 1000 - st.since) / 86400) + 1 : 0;
+      $("#stage-status").textContent = !st ? "No stage: the plant's own band and automatic watering."
+        : st.stage === "germination"
+          ? `Germinating since ${since} (day ${day}): ${sm.ml} ml every ${sm.every_h} h, held at ${sm.skip_above}% or more` +
+            (sm.skipping ? " · on hold now, the soil is that wet" : sm.last ? ` · last dose ${fmtAge(Date.now() / 1000 - sm.last)} ago` : " · first dose within a minute")
+          : `Seedling since ${since} (day ${day}): the node waters ${st.settings.ml} ml below ${st.settings.below_pct}%, ` +
+            `at least ${st.settings.gap_h} h apart, at most ${st.settings.day_ml} ml a day` +
+            (st.germinated_at && st.germination_since ? ` · germinated after ${((st.germinated_at - st.germination_since) / 86400).toFixed(1)} days` : "");
+      $("#germ-form").hidden = !!st;
+      $("#sl-go").textContent = st && st.stage === "seedling" ? "Save seedling settings" : "Seeds germinated: seedling mode";
+      $("#stage-done").hidden = !st;
+    };
+    $("#germ-form").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api("/api/stage", { node: nid, stage: "germination", ml: +$("#gm-ml").value, every_h: +$("#gm-every").value, skip_above: +$("#gm-skip").value });
+        toast("Germination mode on"); showStage();
+      } catch (err) { toast(err.message); }
+    };
+    $("#seedling-form").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api("/api/stage", { node: nid, stage: "seedling", below_pct: +$("#sl-below").value, ml: +$("#sl-ml").value, gap_hours: +$("#sl-gap").value, day_ml: +$("#sl-day").value });
+        toast("Seedling mode on"); showStage();
+      } catch (err) { toast(err.message); }
+    };
+    $("#stage-done").onclick = async () => {
+      try { await api("/api/stage", { node: nid, stage: "done" }); toast("Back to normal watering"); showStage(); } catch (err) { toast(err.message); }
+    };
+    showStage();
   }
   if ($("#seed-form")) {
     const showSeed = async () => {

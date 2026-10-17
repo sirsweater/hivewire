@@ -280,7 +280,13 @@ def plant(meta, n):
     band, soil = meta.get("plant_band"), (n.get("derived") or {}).get("soil")
     out = {}
     fc = meta.get("soil_fc")
-    if band and fc and meta.get("band_scale") == "fc":
+    st = meta.get("grow_stage") or {}
+    if st.get("band"):
+        # Seeds and seedlings are watered by their stage's range, not the grown plant's.
+        out["target_note"] = "the %s stage's range (the grown plant's own band is %s)" % (
+            st.get("stage"), "%s-%s %%" % tuple(band) if band else "not set")
+        band, fc = st["band"], None
+    elif band and fc and meta.get("band_scale") == "fc":
         # The band read as a share of what this pot holds when drained (potcare.py), as the
         # admin waters by it.
         band = [round(band[0] * fc / 100.0, 1), round(band[1] * fc / 100.0, 1)]
@@ -299,12 +305,39 @@ def plant(meta, n):
     if "adaptive" in meta:
         out["automatic_watering"] = "on" if (meta["adaptive"].get("on") and
                                              not meta["adaptive"].get("user_off")) else "off"
+    st = meta.get("grow_stage") or {}
+    if st.get("stage"):
+        out["grow_stage"] = stage_text(st, meta.get("seed_mode"))
     sm = meta.get("seed_mode")
-    if sm and sm.get("until", 0) > time.time():
+    if sm and sm.get("until", 0) > time.time() and not st.get("stage"):
         out["seed_mode"] = ("ON: %s ml every %s h until %s, whatever the probe says, to keep seeds in the top "
                             "centimetre damp (started and stopped on the admin page, not from this chat)" % (
                                 sm.get("ml"), sm.get("every_h"), time.strftime("%b %d %H:%M", time.localtime(sm["until"]))))
     return out
+
+
+def stage_text(st, sm=None):
+    """A node's grow stage in words (potcare.GrowStages)."""
+    since = st.get("since") or time.time()
+    day = int((time.time() - since) // 86400) + 1
+    when = "since %s (day %d)" % (time.strftime("%b %d %H:%M", time.localtime(since)), day)
+    if st.get("stage") == "germination":
+        sm = sm or {}
+        return ("GERMINATION mode %s: the admin gives %s ml every %s h on a timer, held while the probe reads %s %% "
+                "or more (too wet for seeds); the node's own automatic watering is off. It ends when the person "
+                "marks the seeds germinated on the admin page%s" % (
+                    when, sm.get("ml", "?"), sm.get("every_h", "?"), sm.get("skip_above", "?"),
+                    "; doses are on hold right now - the soil is that wet" if sm.get("skipping") else ""))
+    if st.get("stage") == "seedling":
+        c = st.get("settings") or {}
+        took = ""
+        if st.get("germinated_at") and st.get("germination_since"):
+            took = "; the seeds germinated after %.0f days" % ((st["germinated_at"] - st["germination_since"]) / 86400.0)
+        return ("SEEDLING mode %s: the node waters %s ml in %s pulses when the probe falls below %s %%, at least %s h "
+                "apart, at most %s ml a day%s. It ends when the person marks the plants grown on the admin page" % (
+                    when, c.get("ml", "?"), c.get("pulses", "?"), c.get("below_pct", "?"), c.get("gap_h", "?"),
+                    c.get("day_ml", "?"), took))
+    return "%s mode %s" % (st.get("stage"), when)
 
 
 def known_issue(nid):
@@ -3515,6 +3548,8 @@ GATEWAY_Q = re.compile(r"(?i)\b(gateway|the pi|raspberry pi|hub|admin (server|pa
 HIDDEN_Q = re.compile(r"(?i)\b(hidden|retired|hide)\b[^?]*\bnodes?\b|\bnodes?\b[^?]*\b(hidden|retired)\b")
 FW_LAST_Q = re.compile(r"(?i)\b(last|latest|recent|when)\b[^?]*\b(firmware|ota|update|flash\w*|push\w*)\b(?![^?]*\b(running|version|same|which)\b)")
 SEED_Q = re.compile(r"(?i)\bseed mode\b")
+# "What mode is it in", not "how long do strawberries take to germinate": the node facts carry the stage for those.
+STAGE_Q = re.compile(r"(?i)\b(?:germination|seedling) mode\b|\bgrow(?:th)? stage\b|\bwhat stage\b")
 FC_Q = re.compile(r"(?i)\bfield capacity\b")
 BAND_SRC_Q = re.compile(r"(?i)\b(where|how)\b[^?]*\b(target|band|range)\b[^?]*\b(come from|set|decided|chosen|get)\b|\bwho (set|sets|chose)\b[^?]*\b(band|target)\b")
 BAND_SET_Q = re.compile(r"(?i)\b(change|set|make|raise|lower|adjust)\b[^?]*\b(target|band|range)\b[^?]*\d")
@@ -3545,6 +3580,13 @@ def admin_reply(hive, st, nodes, q):
         return ("Each band comes from the plant the node is linked to on g4rden: g4rden sends the plant's moisture range "
                 "back with every upload, and automatic watering starts at its low end. Change the plant (or its "
                 "growth stage) on g4rden and the band follows. Now: %s." % (who or "no bands set"))
+    if STAGE_Q.search(q) and not SEED_Q.search(q):
+        on = [(n, (cfg.get(str(n["id"])) or {})) for n in (named or nodes)]
+        on = [(n, c) for n, c in on if (c.get("grow_stage") or {}).get("stage")]
+        if not on:
+            return ("No node is in germination or seedling mode. Both are started on the admin page (a water node's "
+                    "Grow stage card), not from this chat.")
+        return "; ".join("%s - %s" % (nm(n), stage_text(c["grow_stage"], c.get("seed_mode"))) for n, c in on) + "."
     if SEED_Q.search(q) and not REQUEST.search(q) and not re.search(
             r"(?i)^\W*(please\s+)?(start|begin|turn|enable|disable|stop|set up|put|run|switch)\b", q):
         on = [(n, (cfg.get(str(n["id"])) or {}).get("seed_mode")) for n in nodes]
@@ -3992,7 +4034,8 @@ def focus_facts(hive, q):
             "soil now %s%s; " % (soil, " (target %s, %s)" % (f["target_soil"], f.get("soil_vs_target"))
                                  if f.get("target_soil") else "") if soil else "",
             f["pump"], tools, " KNOWN ISSUE: " + f["KNOWN_ISSUE"] if f.get("KNOWN_ISSUE") else ""))
-        extra = ["%s: %s" % (k.replace("_", " "), f[k]) for k in ("target_note", "field_capacity", "seed_mode") if f.get(k)]
+        extra = ["%s: %s" % (k.replace("_", " "), f[k]) for k in ("grow_stage", "target_note", "field_capacity", "seed_mode")
+                 if f.get(k)]
         if extra:
             out.append("%s, more: %s." % (n.get("name") or kind, "; ".join(extra)))
     if STREAM_Q.search(q):
@@ -4168,11 +4211,12 @@ FIXED_REPLIES = [
     # "Turn on seed mode for the larkspur": an admin-page setting; the model reached for set_slot.
     (re.compile(r"(?i)^(?!\s*(when|should|how|what|why|is|are|do|does|did|was|will|would|can)\b)(?![^\n]*\?\s*$)[^\n]*"
                 r"\b(turn|switch|start|stop|enable|disable|end|set up|begin|put|save|set|measure|record|use)\b[^\n]*"
-                r"\b(seed|germination|sprouting) mode\b|^(?!\s*(when|how|what|why|is|are|do|does)\b)(?![^\n]*\?\s*$)"
+                r"\b(seed|germination|sprouting|seedling) mode\b|^(?!\s*(when|how|what|why|is|are|do|does)\b)(?![^\n]*\?\s*$)"
                 r"[^\n]*\b(save|set|measure|record|use)\b[^\n]*\bfield capacity\b"),
-     "That's set on the admin page, not from this chat. Open the node's page: the Seed mode card takes a dose, "
-     "how often and for how many days (it stops by itself), and the Field capacity card saves the level the soil "
-     "settles at after a soak. Nothing was changed."),
+     "That's set on the admin page, not from this chat. Open the node's page: the Grow stage card starts "
+     "germination mode (small doses on a timer until you mark the seeds germinated) and moves it to seedling "
+     "mode, the Seed mode card takes a dose, how often and for how many days (it stops by itself), and the Field "
+     "capacity card saves the level the soil settles at after a soak. Nothing was changed."),
     # "Turn the pump on and leave it running": every run is a set, capped amount.
     (re.compile(r"(?i)^(?![^\n]*\bautomatic\b)(?!\s*(when|should|how|what|why|is|are|do|does|did|was|will|would)\b)"
                 r"(?![^\n]*\?\s*$)(?=[^\n]*\bpump\b)[^\n]*\b(leave|keep)\b[^.?!\n]*\b(on|running|going)\b|"

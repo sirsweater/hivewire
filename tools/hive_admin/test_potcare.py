@@ -110,5 +110,89 @@ pumped["45"] = 20                       # the node reports the dose
 s2.run_once(now=T + 12 * 3600 + 700)
 check(len(sent2) == 3, "...while a dose that shows up is left alone (no re-send)", sent2)
 
+# A node that restarted lost its 24 h total: whether the dose arrived is unknown, so no re-send.
+cfg3, sent3, ev3, pumped3 = _Cfg(), [], [], {"45": 40}
+s3 = P.SeedMode(cfg3, lambda nid, slot, v: (sent3.append(v), True)[1], lambda nid: True,
+                lambda kind, text: ev3.append(text), slots=lambda nid: {45: pumped3["45"]})
+s3.start(7, 10, 12, 3, now=T)
+s3.run_once(now=T)
+pumped3["45"] = 0                       # rebooted: the count starts over
+s3.run_once(now=T + 700)
+check(len(sent3) == 1 and any("restarted" in e for e in ev3), "a dose isn't re-sent after the node restarted", ev3)
+
+# --- germination holds doses while the probe reads soggy ---------------------------
+cfg4, sent4, ev4, soil4 = _Cfg(), [], [], {"pct": 85.0}
+s4 = P.SeedMode(cfg4, lambda nid, slot, v: (sent4.append(v), True)[1], lambda nid: True,
+                lambda kind, text: ev4.append(text), soil=lambda nid: soil4["pct"])
+s4.start(7, 5, 6, 60, now=T, max_days=60, stage="germination", skip_above=80)
+check(s4.run_once(now=T) == [] and cfg4.node(7)["seed_mode"].get("skipping"), "no dose while the probe reads 85% (80% holds)")
+check(sum("holding doses" in e for e in ev4) == 1, "...said once", ev4)
+s4.run_once(now=T + 60)
+check(sum("holding doses" in e for e in ev4) == 1, "...not again every pass", ev4)
+soil4["pct"] = 76.0
+check(s4.run_once(now=T + 120) == [(7, 5)] and "skipping" not in cfg4.node(7)["seed_mode"] and
+      any("doses resume" in e for e in ev4), "once it dries below, the dose goes at once and that's said", ev4)
+check(s4.run_once(now=T + 3 * 3600) == [], "...then the interval holds")
+soil4["pct"] = None
+check(s4.run_once(now=T + 6 * 3600 + 200) == [(7, 5)], "no probe reading: the timer waters anyway (seeds can't wait)")
+check(any("germination mode" in e for e in ev4) and not any("seed mode:" in e for e in ev4), "its log lines say germination mode", ev4)
+try:
+    s4.start(7, 5, 6, 60, now=T)
+    check(False, "plain seed mode still stops at 45 days")
+except ValueError:
+    check(True, "plain seed mode still stops at 45 days")
+
+# --- grow stages --------------------------------------------------------------------
+cfg5, ev5, autos, learn = _Cfg(), [], [], []
+auto_ok = {"ok": True}
+seed5 = P.SeedMode(cfg5, lambda nid, slot, v: True, lambda nid: True, lambda kind, text: ev5.append(text),
+                   soil=lambda nid: 60.0)
+gs = P.GrowStages(cfg5, seed5, lambda nid, en, **kw: (autos.append((en, kw)), auto_ok["ok"])[1],
+                  lambda kind, text: ev5.append(text), learn_from=lambda nid, ts: learn.append(ts))
+st = gs.germinate(7, now=T)
+check(st["stage"] == "germination" and cfg5.node(7)["seed_mode"]["stage"] == "germination" and
+      cfg5.node(7)["seed_mode"]["skip_above"] == 80 and cfg5.node(7)["seed_mode"]["ml"] == P.GERM_ML,
+      "germination: timed doses with the soggy hold, defaults", cfg5.node(7))
+check(autos[-1] == (False, {}), "...and the node's own automatic watering switched off", autos)
+check(cfg5.node(7)["seed_mode"]["until"] - T == P.GERM_MAX_DAYS * 86400, "...for up to %d days" % P.GERM_MAX_DAYS)
+check(st["band"] == [60.0, 80.0], "...its range stands in for the plant's", st)
+for bad in ((5, 6, 20), (0, 6, 80), (5, 0.1, 80)):
+    try:
+        gs.germinate(8, *bad, now=T)
+        check(False, "germination refuses %r" % (bad,))
+    except ValueError:
+        check(True, "germination refuses %r" % (bad,))
+auto_ok["ok"] = False
+try:
+    gs.germinate(9, now=T)
+    check(False, "germination needs the node to switch its own watering off")
+except RuntimeError:
+    check("seed_mode" not in cfg5.node(9) and "grow_stage" not in cfg5.node(9),
+          "germination needs the node to switch its own watering off: nothing starts without it")
+try:
+    gs.seedling(7, now=T + 9 * 86400)
+    check(False, "an unacknowledged seedling switch is refused")
+except RuntimeError:
+    check(cfg5.node(7)["grow_stage"]["stage"] == "germination" and cfg5.node(7).get("seed_mode"),
+          "an unacknowledged seedling switch leaves germination running")
+auto_ok["ok"] = True
+st = gs.seedling(7, now=T + 9 * 86400)
+check(st["stage"] == "seedling" and "seed_mode" not in cfg5.node(7), "seedling: germination's timer stops", cfg5.node(7))
+check(autos[-1] == (True, {"below_pct": 55.0, "ml": 10, "gap_min": 180, "day_ml": 60, "pulses": 2}),
+      "...the node's automatic watering is set for seedlings", autos[-1])
+check(st["germinated_at"] == T + 9 * 86400 and st["germination_since"] == T and
+      any("germinated after 9.0 days" in e for e in ev5), "...and how long germination took is kept", ev5)
+check(learn == [T + 9 * 86400], "...and the learner starts over", learn)
+st2 = gs.seedling(7, below_pct=60, now=T + 10 * 86400)
+check(st2["germinated_at"] == T + 9 * 86400 and st2["settings"]["below_pct"] == 60, "re-saving seedling settings keeps the germination record")
+check(gs.finish(7, now=T + 30 * 86400) and "grow_stage" not in cfg5.node(7) and not gs.finish(7),
+      "grown: out of the stage, once")
+gs.germinate(7, now=T)
+seed5.stop(7)
+check("grow_stage" not in cfg5.node(7), "stopping germination's doses (the Seed mode card) ends the stage too")
+gs.germinate(7, now=T)
+seed5.run_once(now=T + P.GERM_MAX_DAYS * 86400 + 1)
+check("grow_stage" not in cfg5.node(7) and "seed_mode" not in cfg5.node(7), "60 days without germinating: it ends by itself")
+
 print("\n%s" % ("%d FAILED" % failed if failed else "all passed"))
 sys.exit(1 if failed else 0)
