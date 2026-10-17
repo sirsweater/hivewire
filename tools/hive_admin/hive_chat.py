@@ -1838,6 +1838,8 @@ def reservoir_hint(hive):
             "reports no water." % "; ".join("%s: %s" % kv for kv in r.items()))
 
 
+FILLER_END = re.compile(r"(?i)(?:^|(?<=[.!?\n]))\s*(?:(?:if|should|whenever)\b[^.!?\n]*,\s*)?(?:please\s+)?"
+                        r"(?:feel free to (?:ask|reach out|let me know)|don't hesitate to (?:ask|reach out))\b[^.!?\n]*[.!]?\s*$")
 WATER_OFFER = re.compile(r"(?i)\s*[^.!?\n]*(\b(would you like|do you want|shall I|should I|want me to|I can|I could|"
                          r"let me know if you('d| would)? like)\b[^.!?\n]*\b(water|watering|pump)\w*\b|"
                          # "If you still need to water it, I can send a command to do so"
@@ -5647,6 +5649,10 @@ def ask(hive, messages, q, on_tool=None):
     except RuntimeError:
         pass
     answer = no_repeats(fix_fahrenheit(plain_math(must_say(hive, q, answer))))
+    # "If you need further details or have any questions, feel free to ask!" closed 8 of hive-full23's answers
+    trimmed = FILLER_END.sub("", answer).rstrip()
+    if trimmed and trimmed != answer.rstrip():
+        answer = trimmed
     if re.search(r"(?i)\binch(es)?\b", q):
         # "how much did it rain last week in inches?" came back in mm only
         answer = re.sub(r"(?<![\d.])(\d+(?:\.\d+)?) ?mm\b(?! \()", lambda m: "%s mm (%.2f in)" % (
