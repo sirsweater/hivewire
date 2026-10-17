@@ -3368,6 +3368,8 @@ def is_question(q):
     return bool(QUESTIONISH.search(q)) or (len(q.split()) <= 6 and not COMMAND.search(q) and not REQUEST.search(q))
 
 
+QUESTION_START = re.compile(r"(?i)^\s*(how|what|what's|when|which|why|who|where|is|are|was|were|will|would|did|does|do|"
+                            r"has|have|had|can|could|should|tell me|show me|give me|list)\b")
 SPLIT_Q = re.compile(r"(?i)\s*(?:\?\s+|,?\s+(?:and|also|plus)\s+(?=(?:is|are|was|will|what|what's|how|when|where|which|why|"
                      r"does|do|did|can|could|should|has|have)\b))")
 
@@ -3377,6 +3379,8 @@ def split_questions(q):
     if not QUESTIONISH.search(q) or COMMAND.search(q) or REQUEST.search(q):
         return [q]
     parts = [x.strip(" ,") for x in SPLIT_Q.split(q) if x and x.strip(" ,")]
+    if len(parts) == 2 and not parts[1].endswith("?") and not QUESTION_START.match(parts[1]):
+        return [q]          # "is the pressure dropping? feels like a storm" - a remark after the question, not a second one
     parts = [x if x.endswith("?") else x + "?" for x in parts]
     return parts if len(parts) == 2 and all(len(x.split()) >= 3 for x in parts) else [q]
 
