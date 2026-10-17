@@ -441,6 +441,20 @@ class HivewireNode {
   // transport events here too; applications can add their own.
   void log(const char *fmt, ...);
 
+  // Troubleshooting: for the next `ms`, sample every slot at least every
+  // TROUBLE_SAMPLE_MS, report any change at all (no threshold), and re-send
+  // every slot at least every TROUBLE_REPORT_MS, so a person at the admin page
+  // sees a wire they just moved within seconds. Calling it again extends the
+  // window (the admin keeps it alive while its page is open); 0 ends it.
+  // Nothing persists: a restart is back to normal reporting.
+  static const uint32_t TROUBLE_SAMPLE_MS = 2000;
+  static const uint32_t TROUBLE_REPORT_MS = 5000;
+  // The bundled sketches turn it on with Action (slot 22) = 6 for
+  // TROUBLE_KEEPALIVE_MS at a time, and off with 7.
+  static const uint32_t TROUBLE_KEEPALIVE_MS = 180000;
+  void troubleshoot(uint32_t ms);
+  bool troubleshooting() const;
+
   // Called from the ESP-NOW receive callback; not for application use.
   void _ingest(const uint8_t *data, int len);
   void _noteRssi(int8_t rssi);
@@ -495,6 +509,7 @@ class HivewireNode {
   RawCallback   _rawCb = nullptr;
 
   uint32_t _epoch = 0, _adoptedAt = 0, _lastTx = 0;
+  uint32_t _troubleUntil = 0;           // millis(); 0 = off
   volatile uint32_t _lastBeacon = 0;   // written from the ESP-NOW callback
   uint8_t  _state[HIVEWIRE_MAX_STATE] = {0};
   uint8_t  _stateLen = 0;

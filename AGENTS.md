@@ -101,7 +101,8 @@ Rules that matter when writing a node:
 - **Slot ids are the application's**, but these are shared conventions across
   the bundled sketches and the admin: `20`/`21` deafen to one sender for N
   seconds (a test hook for forcing relay paths), `22` action (4 = reboot,
-  5 = start a Wi-Fi OTA pull), `23` OTA arm, `24` seed this node's firmware to
+  5 = start a Wi-Fi OTA pull, 6 = troubleshoot: fast reports for 3 minutes, 7 = troubleshoot off;
+  RangeNode also uses 1-3 for its counters, RSSI floor and epoch), `23` OTA arm, `24` seed this node's firmware to
   another node (RangeNode and SoilNode), `25` running firmware CRC, `26` last error (`code | subject << 16`),
   `27` errors since boot, `40`-`55` a pump (HivewirePump.h), `56`-`60` a grow light
   (HivewireLight.h). The admin also stores the hive's
@@ -170,7 +171,9 @@ push <len> <crc32> [node]        arm an ESP-NOW firmware transfer (one node, or 
 - **`ACK set` only means the gateway SENT the write** -- one ESP-NOW broadcast,
   which a node at the edge of range misses (a soak lost 1 in 6 at -87 dBm). The
   node's own report is the confirmation. The admin re-sends a *setting* until
-  the node reports it (E606 after five tries); it never repeats an *action*.
+  the node reports it (E606 after five tries); it never repeats an *action* --
+  except the Troubleshoot keep-alive (Action 6, once a minute while its page is
+  open), which only extends fast reporting and is harmless to receive twice.
   Mark one-shot slots (reboot, arm OTA, seed) `"action": true` in `kinds.json`.
 - **Commands are relayed**: `set` and log requests travel outward, log replies
   and firmware NACKs inward, each passed on once per unit (see the README,

@@ -560,8 +560,9 @@ void HivewireNode::sendStatus() {
   for (uint8_t i = 0; i < _slotCount; i++) {
     if (!(_slots[i].dir & HW_DIR_OUT)) continue;   // never publish IN-only
     if (!_st[i].valid) continue;
-    bool due = _slots[i].reportPeriodMs &&
-               (now - _st[i].lastReport >= _slots[i].reportPeriodMs);
+    bool due = (_slots[i].reportPeriodMs &&
+                (now - _st[i].lastReport >= _slots[i].reportPeriodMs)) ||
+               (troubleshooting() && now - _st[i].lastReport >= TROUBLE_REPORT_MS);
     if (!_st[i].dirty && !due) continue;
 
     uint8_t len = hwSlotTypeLen(_slots[i].type);
@@ -701,12 +702,31 @@ bool HivewireNode::sendRaw(const uint8_t *data, uint16_t len) {
   return esp_now_send(HW_BCAST, data, len) == ESP_OK;
 }
 
+void HivewireNode::troubleshoot(uint32_t ms) {
+  bool was = troubleshooting();
+  _troubleUntil = ms ? millis() + ms : 0;
+  if (_troubleUntil == 0 && ms) _troubleUntil = 1;
+  if (ms && !was) log("troubleshooting: fast reports");
+  if (!ms && was) log("troubleshooting off");
+}
+
+bool HivewireNode::troubleshooting() const {
+  return _troubleUntil && (int32_t)(millis() - _troubleUntil) < 0;
+}
+
 void HivewireNode::loop() {
   uint32_t now = millis();
+  if (_troubleUntil && !troubleshooting()) {
+    _troubleUntil = 0;                            // the admin stopped asking: back to normal
+    log("troubleshooting ended (no keep-alive)");
+  }
+  bool fast = _troubleUntil != 0;
 
   for (uint8_t i = 0; i < _slotCount; i++) {
     if (!_slots[i].sample) continue;              // write-only slot
-    if (_st[i].valid && now - _st[i].lastSample < _slots[i].samplePeriodMs) continue;
+    uint32_t period = _slots[i].samplePeriodMs;
+    if (fast && period > TROUBLE_SAMPLE_MS) period = TROUBLE_SAMPLE_MS;
+    if (_st[i].valid && now - _st[i].lastSample < period) continue;
     uint8_t fresh[4] = {0};
     _slots[i].sample(fresh);
     _st[i].lastSample = now;
@@ -715,7 +735,7 @@ void HivewireNode::loop() {
       _st[i].valid = true;
       _st[i].dirty = true;
     } else if (memcmp(fresh, _st[i].raw, 4) != 0 &&
-               hwDelta(_slots[i].type, fresh, _st[i].raw) >= _slots[i].changeThreshold) {
+               (fast || hwDelta(_slots[i].type, fresh, _st[i].raw) >= _slots[i].changeThreshold)) {
       memcpy(_st[i].raw, fresh, 4);
       _st[i].dirty = true;
     }

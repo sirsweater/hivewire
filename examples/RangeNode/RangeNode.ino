@@ -175,6 +175,12 @@ static void aAction(const void *in) {
     case 5:                                  // update firmware (must be armed)
       ota.trigger();
       break;
+    case 6:                                  // the admin's Troubleshoot, kept alive while its page is open
+      node.troubleshoot(HivewireNode::TROUBLE_KEEPALIVE_MS);
+      break;
+    case 7:
+      node.troubleshoot(0);
+      break;
   }
 }
 
@@ -198,7 +204,7 @@ static const HwSlotDef SLOTS[] = {
   { 13, HW_U16, HW_DIR_OUT,     15000, 600000,    30,   0,     0, sDeafLeft,    nullptr },
   { 20, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sDeafTarget,  aDeafTarget },
   { 21, HW_U16, HW_DIR_INOUT,       0, 600000,     0,   0,  1800, sDeafSecsCfg, aDeafSecs   },
-  { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,     5, sAction,      aAction     },
+  { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,     7, sAction,      aAction     },
   { 23, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sOtaArm,      aOtaArm     },
   { 24, HW_U8,  HW_DIR_INOUT,       0, 600000,     0,   0,   255, sSeed,        aSeed       },
   { 25, HW_U32, HW_DIR_OUT,    600000, 900000,     1,   0,     0, sFwCrc,       nullptr     },

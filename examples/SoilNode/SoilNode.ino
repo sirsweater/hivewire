@@ -636,6 +636,8 @@ static void aAction(const void *in) {
   lastAction = *(const uint8_t *)in;
   if (lastAction == 4) { node.log("reboot by command"); delay(50); ESP.restart(); }
   if (lastAction == 5) ota.trigger();
+  if (lastAction == 6) node.troubleshoot(HivewireNode::TROUBLE_KEEPALIVE_MS);   // admin's Troubleshoot
+  if (lastAction == 7) node.troubleshoot(0);
 }
 static void aOtaArm(const void *in) { otaArm = *(const uint8_t *)in; ota.arm(otaArm); }
 
@@ -702,7 +704,7 @@ static const HwSlotDef SLOTS[] = {
   {  7, HW_U8,  HW_DIR_OUT,    300000, 900000,     1,   0,   0, sBoots,     nullptr },
   {  8, HW_U16, HW_DIR_OUT,     60000, 900000,    15,   0,   0, sUptimeMin, nullptr },
   {  9, HW_I8,  HW_DIR_OUT,     30000, 900000,     6,   0,   0, sRssi,      nullptr },
-  { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,   5, sAction,    aAction },
+  { 22, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0,   7, sAction,    aAction },
   { 23, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0, 255, sOtaArm,    aOtaArm },
   { 24, HW_U8,  HW_DIR_INOUT,       0, 900000,     0,   0, 255, sSeed,      aSeed   },
   { 25, HW_U32, HW_DIR_OUT,    600000, 900000,     1,   0,   0, sFwCrc,     nullptr },

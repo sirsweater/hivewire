@@ -84,6 +84,16 @@ Sample rate, report rate and change threshold are independent per slot, so a
 battery reading can sample hourly while a level sensor samples every 30 seconds
 and reports only when it actually moves.
 
+That economy is wrong for one person at one node with a screwdriver: a vane
+sampled once a minute and reported only past a 40 mV change, behind an admin
+that polls once a minute, can take two minutes to show a wire just moved.
+`node.troubleshoot(ms)` lifts it for a while: every slot is sampled at least
+every 2 s, any change at all is reported, and every slot is re-sent at least
+every 5 s. It ends by itself when `ms` runs out (the caller renews it), on
+`troubleshoot(0)`, or on a restart. The bundled sketches take it as Action
+(slot 22) 6 for three minutes at a time and 7 for off; the admin's
+**Troubleshoot** button renews it each minute while its page is open.
+
 ## Directions, and why writes fail closed
 
 Not everything wired to a microcontroller is both readable and writable, and
@@ -531,6 +541,13 @@ HIVE_GW=/dev/serial/by-id/usb-..._<gateway MAC>-if00 tools/hive_admin/start_admi
   (unhide it under Settings).
 - **Node pages** — every slot with a label and unit, history charts, the node's
   own log fetched over the air, writable slots and maintenance actions.
+  **Troubleshoot** turns the page live: it checks every 2 s, the Pi polls the
+  gateway every 2 s, and the node is asked (Action 6, renewed each minute) to
+  report every change within seconds; each reading shows when it last changed,
+  beside the sensor checks and warnings. No timer: it runs until Stop, and ends
+  about two minutes after the page is closed or hidden (the node falls back to
+  its normal pace by itself a minute later). A node on older firmware refuses
+  Action 6 as out of range and keeps its normal pace; the page still polls fast.
 - **Reports** — any reading over any range, daily low/average/high, CSV export.
 - **Firmware** — upload an app image (its size, CRC and family are read from
   the file), see which nodes would install it, push it with live progress.
@@ -770,7 +787,22 @@ around that, with no reflash:
   stay damp; it stops by itself on the end date. Each dose is an action, sent
   once; if the node's own pumped-in-24-h count hasn't risen ten minutes later
   (a missed broadcast), it is sent one more time, and a second miss is logged.
-  The node's caps apply to every dose, and automatic watering carries on.
+  The node's caps apply to every dose, and automatic watering carries on. A
+  re-send is skipped when the node's 24 h count went DOWN (it restarted and
+  lost the count): the dose may have arrived, and sending it again could
+  double it.
+- **Grow stages** (node page, pump nodes with automatic watering): a pot of
+  seeds goes through **germination** - seed mode's timed doses (5 ml every 6 h
+  by default), held while the probe reads 80% or more (soggy seed mix grows
+  mould and rots seeds), with the node's own automatic watering switched off
+  so the timer is the only thing watering - until you mark the seeds
+  germinated (60 days at most). Then **seedling**: the node's own automatic
+  watering, set for seedlings (water below 55%, 10 ml in two pulses, at least
+  3 h apart, 60 ml a day, so the surface dries a little between - damping-off
+  likes a surface that never does). Then back to normal: the plant's band and
+  the learned amount. While a node is in a stage, adaptive watering and the
+  admin's default switch-on leave its automatic watering alone, and the chat
+  reports the stage and its range in place of the plant's band.
 - **Field capacity** (node page, soil nodes): soak the pot and let it drain;
   the admin finds the soak's peak and the level the drain settles at (30 min
   within 2 points) and saves it as the pot's field capacity. "Scale the plant's
