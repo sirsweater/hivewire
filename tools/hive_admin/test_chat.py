@@ -1722,6 +1722,22 @@ check("23.0 hours" in a and "every start it has ever had" in a, "uptime in minut
 
 check(C.boots_text(255).startswith("255 or more") and C.boots_text(20) == "20", "a boot counter at 255 is capped, not exact")
 
+class _RkHive:
+    def call(self, method, path, *a, **k):
+        return {"nodes": {"6": {"plant_band": [5, 20]}, "7": {"grow_stage": {"stage": "germination", "band": [60, 80]}}}}
+
+    def kinds(self):
+        return {"WaterNode": {"derived": {"soil": {}}}, "SoilNode": {"derived": {"soil": {}}}}
+
+
+a = C.rank_reply(_RkHive(), _stt, "which plant is the wettest?") or ""
+check(a.startswith("Strawberry is the wettest right now, at 82 %") and "Cactus above its 5-20 % band" in a and "Rhubarb has no reading" in a,
+      "'which plant is the wettest?': the winner first, each against its band, the probe-out one said", a)
+C.LAST_ANSWER[:] = [a]
+check([n["name"] for n in C.pronoun_nodes(_stt, "and is its automatic watering on?")] == ["Strawberry"],
+      "...and 'its' in the follow-up is the plant it led with")
+C.LAST_ANSWER[:] = []
+
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
        {"id": 20, "name": "Weather station"}]

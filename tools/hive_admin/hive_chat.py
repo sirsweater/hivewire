@@ -4212,6 +4212,43 @@ def need_first_reply(hive, st):
     return "%s\n%s" % (head, "\n".join(rows))
 
 
+RANK_Q = re.compile(r"(?i)\b(which|what)\b[^?]{0,25}\b(plant|pot|one|node)?s?\b[^?]{0,15}\b(is |are )?(the )?(wettest|driest|"
+                    r"most (wet|moist|dry)|least (wet|dry))\b|\b(what'?s|what is) the (wettest|driest)\b")
+
+
+def rank_reply(hive, st, q):
+    """ "Which plant is the wettest?" got two paragraphs that never said which, the Cactus at 57 % "within" 5-20 % and its
+    (non-existent) automatic watering "on" (hive-full27). The ranking in code, the winner named first so "its" in a
+    follow-up has one plant to point at."""
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    have, none = [], []
+    for n in st.get("nodes", []):
+        if n.get("hidden") or "soil" not in ((hive.kinds().get(n.get("kind")) or {}).get("derived") or {}):
+            continue
+        nm, soil = n.get("name") or "node %s" % n["id"], (n.get("derived") or {}).get("soil")
+        if soil is None:
+            none.append("%s has no reading (%s)" % (nm, "probe out of the soil" if PROBE_OUT_WARNING in (n.get("warnings") or [])
+                                                     else "not calibrated"))
+        else:
+            have.append((soil, nm, band_of(cfg.get(str(n["id"])))))
+    if len(have) < 2:
+        return None
+    wet = bool(re.search(r"(?i)\b(wettest|most (wet|moist)|least dry)\b", q))
+    have.sort(reverse=wet)
+    soil, nm, band = have[0]
+    out = "%s is the %s right now, at %.0f %%. By the reading: %s." % (
+        nm, "wettest" if wet else "driest", soil, ", ".join("%s %.0f %%" % (x[1], x[0]) for x in have))
+    vs = []
+    for v, name, b in have:
+        if b:
+            vs.append("%s %s its %g-%g %% band" % (name, "above" if v > b[1] else "below" if v < b[0] else "inside", b[0], b[1]))
+    if vs:
+        out += " Against their own bands: %s." % "; ".join(vs)
+    if none:
+        out += " %s." % "; ".join(none)
+    return out
+
+
 def them_nodes(st, q):
     """The plants the person's earlier messages named, for "which of them is driest?" (it had ranked other plants)."""
     if not re.search(r"(?i)\b(of )?(them|those|these|the two|both|either)\b", q) or len(SAID) < 2:
@@ -5291,6 +5328,11 @@ def pronoun_nodes(st, q):
         return []
     was = [n for n in st.get("nodes", []) if not n.get("hidden") and n.get("name") and
            re.search(r"(?i)\b%s\b" % re.escape(n["name"]), LAST_ANSWER[0])]
+    if len(was) > 1:
+        # "Strawberry is the wettest right now ... By the reading: Strawberry 81 %, Cactus 57 %": the one it led with
+        lead = [n for n in was if re.match(r"(?i)\s*%s (is|has|needs) the\b" % re.escape(n["name"]), LAST_ANSWER[0])]
+        if len(lead) == 1:
+            return lead
     return was if len(was) == 1 else []
 
 
@@ -5901,6 +5943,15 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = seed_care_reply(hive, nodes, q)
             if not fixed:
                 fixed = them_rank_reply(st, q)
+            if not fixed and RANK_Q.search(q):
+                keep = SAID[:]
+                SAID[:] = [q]
+                try:
+                    rn = [n for n in nodes if named_by_person(n)]
+                finally:
+                    SAID[:] = keep
+                if not rn:
+                    fixed = rank_reply(hive, st, q)
             if not fixed and UPTIME_Q.search(q) and not re.search(r"(?i)\b(pi|admin|gateway|hive)\b", q):
                 un, _ = _one_named(hive, nodes, q)
                 fixed = uptime_reply(hive, un, q) if un else None
