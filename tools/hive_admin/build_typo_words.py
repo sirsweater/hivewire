@@ -22,6 +22,14 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The word lists are a subset of SCOWL (via Debian/Ubuntu's wamerican), whose licence asks for this notice:
+SCOWL_NOTICE = (
+    "Word lists derived from SCOWL (Spell Checker Oriented Word Lists), http://wordlist.sourceforge.net/ - "
+    "Copyright 2000-2011 by Kevin Atkinson. Permission to use, copy, modify, distribute and sell these word lists, "
+    "the associated scripts, the output created from the scripts, and its documentation for any purpose is hereby "
+    "granted without fee, provided that the above copyright notice appears in all copies and that both that copyright "
+    "notice and this permission notice appear in supporting documentation. Kevin Atkinson makes no representations "
+    "about the suitability of this array for any purpose. It is provided \"as is\" without express or implied warranty.")
 CUTOFF = 0.8            # the same cutoff hive_chat.fix_typos uses
 RE_CALLS = {"compile", "search", "match", "fullmatch", "sub", "findall", "finditer", "split"}
 
@@ -61,6 +69,7 @@ def main(dict_path):
     protect -= set(targets)
     out = {"_about": "built by build_typo_words.py from %s; targets = words the chat's patterns route on, protect = real "
                      "words close to one (never changed)" % os.path.basename(dict_path),
+           "_license": SCOWL_NOTICE,
            "targets": targets, "protect": sorted(protect),
            # pattern words no dictionary has ("reboot", "dbm"...): never changed, and their inflections neither
            "known": sorted(w for w in found if w not in words)}
