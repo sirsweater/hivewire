@@ -195,3 +195,7 @@ tr:last-child td { border-bottom: 0; }
 .msg.pending { align-self: flex-start; border: 1px solid var(--warn); background: var(--surface); }
 .msg.done { align-self: flex-start; border: 1px dashed var(--line); background: transparent; }
 @media (max-width: 640px) { .msg { max-width: 95%; } }
+
+/* Kitchen: tap-to-pick foods and cuisines */
+.chip { padding: 4px 11px; border-radius: 999px; font-size: 13px; font-weight: 500; }
+.chip.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }

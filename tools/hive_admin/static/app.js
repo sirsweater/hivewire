@@ -1190,6 +1190,28 @@ views.stream = async (el) => {
 // ---------------------------------------------------------------------------
 // Kitchen: the foods in the house, a week of meals from them, and what to buy
 // ---------------------------------------------------------------------------
+// Common foods to tap instead of typing (Gregory, 2026-10-17: "select popular ingredients instead of me typing them
+// all out"), Cajun and stir-fry staples included. Tapping adds or removes one from the list.
+const KITCHEN_POPULAR = {
+  "Meat & seafood": ["chicken breasts", "chicken thighs", "chicken tenders", "whole chicken", "ground beef", "steak", "pork chops",
+    "pork shoulder", "bacon", "smoked sausage", "andouille sausage", "Italian sausage", "ham", "ground turkey", "shrimp",
+    "crawfish", "catfish", "salmon", "tilapia", "eggs", "tofu"],
+  "Vegetables": ["onions", "garlic", "bell peppers", "celery", "carrots", "potatoes", "sweet potatoes", "broccoli", "cabbage",
+    "spinach", "lettuce", "tomatoes", "mushrooms", "zucchini", "corn", "green beans", "peas", "okra", "green onions",
+    "jalapeños", "cucumbers", "bok choy", "snow peas", "bean sprouts", "cauliflower", "avocados", "lemons", "limes"],
+  "Rice, pasta & bread": ["white rice", "brown rice", "pasta", "spaghetti", "egg noodles", "lo mein noodles", "ramen noodles",
+    "flour tortillas", "corn tortillas", "bread", "French bread", "hamburger buns"],
+  "Dairy": ["butter", "milk", "cheddar", "mozzarella", "parmesan", "sour cream", "cream cheese", "heavy cream", "yogurt"],
+  "Pantry": ["flour", "sugar", "brown sugar", "cornstarch", "roux", "chicken broth", "beef broth", "canned tomatoes",
+    "tomato sauce", "tomato paste", "black beans", "red kidney beans", "pinto beans", "rice vinegar", "honey", "peanut butter",
+    "peanuts"],
+  "Sauces & seasonings": ["soy sauce", "oyster sauce", "hoisin sauce", "sesame oil", "sriracha", "hot sauce",
+    "Worcestershire sauce", "Cajun seasoning", "Creole seasoning", "filé powder", "bay leaves", "thyme", "paprika",
+    "cayenne", "ginger", "ketchup", "mustard", "mayonnaise", "barbecue sauce", "salsa"],
+};
+const KITCHEN_CUISINES = [["cajun", "Cajun & Creole"], ["stir fry", "Stir fry"], ["mexican", "Mexican & Tex-Mex"],
+  ["italian", "Italian"], ["southern", "Southern & BBQ"], ["soups", "Soups & stews"]];
+
 // A file as the kitchen service wants it. A photo is drawn onto a canvas first: smaller (2000 px on the long side is
 // plenty to read), always JPEG (a phone's HEIC too, where the browser can show it), and no location data.
 async function kitchenPayload(file) {
@@ -1218,7 +1240,7 @@ function kitchenPlanHtml(k) {
   const p = k.plan;
   if (!p) return '<p class="muted">No plan yet. List what you have, then press Plan my week.</p>';
   if (p.error) return `<p class="err">${esc(p.error)}</p>`;
-  const meals = (p.meals || []).map((m, i) => `<details class="note" style="margin:0"><summary><b>${i + 1}. ${esc(m.title)}</b>
+  const meals = (p.meals || []).map((m, i) => `<details class="note" style="margin:0"><summary><b>${i + 1}. ${esc(m.title)}</b>${(m.liked || []).length ? ` <span class="pill good small">${esc(m.liked.map((x) => (KITCHEN_CUISINES.find((c) => c[0] === x) || [x, x])[1]).join(", "))}</span>` : ""}
       <span class="small"> - uses your ${esc(m.have.join(", "))}${m.need.length ? '; <b>needs</b> ' + esc(m.need.join(", ")) : "; nothing to buy"}</span></summary>
       <div class="small" style="margin-top:8px"><b>Ingredients</b><ul>${(m.ingredients || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
       <b>Steps</b><ol>${(m.steps || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
@@ -1228,9 +1250,10 @@ function kitchenPlanHtml(k) {
       <span class="muted small">(for ${esc(x.for.join("; "))})</span></li>`).join("");
   const unlock = (p.unlock || []).map((x) => `<li>${esc(x.item)} <span class="muted small">- ${x.recipes} more recipes need only that</span></li>`).join("");
   return `<div class="stack">
-    <div class="muted small">${(p.meals || []).length} meals, planned ${fmtAge(STATE ? STATE.time - k.plan_at : 0)} ago from ${(p.considered || 0).toLocaleString()} recipes that use your foods. ${esc(p.assumed || "")} taken as given.</div>
+    <div class="muted small">${(p.meals || []).length} meals, planned ${fmtAge(Math.round(STATE ? STATE.time - k.plan_at : 0))} from ${(p.considered || 0).toLocaleString()} recipes that use your foods. ${esc(p.assumed || "")} taken as given.</div>
     ${meals || '<p class="muted">No recipe uses at least two of your foods with four or fewer things to buy - add a few more foods.</p>'}
     <div><b>Shopping list</b>${shop ? `<ul>${shop}</ul>` : '<p class="muted small">Nothing to buy - every meal uses only what you have.</p>'}</div>
+    ${(p.spices || []).length ? `<div><b>Spices and seasonings</b> <span class="muted small">- check the cupboard</span><div class="small">${esc(p.spices.map((x) => x.item).join(", "))}</div></div>` : ""}
     ${unlock ? `<div><b>Worth adding</b><ul>${unlock}</ul></div>` : ""}
     ${(p.unused || []).length ? `<div class="muted small">Not used this week: ${esc(p.unused.join(", "))}</div>` : ""}</div>`;
 }
@@ -1241,10 +1264,13 @@ views.kitchen = async (el) => {
     ${k.enabled ? "" : '<div class="card err">Set the Chat page\'s model server first - the Kitchen asks the same machine.</div>'}
     <div class="grid cols-2">
       <div class="card stack">
-        <div class="spread"><b>Foods I have</b><span class="muted small" id="k-saved">${k.updated ? "saved " + fmtAge(STATE ? STATE.time - k.updated : 0) + " ago" : ""}</span></div>
+        <div class="spread"><b>Foods I have</b><span class="muted small" id="k-saved">${k.updated ? "saved " + fmtAge(Math.round(STATE ? STATE.time - k.updated : 0)) : ""}</span></div>
         <textarea id="k-have" rows="12" style="width:100%" placeholder="One per line - e.g.&#10;chicken breasts&#10;rice&#10;broccoli&#10;cheddar">${esc((k.have || []).join("\n"))}</textarea>
         <div class="row"><button class="primary" id="k-save">Save</button><span class="muted small">Salt, pepper, oil and water are taken as given.</span></div>
-        <label class="drop" id="k-drop">Drop a receipt here - a PDF, a saved e-mail (.eml) or web page - or tap to take a photo of a paper one
+        <details class="note" style="margin:0" ${(k.have || []).length ? "" : "open"}><summary><b>Pick from common foods</b> <span class="small">- tap to add or take off</span></summary>
+          <div id="k-popular">${Object.entries(KITCHEN_POPULAR).map(([g, xs]) => `<div class="small muted" style="margin:10px 0 4px">${esc(g)}</div>
+            <div class="row" style="gap:6px">${xs.map((x) => `<button type="button" class="chip" data-food="${esc(x)}">${esc(x)}</button>`).join("")}</div>`).join("")}</div></details>
+        <label class="drop" id="k-drop" style="display:block;cursor:pointer">Drop a receipt here - a PDF, a saved e-mail (.eml) or web page - or tap to take a photo of a paper one
           <input type="file" id="k-file" accept="image/*,.pdf,.eml,.html,.htm,.txt,application/pdf,message/rfc822,text/html,text/plain" hidden></label>
         <div id="k-receipt"></div>
       </div>
@@ -1253,13 +1279,35 @@ views.kitchen = async (el) => {
           <select id="k-meals">${[3, 4, 5, 6, 7].map((n) => `<option ${n === (k.plan_meals || 7) ? "selected" : ""}>${n}</option>`).join("")}</select><span class="small muted">meals</span>
           <input id="k-avoid" placeholder="leave out, e.g. mushrooms, pork" style="flex:1;min-width:150px" value="${esc((k.avoid || []).join(", "))}">
           <button class="primary" id="k-plan">Plan my week</button></div>
+        <div class="row" style="gap:6px"><span class="small muted">I like:</span>${KITCHEN_CUISINES.map(([key, label]) => `<button type="button" class="chip" data-like="${esc(key)}">${esc(label)}</button>`).join("")}</div>
         <div id="k-plan-out">${kitchenPlanHtml(k)}</div>
       </div>
     </div>`;
   const lines = () => $("#k-have").value.split(/\n|,/).map((x) => x.trim()).filter(Boolean);
+  let likes = (k.likes || []).slice();
+  const marks = () => {
+    const have = new Set(lines().map((x) => x.toLowerCase()));
+    el.querySelectorAll("[data-food]").forEach((b) => b.classList.toggle("on", have.has(b.dataset.food.toLowerCase())));
+    el.querySelectorAll("[data-like]").forEach((b) => b.classList.toggle("on", likes.includes(b.dataset.like)));
+  };
+  let saveT = null;
+  const soon = () => { clearTimeout(saveT); saveT = setTimeout(() => save().catch((e) => toast(e.message, 6000)), 900); };
+  el.querySelectorAll("[data-food]").forEach((b) => b.onclick = () => {
+    const f = b.dataset.food, cur = lines(), i = cur.findIndex((x) => x.toLowerCase() === f.toLowerCase());
+    if (i >= 0) cur.splice(i, 1); else cur.push(f);
+    $("#k-have").value = cur.join("\n"); marks(); $("#k-saved").textContent = "saving…"; soon();
+  });
+  el.querySelectorAll("[data-like]").forEach((b) => b.onclick = () => {
+    const x = b.dataset.like;
+    likes = likes.includes(x) ? likes.filter((y) => y !== x) : likes.concat([x]);
+    marks(); $("#k-saved").textContent = "saving…"; soon();
+  });
+  $("#k-have").oninput = marks;
+  marks();
   const save = async () => {
-    k = await api("/api/kitchen/have", { have: lines() });
-    $("#k-have").value = k.have.join("\n"); $("#k-saved").textContent = "saved just now";
+    clearTimeout(saveT);
+    k = await api("/api/kitchen/have", { have: lines(), likes });
+    $("#k-have").value = k.have.join("\n"); $("#k-saved").textContent = "saved just now"; marks();
   };
   $("#k-save").onclick = async () => { try { await save(); toast("Saved " + k.have.length + " foods"); } catch (e) { toast(e.message, 6000); } };
   $("#k-plan").onclick = async () => {
@@ -1288,7 +1336,7 @@ views.kitchen = async (el) => {
         const add = [...out.querySelectorAll("input[data-i]:checked")].map((c) => r.items[+c.dataset.i].food);
         try {
           k = await api("/api/kitchen/have", { add });
-          $("#k-have").value = k.have.join("\n"); $("#k-saved").textContent = "saved just now";
+          $("#k-have").value = k.have.join("\n"); $("#k-saved").textContent = "saved just now"; marks();
           out.innerHTML = ""; toast("Added " + add.length + " foods");
         } catch (e) { toast(e.message, 6000); }
       };

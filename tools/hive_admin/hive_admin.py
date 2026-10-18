@@ -2795,6 +2795,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if b.get("remove"):
                 gone = {str(x).strip().lower() for x in b["remove"]}
                 d["have"] = [x for x in d["have"] if x.lower() not in gone]
+            if "likes" in b:                                   # cuisines the person likes: "cajun", "stir fry"
+                d["likes"] = [str(x).strip().lower()[:40] for x in (b.get("likes") or []) if str(x).strip()][:10]
             d["updated"] = now()
             kitchen_save(app, d)
             return self.send_json(d)
@@ -2805,7 +2807,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("list at least two foods you have first")
             meals = max(1, min(7, int(b.get("meals") or 7)))
             avoid = kitchen_items(b.get("avoid"))[:30]
-            r = kitchen_call(app, "/kitchen/plan", {"have": d["have"], "meals": meals, "avoid": avoid}, 180)
+            r = kitchen_call(app, "/kitchen/plan", {"have": d["have"], "meals": meals, "avoid": avoid,
+                                                    "likes": d.get("likes") or []}, 180)
             d.update(plan=r, plan_at=now(), plan_meals=meals, avoid=avoid)
             kitchen_save(app, d)
             app.store.event("kitchen", "planned %d meals from %d foods" % (len(r.get("meals") or []), len(d["have"])))
