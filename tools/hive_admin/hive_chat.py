@@ -4212,7 +4212,10 @@ def watch_add_reply(hive, nodes, q):
 def watch_del_reply(hive, nodes, q):
     ws = _watches(hive)
     if ws is None:
-        return None
+        # an admin from before soil alerts: there are none to remove (the model had proposed a notes edit)
+        return ("There are no soil alerts to remove - this hive's admin doesn't have them yet. Its own problem alerts (a "
+                "reservoir empty, a node gone quiet, the gateway not answering) are built in; g4rden's app can mute "
+                "them on your phone. Nothing was changed.")
     keep = SAID[:]
     SAID[:] = [q]
     try:
