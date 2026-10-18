@@ -3291,14 +3291,19 @@ def why_not_watered_reply(hive, nodes, q):
             head, dose_timer_text(n, meta))
     if soil is None and PROBE_OUT_WARNING in (n.get("warnings") or []):
         return "%s Its probe is out of the soil, so automatic watering has no reading to go on." % head
-    if not (n.get("slots") or {}).get("49"):
+    if "automatic watering" not in str(hive.slot_spec(n.get("kind"), 49).get("label", "")).lower():
+        return "%s It has no automatic watering of its own, so it only gets water when someone sends it." % head
+    if (n.get("slots") or {}).get("49") == 0:     # (not reported isn't off)
         return "%s Its own automatic watering is switched off, so it only gets water when someone sends it." % head
     if "NOT TRUSTED" in issue.upper():
         return None
-    band = band_of(meta)
-    if soil is not None and band and soil > band[0]:
+    # where its automatic watering really starts (the learned / band-scaled point), not just the band's low end
+    m = re.match(r"\s*(\d+(?:\.\d+)?)", str(t_watering_advice(hive, str(n["id"])).get(
+        "automatic watering starts when soil falls below") or ""))
+    start = float(m.group(1)) if m else (band_of(meta) or [None])[0]
+    if soil is not None and start is not None and soil > start:
         return ("%s It reads %.0f%% now, above the %g%% where its automatic watering starts, so it didn't need it." % (
-            head, soil, band[0]))
+            head, soil, start))
     return None
 
 

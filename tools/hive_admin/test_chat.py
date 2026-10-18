@@ -1687,6 +1687,17 @@ for q in ("how's the wether station?", "is the plant thirsty?", "rename the cact
           "my larkspur looks droopy and yellowing", "the soil is soggy"):
     check(C.fix_typos(q, _tn)[1] == [], "...left alone: %r" % q, C.fix_typos(q, _tn))
 
+_a = C.why_not_watered_reply(hive, hive.call("GET", "/api/state")["nodes"], "why didn't node %d get watered today?" % pump["id"])
+check(_a is None or _a.startswith("It was - ") or (_a.startswith("Right - ") and ("automatic watering" in _a or "probe" in _a)),
+      "'why didn't it get watered today?' on an ordinary pump node: the events, or a reason from its settings", _a)
+_we2 = C.watering_events
+C.watering_events = lambda h, n, back: []
+try:
+    _a = C.why_not_watered_reply(hive, hive.call("GET", "/api/state")["nodes"], "why didn't node %d get watered today?" % pump["id"])
+finally:
+    C.watering_events = _we2
+check(_a is None or (_a.startswith("Right - ") and ("automatic watering" in _a or "probe" in _a)),
+      "...and with no watering today, the reason from its settings", _a)
 # --- soil alerts set from the chat (the admin's watches) ------------------------------------
 _pid = pump["id"]
 app.cfg.set_node(_pid, {"soil_dry": 4000, "soil_wet": 1000})
