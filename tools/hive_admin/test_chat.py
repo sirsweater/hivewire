@@ -1720,6 +1720,8 @@ class _UpHive:
 a = C.uptime_reply(_UpHive(), {"id": 7, "name": "Strawberry", "kind": "WaterNode", "age": 20, "slots": {"7": 20, "8": 1380}}) or ""
 check("23.0 hours" in a and "every start it has ever had" in a, "uptime in minutes, and the boot counter isn't 'since then'", a)
 
+check(C.boots_text(255).startswith("255 or more") and C.boots_text(20) == "20", "a boot counter at 255 is capped, not exact")
+
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
        {"id": 20, "name": "Weather station"}]

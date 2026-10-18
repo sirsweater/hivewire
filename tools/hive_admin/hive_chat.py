@@ -2499,7 +2499,7 @@ def uptime_fact(hive, st, named):
             "up %.1f hours (%.1f days) - running since %s" % (up / 60.0, up / 1440.0, time.strftime(
                 "%a %d %b %H:%M", time.localtime(time.time() - up * 60))) if up is not None else "uptime not reported",
             "; boot counter %s (every start since it was first flashed: power-ups, resets and firmware updates "
-            "all count, not only crashes)" % boots if boots is not None else ""))
+            "all count, not only crashes)" % boots_text(boots) if boots is not None else ""))
     return ("UPTIME AND STARTS: %s." % "; ".join(lines)) if lines else None
 
 
@@ -4254,6 +4254,11 @@ UPTIME_Q = re.compile(r"(?i)\b(uptime|up time)\b|\bhow long\b[^?]{0,30}\b(been )
                       r"\b(restart\w*|reboot\w*|start\w*)\b|\b(did|has)\b[^?]{0,30}\b(restart\w*|reboot\w*)\b")
 
 
+def boots_text(v):
+    """The Boots slot is the node's start count capped at 255 (firmware: bootCount > 255 ? 255 : bootCount)."""
+    return "255 or more (the slot stops counting at 255)" if v is not None and int(v) >= 255 else "%s" % v
+
+
 def uptime_reply(hive, n, q=""):
     """ "What's the uptime of the strawberry node?" said "20 boots in that time" - the counter is every start it has had."""
     sl = n.get("slots") or {}
@@ -4268,10 +4273,10 @@ def uptime_reply(hive, n, q=""):
     if boots is not None and re.search(r"(?i)\bhow (many|often)\b", q):
         # "how many times has it rebooted?": the count first
         return ("%s's boot counter reads %s - every start it has ever had (restarts and power-ups). Its last one was %s; "
-                "it has been running %s since." % (nm, boots, time.strftime("%a %d %b %H:%M", time.localtime(since)), span))
+                "it has been running %s since." % (nm, boots_text(boots), time.strftime("%a %d %b %H:%M", time.localtime(since)), span))
     return "%s has been running %s, since %s (its last restart).%s" % (
         nm, span, time.strftime("%a %d %b %H:%M", time.localtime(since)),
-        " Its boot counter reads %s - every start it has ever had, not since then." % boots if boots is not None else "")
+        " Its boot counter reads %s - every start it has ever had, not since then." % boots_text(boots) if boots is not None else "")
 
 
 SEED_CARE_Q = re.compile(r"(?i)\b(cover(ing)?|dome|plastic wrap|cling film|lid|heat mat|bottom heat|humidity)\b(?! crops?)[^?]{0,40}"
