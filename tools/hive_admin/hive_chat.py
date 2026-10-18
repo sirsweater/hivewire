@@ -4074,6 +4074,9 @@ WATCH_ABOVE = re.compile(r"(?i)\b(above|over|more than|higher than|rises?|rising
                          r"go (above|over|up)|gets? (above|over|up)|exceeds?|wetter than|up to)\b")
 WATCH_PAST = re.compile(r"(?i)\b(yesterday|last (night|week)|ago|did|was|were|went|dropped|fell|has it|have they|been)\b")
 WATCH_DRYWORD = re.compile(r"(?i)\b(dry|dries|dry out|drier|needs? water(ing)?|thirsty|wet|soggy|too (wet|dry))\b")
+# a change ("drops", "goes above") or "when" makes it an alert; "let me know if it's below 70%" asks about now
+WATCH_CHANGE = re.compile(r"(?i)\b(drops?|dropping|falls?|falling|goes|go|gets?|getting|dips?|sinks?|rises?|rising|climbs?|"
+                          r"climbing|exceeds?|hits?|reaches|crosses|ever|again|whenever|when|from now on|starts? to|once)\b")
 WATCH_DEL_Q = re.compile(r"(?i)\b(stop|cancel|remove|delete|turn off|switch off|clear|drop|get rid of|no more)\b[^?.]{0,40}"
                          r"\b(alert|notif|warning|ping)\w*|\b(don't|do not) (alert|notify|warn|ping|tell) me\b")
 
@@ -4138,10 +4141,20 @@ def watch_add_reply(hive, nodes, q):
     bad = [v for _, v in pairs if not 1 <= v <= 99]
     if bad:
         return "A soil alert's level is 1-99%%, not %g%%. Nothing was changed." % bad[0]
+    soil = (n.get("derived") or {}).get("soil")
+    if not WATCH_CHANGE.search(q) and not re.search(
+            r"(?i)\b(alert|notify|warn|ping|text|buzz|message)\b|\b(alert|notification|warning|reminder|push)s?\b", q):
+        d, v = pairs[0]
+        if soil is None:
+            return "%s has no reading right now, so I can't say. Nothing was changed." % nm
+        yes = soil < v if d == "below" else soil > v
+        return ("%s - %s reads %.0f%% now, %s %g%%. For a phone alert when it %s, say \"tell me if the %s %s %g%%\"." % (
+            "Yes" if yes else "No", nm, soil, ("below" if d == "below" else "above") if yes else
+            ("not below" if d == "below" else "not above"), v, "drops below" if d == "below" else "goes above",
+            nm.lower(), "drops below" if d == "below" else "goes above", v))
     if _watches(hive) is None:
         return ("This hive's admin doesn't have soil alerts yet (it needs the update that adds them). Nothing was "
                 "changed.")
-    soil = (n.get("derived") or {}).get("soil")
     paired = bool((((hive.call("GET", "/api/g4rden") or {}).get("config") or {}).get("paired")))
     done, waiting, no = [], [], []
     for d, v in pairs[:2]:

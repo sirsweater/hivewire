@@ -1720,6 +1720,9 @@ check(_nosoil is not None, "the fake hive has a node with no soil probe")
 if _nosoil:
     _a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "tell me if node %d drops below 30%%" % _nosoil["id"])
     check("has no soil probe" in _a, "...a node without a soil probe can't have one", _a)
+_a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "let me know if node %d is below 99%%" % _pid)
+check(re.match(r"(Yes|No) - .* reads \d+% now", _a or "") and "tell me if" in _a and len(hive.call("GET", "/api/watches")["watches"]) == 1,
+      "'let me know if it's below 99%': the reading now, no card", _a)
 _o = _conv.ask(hive, "stop alerting me about node %d" % _pid)
 check(_o["pending"] and _conv.pending[_o["pending"][0]["id"]]["path"] == "/api/watch/delete" and "remove" in _o["answer"],
       "'stop alerting me about it': a card to remove it", _o)
