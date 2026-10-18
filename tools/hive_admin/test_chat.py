@@ -160,7 +160,9 @@ conv = C.Conversation()
 fake_llm.calls.clear()
 past = "It was last watered on Oct 05 at 14:04. Since then, no watering has been sent from the hive or this chat."
 script[:] = [say(past)]
-out = conv.ask(hive, "when was node %d last watered?" % pump["id"])
+# ("when was it last watered?" is answered in code now - last_water_reply - so the model's past-tense line is asked
+# for another way)
+out = conv.ask(hive, "has node %d been watered lately?" % pump["id"])
 check(out["answer"] == past and len(fake_llm.calls) == 1, "'no watering has been sent' isn't taken for a claim",
       out["answer"])
 
@@ -766,6 +768,9 @@ check(C.FILLER_END.sub("", "The cactus reads 56%.\n\nIf you need further details
 check(all(C.WET_DRY_Q.search(x) and not C.WET_DRY_NOT.search(x) for x in (
     "How does the draining of the strawberry node look", "how's the cactus drying?", "is the strawberry getting wetter or drier?"))
     and C.WET_DRY_NOT.search("which plant is drying fastest?"), "wetter/drier phrasings (Gregory's own included)")
+
+a = C.last_water_reply(hive, pump)
+check(a and (" was last watered " in a or "no watering on record" in a), "when it was last watered: in code", a)
 
 # A germinating pot over its top isn't a to-do: germination mode is holding its doses.
 _n = {"id": pump["id"], "name": "Seedpot", "kind": "WaterNode", "derived": {"soil": 85.0}, "warnings": []}

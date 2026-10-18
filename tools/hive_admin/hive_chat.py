@@ -2927,6 +2927,60 @@ def seed_dry_reply(hive, nodes, q):
             "\"give the %s 5 ml\") and I'll set it up for you to confirm. %s" % (nm, soil, nm.lower(), timer))
 
 
+LAST_WATER_Q = re.compile(r"(?i)\b(how (many|much) (days|time)|how long ago|days (since|ago)|how long since|when was|when did)\b"
+                          r"[^?]*\b(last )?(water\w*|dose\w*|pump\w*)\b")
+
+
+def last_water_reply(hive, n):
+    """ "How many days ago was the strawberry last watered?" - "15:13 on October 17th, which is about 1 day ago", said
+    at 19:30 the same day (hive-full25). The time, worked out here."""
+    t = last_watered_at(hive, n)
+    name = n.get("name") or "node %s" % n["id"]
+    if not t:
+        return "%s has no watering on record in the last 30 days." % name
+    now_ = time.time()
+    lt, ln = time.localtime(t), time.localtime(now_)
+    if lt.tm_yday == ln.tm_yday and lt.tm_year == ln.tm_year:
+        when = "today at %s" % time.strftime("%H:%M", lt)
+    elif now_ - t < 2 * 86400 and time.localtime(now_ - 86400).tm_yday == lt.tm_yday:
+        when = "yesterday at %s" % time.strftime("%H:%M", lt)
+    else:
+        when = time.strftime("%a %d %b at %H:%M", lt)
+    meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
+    how = " - a germination dose from the admin's timer" if stage_name(meta) == "germination" else ""
+    return "%s was last watered %s (%s ago)%s." % (name, when, days_ago(t), how)
+
+
+def dry_top_reply(hive, nodes, q):
+    """ "The top of the cactus pot looks dry, should I water it?" with the probe at 57 % against 5-20 %: the answer had
+    told him to poke a finger in and water if it felt dry (hive-full25). What the probe says, in so many words."""
+    if not re.search(r"(?i)\b(water|watering)\b", q):
+        return None
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n) and n.get("kind") != "WeatherNode"]
+    finally:
+        SAID[:] = keep
+    if len(named) != 1 or stage_name(cfg.get(str(named[0]["id"]))) == "germination":
+        return None
+    n = named[0]
+    soil, band = (n.get("derived") or {}).get("soil"), band_of(cfg.get(str(n["id"])))
+    if soil is None or not band:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    hand = "" if has_pump(hive, n.get("kind")) else " (it has no pump - water it by hand)"
+    if soil > band[1]:
+        return ("No - %s's probe reads %.0f%% down at root depth, above its %s-%s%% band. The top dries first; a dry "
+                "surface doesn't mean a dry pot. Let it dry until the probe reads near %s%%%s." % (
+                    nm, soil, band[0], band[1], band[1], hand))
+    if soil >= band[0]:
+        return ("Not yet - %s's probe reads %.0f%%, inside its %s-%s%% band. Water when it falls to about %s%%%s." % (
+            nm, soil, band[0], band[1], band[0], hand))
+    return "Yes - %s's probe reads %.0f%%, below its %s-%s%% band%s." % (nm, soil, band[0], band[1], hand)
+
+
 # ("node 42" only: a bare "#1" is as likely "the #1 plant" as a node)
 NODE_NUM = re.compile(r"(?i)\bnode\s*#?\s*(\d{1,3})\b")
 
@@ -5343,9 +5397,21 @@ def ask(hive, messages, q, on_tool=None):
     if not fixed and FEELS_DRY.search(q) and not re.match(r"(?i)\s*(is|are|does|do|how|what|which|when|should|can)\b", q) \
             and not SYMPTOM.search(q) and not REQUEST.search(q) and not REQUEST_CLAUSE.search(q):
         try:
-            fixed = seed_dry_reply(hive, nodes, q)
+            fixed = seed_dry_reply(hive, nodes, q) or dry_top_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
+    if not fixed and LAST_WATER_Q.search(q) and is_question(q) and not COMMAND.search(q):
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            lw = [n for n in nodes if named_by_person(n) and n.get("kind") != "WeatherNode"]
+        finally:
+            SAID[:] = keep
+        if len(lw) == 1:
+            try:
+                fixed = last_water_reply(hive, lw[0])
+            except RuntimeError:
+                fixed = None
     if not fixed and NODE_NUM.search(q):
         try:
             fixed = ghost_node_reply(hive, st, q)
