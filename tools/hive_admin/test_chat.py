@@ -1723,6 +1723,20 @@ if _nosoil:
 _a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "let me know if node %d is below 99%%" % _pid)
 check(re.match(r"(Yes|No) - .* reads \d+% now", _a or "") and "tell me if" in _a and len(hive.call("GET", "/api/watches")["watches"]) == 1,
       "'let me know if it's below 99%': the reading now, no card", _a)
+for q, hit in (("stop the pump on the strawberry and alert me when it's done", False), ("stop the strawberry pump", False),
+               ("stop alerting me about the strawberry", True), ("remove the strawberry alert", True),
+               ("don't alert me about the cactus anymore", True), ("turn off notifications for the rhubarb", True)):
+    check(bool(C.WATCH_DEL_Q.search(q)) == hit, "removing a soil alert: %r -> %s" % (q, hit))
+check(C.watch_pairs("tell me if it drops below 65% or goes above 90%") == [("below", 65.0), ("above", 90.0)] and
+      C.watch_pairs("alert me when it reaches 90%") == [("either", 90.0)], "each level with its own direction; 'reaches' is either")
+C.confirm = lambda *a, **k: False
+try:
+    _a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "alert me when node %d gets to 99%%" % _pid)
+finally:
+    C.confirm = _keep_confirm
+check(_a and ("soil above 99 %" in _a or "soil below 99 %" in _a or "Below or above?" in _a) and "(node %d) (node" % _pid not in _a
+      and "node %d (node %d)" % (_pid, _pid) not in _a,
+      "'gets to 99%': up or down, by the reading now", _a)
 _o = _conv.ask(hive, "stop alerting me about node %d" % _pid)
 check(_o["pending"] and _conv.pending[_o["pending"][0]["id"]]["path"] == "/api/watch/delete" and "remove" in _o["answer"],
       "'stop alerting me about it': a card to remove it", _o)

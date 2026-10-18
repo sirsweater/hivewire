@@ -4069,7 +4069,8 @@ WATCH_ASK = re.compile(r"(?i)\b(tell|alert|notify|warn|ping|text|message|let|buz
                        r"reminder)s?\b|\bsend (me )?(an? )?(alert|notification|push)\b")
 WATCH_LEVEL = re.compile(r"(?i)(\d{1,3}(?:\.\d+)?)\s*(%|percent\b|per cent\b)")
 WATCH_BELOW = re.compile(r"(?i)\b(drops?|dropping|falls?|falling|goes (below|under|down)|go (below|under|down)|"
-                         r"gets? (below|under|down|to)|below|under|less than|lower than|dips?|sinks?|dri?y?er than|down to)\b")
+                         r"gets? (below|under|down)|below|under|less than|lower than|dips?|sinks?|dri?y?er than|down to)\b")
+WATCH_EITHER = re.compile(r"(?i)\b(gets? to|reach(es)?|hits?|is at|at)\b")    # "gets to 50%": up or down, by the reading now
 WATCH_ABOVE = re.compile(r"(?i)\b(above|over|more than|higher than|rises?|rising|climbs?|climbing|goes (above|over|up)|"
                          r"go (above|over|up)|gets? (above|over|up)|exceeds?|wetter than|up to)\b")
 WATCH_PAST = re.compile(r"(?i)\b(yesterday|last (night|week)|ago|did|was|were|went|dropped|fell|has it|have they|been)\b")
@@ -4077,8 +4078,10 @@ WATCH_DRYWORD = re.compile(r"(?i)\b(dry|dries|dry out|drier|needs? water(ing)?|t
 # a change ("drops", "goes above") or "when" makes it an alert; "let me know if it's below 70%" asks about now
 WATCH_CHANGE = re.compile(r"(?i)\b(drops?|dropping|falls?|falling|goes|go|gets?|getting|dips?|sinks?|rises?|rising|climbs?|"
                           r"climbing|exceeds?|hits?|reaches|crosses|ever|again|whenever|when|from now on|starts? to|once)\b")
-WATCH_DEL_Q = re.compile(r"(?i)\b(stop|cancel|remove|delete|turn off|switch off|clear|drop|get rid of|no more)\b[^?.]{0,40}"
-                         r"\b(alert|notif|warning|ping)\w*|\b(don't|do not) (alert|notify|warn|ping|tell) me\b")
+# the verb has to be about the alert: "stop the pump and alert me when it's done" isn't removing one
+WATCH_DEL_Q = re.compile(r"(?i)\b(stop|cancel|remove|delete|turn off|switch off|clear|get rid of|no more)\b"
+                         r"(\s+(?!and\b|then\b|but\b|also\b|me\b|when\b|if\b)[\w']+){0,3}?\s+(alerts?|alerting|notifications?|"
+                         r"notifying|warnings?|warning|pinging|pings?)\b|\b(don't|do not|no longer) (alert|notify|warn|ping) me\b")
 
 
 def _watches(hive):
@@ -4100,7 +4103,8 @@ def watch_pairs(q):
     out, start = [], 0
     for m in WATCH_LEVEL.finditer(q):
         seg = q[start:m.start()]
-        words = [("below", x.end()) for x in WATCH_BELOW.finditer(seg)] + [("above", x.end()) for x in WATCH_ABOVE.finditer(seg)]
+        words = [("below", x.end()) for x in WATCH_BELOW.finditer(seg)] + [("above", x.end()) for x in WATCH_ABOVE.finditer(seg)] + \
+            [("either", x.end()) for x in WATCH_EITHER.finditer(seg)]
         if not words:
             after = q[m.end():m.end() + 25]
             words = [("below", -x.start()) for x in WATCH_BELOW.finditer(after)] + \
@@ -4142,6 +4146,11 @@ def watch_add_reply(hive, nodes, q):
     if bad:
         return "A soil alert's level is 1-99%%, not %g%%. Nothing was changed." % bad[0]
     soil = (n.get("derived") or {}).get("soil")
+    if any(d == "either" for d, _ in pairs):
+        if soil is None:
+            return ("Below or above? %s has no reading right now, so I can't tell which way \"%g%%\" means - say "
+                    "\"drops below\" or \"goes above\". Nothing was changed." % (nm, pairs[0][1]))
+        pairs = [((("below" if soil > v else "above") if d == "either" else d), v) for d, v in pairs]
     if not WATCH_CHANGE.search(q) and not re.search(
             r"(?i)\b(alert|notify|warn|ping|text|buzz|message)\b|\b(alert|notification|warning|reminder|push)s?\b", q):
         d, v = pairs[0]
@@ -4159,8 +4168,9 @@ def watch_add_reply(hive, nodes, q):
     done, waiting, no = [], [], []
     for d, v in pairs[:2]:
         what = "%s's soil %s %g%%" % (nm, "drops below" if d == "below" else "goes above", v)
-        r = write(hive, "add a phone alert: %s (node %s) soil %s %g %% - through g4rden, once each time it crosses" % (
-            nm, n["id"], d, v), "/api/watch", {"node": n["id"], d: v})
+        r = write(hive, "add a phone alert: %s soil %s %g %% - through g4rden, once each time it crosses" % (
+            "%s (node %s)" % (n["name"], n["id"]) if n.get("name") else "node %s" % n["id"], d, v),
+            "/api/watch", {"node": n["id"], d: v})
         if r.get("awaiting_approval"):
             waiting.append(what)
         elif r.get("sent"):
@@ -5594,7 +5604,8 @@ def ask(hive, messages, q, on_tool=None):
         except RuntimeError:
             fixed = None
     elif not fixed and WATCH_ASK.search(q) and not WATCH_PAST.search(q) and (
-            WATCH_LEVEL.search(q) and (WATCH_BELOW.search(q) or WATCH_ABOVE.search(q)) or WATCH_DRYWORD.search(q)):
+            WATCH_LEVEL.search(q) and (WATCH_BELOW.search(q) or WATCH_ABOVE.search(q) or WATCH_EITHER.search(q)) or
+            WATCH_DRYWORD.search(q)):
         try:
             fixed = watch_add_reply(hive, nodes, q)
         except RuntimeError:
