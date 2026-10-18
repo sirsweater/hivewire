@@ -631,6 +631,56 @@ def asked_about(label):
                for w in re.findall(r"[a-z]+", label.lower()) if len(w) >= 3 and w not in ("per",))
 
 
+# --- typo repair (2026-10-17): "hows the batery on the cactus?" missed the battery reply, "whats the temprature
+# outside?" the weather one. typo_words.json is built by build_typo_words.py from an English word list.
+_TYPO = {}
+INFLECT = (("s", ""), ("es", ""), ("ies", "y"), ("ed", ""), ("ed", "e"), ("d", ""), ("ing", ""), ("ing", "e"),
+           ("er", ""), ("ers", ""), ("est", ""), ("ly", ""), ("y", ""))   # "rhubarbs", "watering": not typos
+NO_TYPO_FIX = re.compile(r"(?i)\b(rename|renamed|call it|name it|notes?|label)\b|[\"`]")
+
+
+def _typo_words():
+    if not _TYPO:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "typo_words.json")) as f:
+                d = json.load(f)
+            _TYPO["targets"] = set(d.get("targets") or ())
+            _TYPO["protect"] = set(d.get("protect") or ()) | set(d.get("known") or ())
+        except (OSError, ValueError):
+            _TYPO["targets"], _TYPO["protect"] = set(), set()
+    return _TYPO["targets"], _TYPO["protect"]
+
+
+def fix_typos(q, nodes=()):
+    """(q with misspelt words repaired, [(typo, fix)]). A word is only repaired into one the chat's patterns route on
+    or a word of a node's name, when one candidate clearly wins ("wether": weather or whether - left alone); never a
+    real word ("thirsty" isn't "thirty"), a plural or an inflection, a word in capitals, or anything in a rename or a
+    note, where the person's spelling is the point."""
+    targets, protect = _typo_words()
+    if not targets or NO_TYPO_FIX.search(q):
+        return q, []
+    pool = targets | {w for n in nodes for w in re.findall(r"[a-z]+", (n.get("name") or "").lower()) if len(w) >= 4}
+    out, fixes = [], []
+    for tok in re.findall(r"[A-Za-z]+|[^A-Za-z]+", q):
+        lw = tok.lower()
+        if not tok.isalpha() or len(lw) < 5 or tok.isupper() or lw in pool or lw in protect or lw in COMMON_WORDS or \
+                any(lw[:-len(x)] + y in pool or lw[:-len(x)] + y in protect
+                    for x, y in INFLECT if lw.endswith(x) and len(lw) - len(x) >= 4):
+            out.append(tok)
+            continue
+        # people rarely get the first letter wrong ("rebooted" isn't "booted")
+        cand = difflib.get_close_matches(lw, [w for w in pool if w[0] == lw[0]], n=2, cutoff=0.8)
+        r = [difflib.SequenceMatcher(None, lw, c).ratio() for c in cand]
+        # two forms of one word ("calibrate", "calibrated") aren't a tie; two words ("weather", "whether") are
+        if not cand or (len(cand) > 1 and r[0] - r[1] < 0.05 and cand[0][:5] != cand[1][:5]):
+            out.append(tok)
+            continue
+        fix = cand[0].capitalize() if tok[0].isupper() else cand[0]
+        fixes.append((tok, fix))
+        out.append(fix)
+    return "".join(out), fixes
+
+
 def not_named(n):
     return {"sent": False, "reason": "the person hasn't named %s (node %s) in this conversation - ask them "
             "which node they mean instead of choosing one" % (n.get("name") or "this node", n["id"])}
@@ -3087,8 +3137,10 @@ def watering_events(hive, n, back):
     return sorted(out)
 
 
-PUMPED_DAY_Q = re.compile(r"(?i)\bhow much\b[^?]{0,40}\b(water|ml|pumped)\b[^?]{0,40}\b(last|past|previous)\s+(24 ?h(ours)?|day)\b|"
-                          r"\bhow much\b[^?]{0,40}\b(water|ml)\b[^?]{0,30}\btoday\b")
+# ("how many ml has the strawberry pumped today?" went to the model, which read the hourly history - 2026-10-17)
+PUMPED_DAY_Q = re.compile(r"(?i)\bhow (much|many)\b[^?]{0,40}\b(water|ml|millilit\w*|pumped)\b[^?]{0,40}\b(last|past|previous)\s+"
+                          r"(24 ?h(ours)?|day)\b|\bhow (much|many)\b[^?]{0,40}\b(water|ml|millilit\w*|pumped)\b[^?]{0,40}"
+                          r"\b(today|so far today)\b")
 
 
 def pumped_day_reply(hive, nodes, q):
@@ -3114,11 +3166,198 @@ def pumped_day_reply(hive, nodes, q):
     out = "%s's pump has delivered %d ml in the last 24 hours (the node's own count)." % (nm, own)
     if ev:
         sent = sum(ml for _, ml, how in ev if "pump (automatic" not in how)
-        out += " Waterings in that time: %s." % "; ".join("%d ml %s at %s" % (ml, how, when(t)) for t, ml, how in ev)
+        out += " Waterings in that time: %s." % "; ".join("%d ml at %s - %s" % (ml, when(t), how) for t, ml, how in ev)
         if sent > own + 3:
             out += (" The count is lower than what was sent because the node restarted in between - a restart starts its "
                     "24-hour count again.")
+    if re.search(r"(?i)\btoday\b", q):
+        # the node only keeps a rolling 24 h, so "today" is the waterings since midnight, added up here
+        t0 = day_window("today")[0]
+        today = [e for e in ev if e[0] >= t0]
+        out += (" Since midnight: %d ml (%s)." % (sum(ml for _, ml, _ in today), " + ".join(
+            "%d ml at %s" % (ml, time.strftime("%H:%M", time.localtime(t))) for t, ml, _ in today))
+                if today else " Nothing has been pumped since midnight.")
     return out
+
+
+def _pct_vs(v, limit):
+    """A reading beside a limit, with a decimal when rounding would make them look equal (79.6 % "below 80 %")."""
+    return "%.1f%%" % v if limit is not None and abs(v - limit) < 1 and round(v) == round(limit) else "%.0f%%" % v
+
+
+def _clock(t):
+    """ "21:13", "tomorrow 03:13" or "Mon 03:13" - local time, never UTC."""
+    lt, now = time.localtime(t), time.localtime()
+    if lt.tm_yday == now.tm_yday and lt.tm_year == now.tm_year:
+        return time.strftime("%H:%M", lt)
+    if time.localtime(time.time() + 86400).tm_yday == lt.tm_yday:
+        return time.strftime("tomorrow %H:%M", lt)
+    return time.strftime("%a %H:%M", lt)
+
+
+def _one_named(hive, nodes, q, want=None):
+    """The single node the person named in q (and `want(n, cfg)` accepts), or None."""
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n) and (want is None or want(n, cfg.get(str(n["id"])) or {}))]
+    finally:
+        SAID[:] = keep
+    return (named[0], cfg.get(str(named[0]["id"])) or {}) if len(named) == 1 else (None, None)
+
+
+def dose_timer_text(n, meta):
+    """When a germinating pot's next timed dose goes, from its seed_mode: every_h after the last one, and only while
+    the probe reads below skip_above (potcare.SeedMode.tick)."""
+    sm = meta.get("seed_mode") or {}
+    soil, skip, last = (n.get("derived") or {}).get("soil"), sm.get("skip_above"), sm.get("last")
+    ml, every = sm.get("ml", "?"), sm.get("every_h", 6)
+    due = last + every * 3600 if last else None
+    now = time.time()
+    held = soil is not None and skip is not None and soil >= skip
+    lead = ("The last %s ml dose went at %s; they're %g hours apart" % (ml, _clock(last), every) if last else
+            "No dose has gone out yet; they're %s ml every %g hours" % (ml, every))
+    rule = (", and only while the probe reads below %g%%" % skip) if skip is not None else ""
+    if not due or due <= now:
+        if held:
+            return ("%s%s. The next one is due now but held: the probe reads %s, and it goes within about a minute of "
+                    "the reading dropping below %g%%." % (lead, rule, _pct_vs(soil, skip), skip))
+        return "%s%s. The next one is due now - it should go within a minute or two." % (lead, rule)
+    if held:
+        return ("%s%s. So the next one is due at %s - if the probe reads below %g%% by then. It reads %s now; if it's still "
+                "that wet at %s, the dose waits until it drops below %g%%." % (
+                    lead, rule, _clock(due), skip, _pct_vs(soil, skip), _clock(due), skip))
+    return "%s%s. So the next one is due at %s (it reads %s now)." % (
+        lead, rule, _clock(due), _pct_vs(soil, skip) if soil is not None else "no reading")
+
+
+NEXT_DOSE_Q = re.compile(r"(?i)\bnext\b[^?]{0,20}\b(dose|watering|water|timed)\b|\bwhen\b[^?]{0,40}\b(next|again)\b[^?]{0,20}"
+                         r"\b(dose|dosed|water(ed|ing)?)\b|\bwhen\b[^?]{0,30}\b(get|be) (watered|dosed)\b[^?]{0,10}\b(next|again)\b")
+
+
+def next_dose_reply(hive, nodes, q):
+    """ "When is the strawberry's next dose?" - "21:05 UTC ... the reading is 80.0 %, which is above the threshold of
+    80.0 %" (probe-hive-1, 2026-10-17). A germinating pot's next dose, from its timer."""
+    n, meta = _one_named(hive, nodes, q, lambda n, c: stage_name(c) == "germination")
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    return "%s is in germination mode, so the admin waters it on a timer. %s" % (nm, dose_timer_text(n, meta))
+
+
+WHY_NOT_WATERED_Q = re.compile(r"(?i)\bwhy\b[^?]{0,30}\b(didn't|did not|hasn't|has not|wasn't|was not|isn't|not|no)\b[^?]{0,40}"
+                               r"\b(water(ed|ing)?|dose[ds]?|pump(ed)?)\b")
+
+
+def asked_period(q):
+    """(t0, t1, words) for "this morning" / "last night" / "today" / "yesterday"; the last 24 h when it doesn't say."""
+    now = int(time.time())
+    if re.search(r"(?i)\bthis morning\b", q):
+        t0 = day_window("today")[0]
+        return t0, min(now, t0 + 12 * 3600), "this morning"
+    for word, key in (("last night|overnight", "last night"), ("today", "today"), ("yesterday", "yesterday"),
+                      ("this afternoon", None)):
+        if re.search(r"(?i)\b(%s)\b" % word, q):
+            if key is None:
+                t0 = day_window("today")[0] + 12 * 3600
+                return t0, min(now, t0 + 6 * 3600), "this afternoon"
+            t0, t1, label = day_window(key)
+            return t0, min(now, t1), label.split(" (")[0]
+    return now - 86400, now, "in the last 24 hours"
+
+
+def why_not_watered_reply(hive, nodes, q):
+    """ "Why didn't the strawberry get watered this morning?" - "no dose was given": it got a 5 ml germination dose at
+    08:33 (probe-hive-1). The waterings in the window the person asked about are checked first; then the reason."""
+    n, meta = _one_named(hive, nodes, q, lambda n, c: n.get("kind") != "WeatherNode")
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    t0, t1, label = asked_period(q)
+    ev = [e for e in watering_events(hive, n, time.time() - t0 + 60) if t0 <= e[0] <= t1]
+    if ev:
+        return "It was - %s was watered %s: %s." % (nm, label, "; ".join(
+            ("%s ml at %s - %s" % (nice_qty(ml), _clock(t), how) if ml is not None else "%s (from %s)" % (how, _clock(t)))
+            for t, ml, how in ev))
+    if not has_pump(hive, n.get("kind")):
+        return ("%s has no pump, so the hive never waters it - it only gets water by hand. No watering of it shows up %s." % (
+            nm, label))
+    head = "Right - %s wasn't watered %s." % (nm, label)
+    soil = (n.get("derived") or {}).get("soil")
+    issue = known_issue(n["id"]) or ""
+    if stage_name(meta) == "germination":
+        return "%s It's in germination mode, so the admin's timer waters it, not the node. %s" % (
+            head, dose_timer_text(n, meta))
+    if soil is None and PROBE_OUT_WARNING in (n.get("warnings") or []):
+        return "%s Its probe is out of the soil, so automatic watering has no reading to go on." % head
+    if not (n.get("slots") or {}).get("49"):
+        return "%s Its own automatic watering is switched off, so it only gets water when someone sends it." % head
+    if "NOT TRUSTED" in issue.upper():
+        return None
+    band = band_of(meta)
+    if soil is not None and band and soil > band[0]:
+        return ("%s It reads %.0f%% now, above the %g%% where its automatic watering starts, so it didn't need it." % (
+            head, soil, band[0]))
+    return None
+
+
+PUMP_OK_Q = re.compile(r"(?i)\b(is|are|does|do)\b[^?]{0,40}\bpumps?\b[^?]{0,40}\b(work(s|ing)?|ok(ay)?|fine|broken|functioning)\b|"
+                       r"\bpumps?\b[^?]{0,30}\b(still )?(working|broken|ok(ay)?)\b\s*\?")
+
+
+def pump_ok_reply(hive, nodes, q):
+    """ "Is the pump on the strawberry working?" - "manually triggered recently due to the soil being too wet ... ask me
+    to run a test" (probe-hive-1). What the hive can see of the pump: its last run, what it said about it, its faults."""
+    n, meta = _one_named(hive, nodes, q)
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    if not has_pump(hive, n.get("kind")):
+        return "%s has no pump - it's a %s, so there's nothing to check there." % (nm, n.get("kind") or "sensor node")
+    sl = n.get("slots") or {}
+    issue = known_issue(n["id"]) or ""
+    state = (hive.slot_spec(n.get("kind"), "46").get("enum") or {}).get(str(sl.get("46")))
+    sid = pumped_slot(hive, n.get("kind"))
+    last = last_pump_run(hive, n, sid, days=7) if sid else None
+    bad = state and re.match(r"(refused|stopped)", state)
+    seen = []
+    if last:
+        seen.append("it last ran at %s (%s ml)" % (_clock(last[0]), nice_qty(last[1])))
+    else:
+        seen.append("it hasn't run in the last 7 days")
+    if state and state not in ("idle", "running"):
+        seen.append("its last run ended \"%s\"" % state + (" - finished normally" if state == "done" else ""))
+    elif state == "running":
+        seen.append("it's running right now")
+    if sid and sl.get(sid) is not None:
+        seen.append("it has pumped %s ml in the last 24 hours by its own count" % sl.get(sid))
+    res = (hive.slot_spec(n.get("kind"), "47").get("enum") or {}).get(str(sl.get("47")))
+    if res == "EMPTY":
+        seen.append("its float switch says the reservoir is EMPTY")
+    warn = [w for w in (n.get("warnings") or []) if re.search(r"(?i)\b(pump|reservoir|E3\d\d|supply)\b", w)]
+    if "NOT TRUSTED" in issue.upper():
+        lead = "Not trusted - %s's pump has a known fault: %s." % (nm, issue)
+    elif bad or res == "EMPTY" or warn:
+        lead = "It needs a look - %s's pump isn't running cleanly." % nm
+    elif last:
+        lead = "As far as the hive can tell, yes - %s's pump is working." % nm
+    else:
+        lead = "The hive can't tell yet - %s's pump hasn't run lately." % nm
+    out = "%s The hive sees that %s." % (lead, "; ".join(seen))
+    if warn:
+        out += " Warnings: %s." % "; ".join(warn)
+    return out + (" It can't see the water come out, though - a kinked or blocked tube would look the same, so watch the "
+                  "outlet during the next watering if you're unsure.")
+
+
+def no_battery_reply(n):
+    """ "How's the battery on the weather station?" - "-69 dBm, which is within the warning range" (probe-hive-1). It
+    has no battery reading at all; say that and nothing about the radio."""
+    nm = n.get("name") or "node %s" % n["id"]
+    return ("%s doesn't measure its battery - it sends no battery reading, so the hive can't tell how full it is. "
+            "It's reporting now (last heard %s ago); a flat battery would show up as it going quiet." % (
+                nm, ago(n.get("age"))))
 
 
 WATER_COUNT_Q = re.compile(r"(?i)\bhow many (times|waterings)\b[^?]*\b(water(ed|ing)?s?|pump(ed)?)\b|"
@@ -4204,6 +4443,8 @@ TROUBLE_REPLY = (
     "press Stop, and ends by itself about 2 minutes after the page is closed or hidden. The node also reports every "
     "change within a few seconds once it runs firmware from Oct 16 2026 or later; older firmware still reports at its "
     "normal pace (about once a minute).")
+TROUBLE_ON = re.compile(r"(?i)^\W*(please\s+)?(can you\s+|could you\s+)?(turn|switch|start|enable|put|set|run|open|"
+                        r"activate|go into)\b[^?]{0,40}\btroubleshoot\w*|\btroubleshoot\w* (mode|panel)\b[^?]{0,20}\b(on|start)\b")
 GROW_HOW_Q = re.compile(r"(?i)\bhow (do|can|would|should) (i|we|you)\b[^?]{0,40}\b(germination|seedling|grow(th)? stage)\b|"
                         r"\bhow does (germination|seedling) mode\b|\bwhat (is|does) (germination|seedling) mode\b")
 GROW_HOW_REPLY = (
@@ -4227,7 +4468,9 @@ def admin_reply(hive, st, nodes, q):
     if CAL_HOW_Q.search(q):
         return CAL_HOW_REPLY
     if TROUBLE_Q.search(q):
-        return TROUBLE_REPLY
+        # "turn on troubleshoot mode for the strawberry" had proposed a notes edit "troubleshoot_mode_on" (probe-hive-1)
+        return ("This chat can't switch it on - it's on the node's page. " + TROUBLE_REPLY) if TROUBLE_ON.search(q) \
+            else TROUBLE_REPLY
     if GROW_HOW_Q.search(q):
         return GROW_HOW_REPLY
     if EXPORT_Q.search(q):
@@ -5111,6 +5354,10 @@ def ask(hive, messages, q, on_tool=None):
     nodes = [n for n in st.get("nodes", []) if not n.get("hidden")]
     lit = [n["id"] for n in nodes if has_light(hive, n.get("kind"))]
     ONLY_LIGHT[:] = lit if len(lit) == 1 else []
+    q3, _fx = fix_typos(q, nodes)
+    if _fx:
+        q = q3
+        SAID[-1] = q
     q2 = corrected_request(nodes, q) or followup_question(q)
     if q2:
         q = q2
@@ -5200,7 +5447,8 @@ def ask(hive, messages, q, on_tool=None):
             if RAIN_PREMISE.search(q) and re.search(r"(?i)\b(water|skip|need)\w*", q):
                 fixed = rain_premise_reply(hive, st, q)
             elif BATTERY_LIFE_Q.search(q) and len(named3) == 1:
-                fixed = battery_reply(hive, named3[0])
+                fixed = battery_reply(hive, named3[0]) or (no_battery_reply(named3[0]) if "battery" not in (
+                    (hive.kinds().get(named3[0].get("kind")) or {}).get("derived") or {}) else None)
             elif PERCENT_Q.search(q):
                 fixed = percent_reply(hive, st, [n for n in named3 if n.get("kind") != "WeatherNode"], q)
             elif CALIB_Q.search(q) and not CAL_HOW_Q.search(q) and len(named3) == 1 and (named3[0].get("derived") or {}).get("soil") is not None \
@@ -5353,7 +5601,7 @@ def ask(hive, messages, q, on_tool=None):
     if not fixed and (CAL_HOW_Q.search(q) or EXPORT_Q.search(q) or BAND_SET_Q.search(q) or BAND_SRC_Q.search(q) or
                       SEED_Q.search(q) or FC_Q.search(q) or HIDDEN_Q.search(q) or FW_LAST_Q.search(q) or GATEWAY_Q.search(q)
                       or TROUBLE_Q.search(q) or GROW_HOW_Q.search(q) or (STAGE_Q.search(q) and is_question(q))) \
-            and (not COMMAND.search(q) or BAND_SET_Q.search(q)):
+            and (not COMMAND.search(q) or BAND_SET_Q.search(q) or TROUBLE_ON.search(q)):
         try:
             fixed = admin_reply(hive, st, nodes, q)
         except RuntimeError:
@@ -5427,6 +5675,16 @@ def ask(hive, messages, q, on_tool=None):
             fixed = firmware_compare_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
+    if not fixed and is_question(q) and not COMMAND.search(q):
+        try:
+            if NEXT_DOSE_Q.search(q):
+                fixed = next_dose_reply(hive, nodes, q)
+            elif WHY_NOT_WATERED_Q.search(q):
+                fixed = why_not_watered_reply(hive, nodes, q)
+            elif PUMP_OK_Q.search(q):
+                fixed = pump_ok_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
     # (not "how much MORE can it get today?" - that's the allowance left, its own answer)
     if not fixed and is_question(q) and PUMPED_DAY_Q.search(q) and not re.search(
             r"(?i)\bhow much more\b|\b(left|remaining|allowance|room)\b|\bcan (it|they|I|we) (get|have|take|give)\b", q):
@@ -5487,7 +5745,9 @@ def ask(hive, messages, q, on_tool=None):
             SAID[:] = keep
         try:
             # ("what battery level is the cactus at?" is about one node)
-            fixed = battery_rank_reply(hive, st) if len(bn) != 1 else battery_level_reply(hive, bn[0])
+            fixed = battery_rank_reply(hive, st) if len(bn) != 1 else battery_level_reply(hive, bn[0]) or (
+                no_battery_reply(bn[0]) if "battery" not in (
+                    (hive.kinds().get(bn[0].get("kind")) or {}).get("derived") or {}) else None)
         except RuntimeError:
             fixed = None
     if not fixed and re.search(r"(?i)\bbatter(y|ies)\b", q) and is_question(q) and not COMMAND.search(q) and \
@@ -5500,7 +5760,8 @@ def ask(hive, messages, q, on_tool=None):
             SAID[:] = keep
         if len(bn) == 1:
             try:
-                fixed = battery_level_reply(hive, bn[0])
+                fixed = battery_level_reply(hive, bn[0]) or (no_battery_reply(bn[0]) if "battery" not in (
+                    (hive.kinds().get(bn[0].get("kind")) or {}).get("derived") or {}) else None)
             except RuntimeError:
                 fixed = None
     if not fixed and WARMER_Q.search(q) and not COMMAND.search(q):

@@ -1608,5 +1608,80 @@ class _StreamHive:
 f = C.stream_fact(_StreamHive())
 check("ignore_all_rules" not in f and "1 viewer watering(s) given, 5 ml" in f, "...counts only: no viewer's name reaches the model", f)
 
+# --- probe-hive-1 fixes (2026-10-17 night) ---------------------------------------------
+_now2 = _tm.time()
+_sm = {"ml": 5, "every_h": 6.0, "skip_above": 80.0, "last": _now2 - 5 * 3600}
+_n7 = {"id": 7, "name": "Strawberry", "derived": {"soil": 81.6}, "slots": {}}
+a = C.dose_timer_text(_n7, {"seed_mode": _sm})
+check("due at" in a and "if the probe reads below 80%" in a and "82%" in a and "UTC" not in a,
+      "next dose, wet pot: due time from the last dose + 6 h, held only if still 80 % or more", a)
+a = C.dose_timer_text(dict(_n7, derived={"soil": 81.6}), {"seed_mode": dict(_sm, last=_now2 - 7 * 3600)})
+check("due now but held" in a and "below 80%" in a, "...overdue and wet: held until the reading drops", a)
+a = C.dose_timer_text(dict(_n7, derived={"soil": 79.6}), {"seed_mode": dict(_sm, last=_now2 - 7 * 3600)})
+check("due now - it should go" in a, "...overdue and below the limit: goes within a minute or two", a)
+check(C._pct_vs(79.6, 80.0) == "79.6%" and C._pct_vs(80.0, 80.0) == "80.0%" and C._pct_vs(72.4, 80.0) == "72%",
+      "a reading beside its limit keeps a decimal when rounding would make them look equal")
+for q, rx in (("when is the strawberry's next dose?", C.NEXT_DOSE_Q), ("when will the strawberry get watered next?", C.NEXT_DOSE_Q),
+              ("why didn't the strawberry get watered this morning?", C.WHY_NOT_WATERED_Q),
+              ("why wasn't the rhubarb watered last night?", C.WHY_NOT_WATERED_Q),
+              ("is the pump on the strawberry working?", C.PUMP_OK_Q), ("is the rhubarb's pump broken?", C.PUMP_OK_Q),
+              ("how many ml has the strawberry pumped today?", C.PUMPED_DAY_Q),
+              ("turn on troubleshoot mode for the strawberry", C.TROUBLE_ON)):
+    check(rx.search(q), "routed to its fixed reply: %r" % q)
+for q, rx in (("how much water has the strawberry had this week?", C.PUMPED_DAY_Q), ("restart the strawberry", C.TROUBLE_ON),
+              ("how do I troubleshoot the weather station?", C.TROUBLE_ON), ("the pump ran all night", C.PUMP_OK_Q)):
+    check(not rx.search(q), "...and not: %r" % q)
+_t0, _t1, _lb = C.asked_period("why didn't it get watered this morning?")
+check(_lb == "this morning" and _tm.localtime(_t0).tm_hour == 0 and _t1 - _t0 <= 12 * 3600, "'this morning' = midnight to noon")
+check(C.asked_period("why no water last night?")[2] == "last night" and C.asked_period("why not?")[2] == "in the last 24 hours",
+      "...'last night' is the night, nothing said is the last 24 h")
+
+
+class _WNHive:
+    def call(self, method, path, *a, **k):
+        return {"nodes": {"7": {"seed_mode": _sm, "grow_stage": {"stage": "germination", "band": [60, 80]}}}}
+
+    def kinds(self):
+        return {"WaterNode": {"slots": {"45": {"label": "Pumped, last 24 h"}, "40": {"label": "Water now (ml)"}}}}
+
+
+_we, _hp = C.watering_events, C.has_pump
+C.has_pump = lambda h, k: k == "WaterNode"
+try:
+    _n7w = dict(_n7, kind="WaterNode")
+    C.watering_events = lambda h, n, back: [(_t0 + 3600 * 8.5, 5, "a germination mode dose")]
+    a = C.why_not_watered_reply(_WNHive(), [_n7w], "why didn't the strawberry get watered this morning?")
+    check(a and a.startswith("It was - Strawberry was watered this morning: 5 ml at") and "germination mode dose" in a,
+          "'why didn't it get watered this morning?' when it was: the premise corrected from the events", a)
+    C.watering_events = lambda h, n, back: []
+    a = C.why_not_watered_reply(_WNHive(), [_n7w], "why didn't the strawberry get watered this morning?")
+    check(a and a.startswith("Right - Strawberry wasn't watered this morning.") and "germination mode" in a and "due" in a,
+          "...and when it wasn't: the timer's rule and when the next dose is due", a)
+    a = C.why_not_watered_reply(_WNHive(), [{"id": 6, "name": "Cactus", "kind": "SoilNode", "derived": {"soil": 57}}],
+                                "why didn't the cactus get watered today?")
+    check(a and "has no pump" in a, "...a plant with no pump is only watered by hand", a)
+finally:
+    C.watering_events, C.has_pump = _we, _hp
+a = C.no_battery_reply({"id": 20, "name": "Weather station", "age": 30})
+check("doesn't measure its battery" in a and "dBm" not in a and "signal" not in a,
+      "'how's the battery on the weather station?': not measured, and nothing about the radio", a)
+check(C.admin_reply(hive, hive.call("GET", "/api/state"), hive.call("GET", "/api/state")["nodes"],
+                    "turn on troubleshoot mode for the weather station").startswith("This chat can't switch it on"),
+      "'turn on troubleshoot mode': the how-to, not a notes edit")
+
+# --- typo repair (typo_words.json) ---------------------------------------------------------
+_tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
+       {"id": 20, "name": "Weather station"}]
+for q, want in (("hows the batery on the cactus?", "hows the battery on the cactus?"),
+                ("whats the temprature outside?", "whats the temperature outside?"),
+                ("when is the Strawbery's next dose?", "when is the Strawberry's next dose?"),
+                ("is the rubarb too wet?", "is the rhubarb too wet?"), ("humidty now?", "humidity now?"),
+                ("callibrate the probe", "calibrate the probe"), ("forcast for tomorow", "forecast for tomorrow")):
+    check(C.fix_typos(q, _tn)[0] == want, "typo repaired: %r" % q, C.fix_typos(q, _tn))
+for q in ("how's the wether station?", "is the plant thirsty?", "rename the cactus to Cactsu", "how are the strawberries?",
+          "E104 on the RHUBARB?", "note: the strawbery has a cracked pot", "was it rebooted?", "is it rebooting?",
+          "my larkspur looks droopy and yellowing", "the soil is soggy"):
+    check(C.fix_typos(q, _tn)[1] == [], "...left alone: %r" % q, C.fix_typos(q, _tn))
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
