@@ -1613,7 +1613,8 @@ _now2 = _tm.time()
 _sm = {"ml": 5, "every_h": 6.0, "skip_above": 80.0, "last": _now2 - 5 * 3600}
 _n7 = {"id": 7, "name": "Strawberry", "derived": {"soil": 81.6}, "slots": {}}
 a = C.dose_timer_text(_n7, {"seed_mode": _sm})
-check("due at" in a and "if the probe reads below 80%" in a and "82%" in a and "UTC" not in a,
+check(re.search(r"due (tomorrow )?at \d\d:\d\d", a) and "due at tomorrow" not in a and "if the probe reads below 80%" in a
+      and "82%" in a and "UTC" not in a,
       "next dose, wet pot: due time from the last dose + 6 h, held only if still 80 % or more", a)
 a = C.dose_timer_text(dict(_n7, derived={"soil": 81.6}), {"seed_mode": dict(_sm, last=_now2 - 7 * 3600)})
 check("due now but held" in a and "below 80%" in a, "...overdue and wet: held until the reading drops", a)
@@ -1672,6 +1673,9 @@ check(C.admin_reply(hive, hive.call("GET", "/api/state"), hive.call("GET", "/api
 check(C.pump_fault_text("PUMP NOT TRUSTED: it ran on (pin 4 low). Check the MOSFET module. PROBE OUT OF THE SOIL since "
                         "today: readings near 0 are air.") == "it ran on (pin 4 low). Check the MOSFET module.",
       "the pump's part of a known-issues note, not the probe's after it")
+
+check(C._clock(_tm.time()).startswith("at ") and C._clock(_tm.time() + 86400).startswith("tomorrow at ") and
+      C._clock(_tm.time() - 86400).startswith("yesterday at "), "times said as 'at 21:13' / 'tomorrow at 03:31'")
 
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},

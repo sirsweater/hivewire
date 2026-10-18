@@ -3189,13 +3189,16 @@ def _pct_vs(v, limit):
 
 
 def _clock(t):
-    """ "21:13", "tomorrow 03:13" or "Mon 03:13" - local time, never UTC."""
+    """ "at 21:13", "tomorrow at 03:13", "yesterday at 21:31" or "on Mon at 03:13" - local time, never UTC ("due at
+    tomorrow 03:31" had come out of the live chat)."""
     lt, now = time.localtime(t), time.localtime()
     if lt.tm_yday == now.tm_yday and lt.tm_year == now.tm_year:
-        return time.strftime("%H:%M", lt)
+        return time.strftime("at %H:%M", lt)
     if time.localtime(time.time() + 86400).tm_yday == lt.tm_yday:
-        return time.strftime("tomorrow %H:%M", lt)
-    return time.strftime("%a %H:%M", lt)
+        return time.strftime("tomorrow at %H:%M", lt)
+    if time.localtime(time.time() - 86400).tm_yday == lt.tm_yday:
+        return time.strftime("yesterday at %H:%M", lt)
+    return time.strftime("on %a at %H:%M", lt)
 
 
 def _one_named(hive, nodes, q, want=None):
@@ -3219,7 +3222,7 @@ def dose_timer_text(n, meta):
     due = last + every * 3600 if last else None
     now = time.time()
     held = soil is not None and skip is not None and soil >= skip
-    lead = ("The last %s ml dose went at %s; they're %g hours apart" % (ml, _clock(last), every) if last else
+    lead = ("The last %s ml dose went %s; they're %g hours apart" % (ml, _clock(last), every) if last else
             "No dose has gone out yet; they're %s ml every %g hours" % (ml, every))
     rule = (", and only while the probe reads below %g%%" % skip) if skip is not None else ""
     if not due or due <= now:
@@ -3228,10 +3231,10 @@ def dose_timer_text(n, meta):
                     "the reading dropping below %g%%." % (lead, rule, _pct_vs(soil, skip), skip))
         return "%s%s. The next one is due now - it should go within a minute or two." % (lead, rule)
     if held:
-        return ("%s%s. So the next one is due at %s - if the probe reads below %g%% by then. It reads %s now; if it's still "
-                "that wet at %s, the dose waits until it drops below %g%%." % (
+        return ("%s%s. So the next one is due %s - if the probe reads below %g%% by then. It reads %s now; if it's still "
+                "that wet %s, the dose waits until it drops below %g%%." % (
                     lead, rule, _clock(due), skip, _pct_vs(soil, skip), _clock(due), skip))
-    return "%s%s. So the next one is due at %s (it reads %s now)." % (
+    return "%s%s. So the next one is due %s (it reads %s now)." % (
         lead, rule, _clock(due), _pct_vs(soil, skip) if soil is not None else "no reading")
 
 
@@ -3281,7 +3284,7 @@ def why_not_watered_reply(hive, nodes, q):
     ev = [e for e in watering_events(hive, n, time.time() - t0 + 60) if t0 <= e[0] <= t1]
     if ev:
         return "It was - %s was watered %s: %s." % (nm, label, "; ".join(
-            ("%s ml at %s - %s" % (nice_qty(ml), _clock(t), how) if ml is not None else "%s (from %s)" % (how, _clock(t)))
+            ("%s ml %s - %s" % (nice_qty(ml), _clock(t), how) if ml is not None else "%s (%s)" % (how, _clock(t)))
             for t, ml, how in ev))
     if not has_pump(hive, n.get("kind")):
         return ("%s has no pump, so the hive never waters it - it only gets water by hand. No watering of it shows up %s." % (
@@ -3339,7 +3342,7 @@ def pump_ok_reply(hive, nodes, q):
     bad = state and re.match(r"(refused|stopped)", state)
     seen = []
     if last:
-        seen.append("it last ran at %s (%s ml)" % (_clock(last[0]), nice_qty(last[1])))
+        seen.append("it last ran %s (%s ml)" % (_clock(last[0]), nice_qty(last[1])))
     else:
         seen.append("it hasn't run in the last 7 days")
     if state and state not in ("idle", "running"):
