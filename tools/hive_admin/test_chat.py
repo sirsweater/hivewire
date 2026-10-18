@@ -401,12 +401,12 @@ C.KNOWN_ISSUES_FILE = _keep_ki
 conv = C.Conversation()
 fake_llm.calls.clear()
 script[:] = [say("Let's check its current settings."), tool("hive_status"), say("Everything is reporting.")]
-out = conv.ask(hive, "is everything ok?")
+out = conv.ask(hive, "can you look over the swarm for me?")
 check(out["answer"] == "Everything is reporting." and len(fake_llm.calls) == 3,
       "an answer that only promises to check is sent back to check", out["answer"])
 fake_llm.calls.clear()
 script[:] = [say("Let me check."), say("Let me check.")]
-out = conv.ask(hive, "is everything ok?")
+out = conv.ask(hive, "can you look over the swarm for me?")
 check(len(fake_llm.calls) == 2, "...once, not forever", len(fake_llm.calls))
 
 # --- things the chat can't do get a straight answer, and no card -----------------
@@ -1688,6 +1688,37 @@ check(C.pump_fault_text("PUMP NOT TRUSTED: it ran on (pin 4 low). Check the MOSF
 
 check(C._clock(_tm.time()).startswith("at ") and C._clock(_tm.time() + 86400).startswith("tomorrow at ") and
       C._clock(_tm.time() - 86400).startswith("yesterday at "), "times said as 'at 21:13' / 'tomorrow at 03:31'")
+
+# --- probe-hive-2 (2026-10-18) -------------------------------------------------------------
+for q, rx in (("summarize today", C.TODAY_REPORT_Q), ("how was today?", C.TODAY_REPORT_Q), ("did it rain today?", C.RAIN_DAY_Q),
+              ("how much rain did we get last night?", C.RAIN_DAY_Q), ("which plant needs water first?", C.NEED_FIRST_Q),
+              ("what needs watering?", C.NEED_FIRST_Q), ("should I put a cover on the strawberry seeds?", C.SEED_CARE_Q),
+              ("what's the uptime of the strawberry node?", C.UPTIME_Q), ("how's everything?", C.ATTENTION_Q),
+              ("show me the strawberry's moisture over the last 12 hours", C.TREND_Q)):
+    check(rx.search(q), "probe-hive-2 routing: %r" % q)
+for q, rx in (("summarize the week", C.TODAY_REPORT_Q), ("what cover crop seeds?", C.SEED_CARE_Q),
+              ("how's everything going with the week report?", C.ATTENTION_Q)):
+    check(not rx.search(q), "...and not: %r" % q)
+_stt = {"nodes": [{"id": 5, "name": "Rhubarb", "kind": "WaterNode", "derived": {"soil": None}},
+                  {"id": 6, "name": "Cactus", "kind": "SoilNode", "derived": {"soil": 57.0}},
+                  {"id": 7, "name": "Strawberry", "kind": "WaterNode", "derived": {"soil": 82.0}}]}
+_keepS = C.SAID[:]
+C.SAID[:] = ["how's the cactus?", "and the rhubarb?", "which of them is driest?"]
+a = C.them_rank_reply(_stt, "which of them is driest?") or ""
+check(a.startswith("Only Cactus has a reading") and "Strawberry" not in a, "'which of them is driest?' is the two just asked about", a)
+C.SAID[:] = ["how's the cactus?", "and the strawberry?", "which of them is wetter?"]
+a = C.them_rank_reply(_stt, "which of them is wetter?") or ""
+check(a.startswith("Strawberry is the wettest"), "...and with both reading, the wetter one", a)
+C.SAID[:] = _keepS
+
+
+class _UpHive:
+    def slot_spec(self, kind, slot):
+        return {"label": "Uptime", "unit": "min"} if str(slot) == "8" else {}
+
+
+a = C.uptime_reply(_UpHive(), {"id": 7, "name": "Strawberry", "kind": "WaterNode", "age": 20, "slots": {"7": 20, "8": 1380}}) or ""
+check("23.0 hours" in a and "every start it has ever had" in a, "uptime in minutes, and the boot counter isn't 'since then'", a)
 
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
