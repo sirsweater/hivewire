@@ -1669,6 +1669,10 @@ check(C.admin_reply(hive, hive.call("GET", "/api/state"), hive.call("GET", "/api
                     "turn on troubleshoot mode for the weather station").startswith("This chat can't switch it on"),
       "'turn on troubleshoot mode': the how-to, not a notes edit")
 
+check(C.pump_fault_text("PUMP NOT TRUSTED: it ran on (pin 4 low). Check the MOSFET module. PROBE OUT OF THE SOIL since "
+                        "today: readings near 0 are air.") == "it ran on (pin 4 low). Check the MOSFET module.",
+      "the pump's part of a known-issues note, not the probe's after it")
+
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
        {"id": 20, "name": "Weather station"}]

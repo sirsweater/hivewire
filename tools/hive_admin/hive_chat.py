@@ -3306,6 +3306,14 @@ PUMP_OK_Q = re.compile(r"(?i)\b(is|are|does|do)\b[^?]{0,40}\bpumps?\b[^?]{0,40}\
                        r"\bpumps?\b[^?]{0,30}\b(still )?(working|broken|ok(ay)?)\b\s*\?")
 
 
+def pump_fault_text(issue):
+    """The pump's part of a known-issues note: after "NOT TRUSTED", up to the next capitals heading ("PROBE OUT OF THE
+    SOIL ...") - the whole note had been pasted into "is the rhubarb's pump working?"."""
+    part = issue[issue.upper().find("NOT TRUSTED") + len("NOT TRUSTED"):].lstrip(" :-")
+    part = re.split(r"\s(?=[A-Z]{3,}(?: [A-Z]{2,})+\b)", part, maxsplit=1)[0]
+    return part.strip().rstrip(".") + "."
+
+
 def pump_ok_reply(hive, nodes, q):
     """ "Is the pump on the strawberry working?" - "manually triggered recently due to the soil being too wet ... ask me
     to run a test" (probe-hive-1). What the hive can see of the pump: its last run, what it said about it, its faults."""
@@ -3337,7 +3345,8 @@ def pump_ok_reply(hive, nodes, q):
         seen.append("its float switch says the reservoir is EMPTY")
     warn = [w for w in (n.get("warnings") or []) if re.search(r"(?i)\b(pump|reservoir|E3\d\d|supply)\b", w)]
     if "NOT TRUSTED" in issue.upper():
-        lead = "Not trusted - %s's pump has a known fault: %s." % (nm, issue)
+        # only the pump's part of the note ("PUMP NOT TRUSTED: ..."), not the probe's after it
+        lead = "Not trusted - %s's pump has a known fault: %s" % (nm, pump_fault_text(issue))
     elif bad or res == "EMPTY" or warn:
         lead = "It needs a look - %s's pump isn't running cleanly." % nm
     elif last:
