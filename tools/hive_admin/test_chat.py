@@ -1663,6 +1663,18 @@ try:
     check(a and "has no pump" in a, "...a plant with no pump is only watered by hand", a)
 finally:
     C.watering_events, C.has_pump = _we, _hp
+_n7g = dict(_n7, slots={"44": 400})
+_g = lambda q: C.germ_control_reply(_WNHive(), [_n7g], q)  # noqa: E731
+a = _g("can you stop the strawberry's germination doses?") or ""
+check("Grow stage" in a and "Seeds germinated" in a and "Nothing was changed" in a, "'stop the germination doses': the card's buttons, no pump stop", a)
+a = _g("set the strawberry's dose to 10 ml") or ""
+check("set when germination mode starts" in a and "Max per watering" not in a, "'set the dose to 10 ml': the Grow stage card, not a pump setting", a)
+a = _g("what's the most the strawberry can get per day?") or ""
+check("4 doses a day" in a and "20 ml in all" in a and "400 ml" in a, "'the most it can get per day': 24/6 x 5 ml = 20 ml, and the node's cap", a)
+a = _g("how many days until the strawberry seeds germinate?") or ""
+check(a.startswith("The hive can't tell") and "day " in a, "'how many days until they germinate?': the hive can't see seeds", a)
+check(_g("stop the pump on the strawberry") is None and _g("how much did the strawberry get today?") is None,
+      "...but 'stop the pump' and 'how much today' aren't these")
 a = C.no_battery_reply({"id": 20, "name": "Weather station", "age": 30})
 check("doesn't measure its battery" in a and "dBm" not in a and "signal" not in a,
       "'how's the battery on the weather station?': not measured, and nothing about the radio", a)

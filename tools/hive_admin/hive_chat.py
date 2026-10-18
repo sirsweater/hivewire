@@ -3213,6 +3213,61 @@ def _one_named(hive, nodes, q, want=None):
     return (named[0], cfg.get(str(named[0]["id"])) or {}) if len(named) == 1 else (None, None)
 
 
+# --- germination controls asked of the chat (probe-hive-2, 2026-10-17): "can you stop the strawberry's germination
+# doses?" proposed stopping the pump; "set the strawberry's dose to 10 ml" proposed the pump's Max per watering;
+# "what's the most it can get per day?" worked out 5 ml every 6 h as 10 ml; "how many days until the seeds
+# germinate?" got 80 seconds about soil readings. The doses are the admin's Grow stage card, said in code.
+GERM_STOP_Q = re.compile(r"(?i)\b(stop|pause|halt|end|cancel|turn off|switch off|disable|quit|no more)\b[^?]{0,40}"
+                         r"\b(doses?|dosing|germination|timer|seed mode)\b")
+GERM_SET_Q = re.compile(r"(?i)\b(set|change|make|increase|raise|lower|decrease|bump|up)\b[^?]{0,40}\b(doses?|dosing)\b|"
+                        r"\bdoses?\b[^?]{0,20}\b(to|at)\s+\d+(\.\d+)?\s*ml\b")
+GERM_MAX_Q = re.compile(r"(?i)\b(most|max\w*|limit|cap|up to|how much)\b[^?]{0,40}\b(per day|a day|each day|daily|in a day|"
+                        r"24 ?h\w*|a 24)\b")
+GERM_ETA_Q = re.compile(r"(?i)\b(how (long|many days|soon)|when)\b[^?]{0,50}\b(germinat\w*|sprout\w*|come up|emerge\w*|pop up)\b")
+
+
+def germ_control_reply(hive, nodes, q):
+    n, meta = _one_named(hive, nodes, q, lambda n, c: stage_name(c) == "germination")
+    if not n:
+        return None
+    sm, st = meta.get("seed_mode") or {}, meta.get("grow_stage") or {}
+    nm = n.get("name") or "node %s" % n["id"]
+    ml, every, skip = sm.get("ml", "?"), sm.get("every_h") or 6, sm.get("skip_above")
+    since = st.get("since") or time.time()
+    day = int((time.time() - since) // 86400) + 1
+    if GERM_STOP_Q.search(q):
+        return ("%s's doses come from germination mode on the admin page, not from its pump settings, so this chat "
+                "can't stop them. On its node page's **Grow stage** card, **Seeds germinated: seedling mode** ends them "
+                "and turns the node's own automatic watering back on at seedling settings; **Grown: back to normal "
+                "watering** ends them and hands it back to the plant's own band. Nothing was changed." % nm)
+    if GERM_SET_Q.search(q):
+        return ("%s's germination dose (%s ml every %g h, held while the probe reads %g%% or more) is set when germination "
+                "mode starts, on its node page's **Grow stage** card - not with the pump settings, and not from this chat. "
+                "The card doesn't change it while germination runs: for a different dose, press **Grown: back to normal "
+                "watering**, then start germination again with the new amount (its day count starts over - it's day %d "
+                "now). Nothing was changed." % (nm, ml, every, skip if skip is not None else 80, day))
+    if GERM_MAX_Q.search(q):
+        per = int(24 // every) if every else 0
+        soil = (n.get("derived") or {}).get("soil")
+        cap = (n.get("slots") or {}).get("44")
+        out = ("From the germination timer, at most %d doses a day (one every %g h) of %s ml - %s ml in all - and only while "
+               "the probe reads below %g%%" % (per, every, ml, nice_qty(per * ml) if isinstance(ml, (int, float)) else "?",
+                                                skip if skip is not None else 80))
+        if soil is not None:
+            out += " (it reads %s now)" % _pct_vs(soil, skip)
+        out += "."
+        if cap:
+            out += " The node's own cap, Max per 24 h, is %s ml." % cap
+        return out
+    if GERM_ETA_Q.search(q):
+        return ("The hive can't tell - %s's probe measures soil moisture, not seeds, so it can't see them come up. It's day "
+                "%d of germination mode (since %s). How many days seeds take isn't in the hive's data; the plant "
+                "assistant (`plants`) has germination times for the crops its tables cover. When you see seedlings, press "
+                "**Seeds germinated: seedling mode** on its Grow stage card." % (
+                    nm, day, time.strftime("%a %d %b %H:%M", time.localtime(since))))
+    return None
+
+
 def dose_timer_text(n, meta):
     """When a germinating pot's next timed dose goes, from its seed_mode: every_h after the last one, and only while
     the probe reads below skip_above (potcare.SeedMode.tick)."""
@@ -5612,6 +5667,11 @@ def ask(hive, messages, q, on_tool=None):
         if notes and not confirmed:
             fixed = "No - you declined it, so nothing was sent: %s." % "; ".join(
                 re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
+    if not fixed and (GERM_STOP_Q.search(q) or GERM_SET_Q.search(q) or GERM_MAX_Q.search(q) or GERM_ETA_Q.search(q)):
+        try:
+            fixed = germ_control_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
     if not fixed and WATCH_DEL_Q.search(q) and not WATCH_LEVEL.search(q):
         try:
             fixed = watch_del_reply(hive, nodes, q)
