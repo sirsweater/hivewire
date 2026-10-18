@@ -1698,6 +1698,16 @@ finally:
     C.watering_events = _we2
 check(_a is None or (_a.startswith("Right - ") and ("automatic watering" in _a or "probe" in _a)),
       "...and with no watering today, the reason from its settings", _a)
+_lwa, _hp2 = C.last_watered_at, C.has_pump
+C.last_watered_at = lambda h, n: _tm.time() - 3 * 86400
+try:
+    _a = C.last_water_reply(hive, nopump)
+    check("by hand" in _a and "no pump" in _a, "'when was the cactus last watered?': by hand, it has no pump", _a)
+    C.last_watered_at = lambda h, n: None
+    _a = C.last_water_reply(hive, nopump)
+    check("no watering on record" in _a and "no pump" in _a, "...and with none seen, why the hive can't see more", _a)
+finally:
+    C.last_watered_at = _lwa
 # --- soil alerts set from the chat (the admin's watches) ------------------------------------
 _pid = pump["id"]
 app.cfg.set_node(_pid, {"soil_dry": 4000, "soil_wet": 1000})

@@ -2987,7 +2987,9 @@ def last_water_reply(hive, n):
     t = last_watered_at(hive, n)
     name = n.get("name") or "node %s" % n["id"]
     if not t:
-        return "%s has no watering on record in the last 30 days." % name
+        return "%s has no watering on record in the last 30 days.%s" % (name, "" if has_pump(hive, n.get("kind")) else
+                                                                      " It has no pump, so the hive only sees a hand "
+                                                                      "watering as its soil climbing - none showed up.")
     now_ = time.time()
     lt, ln = time.localtime(t), time.localtime(now_)
     if lt.tm_yday == ln.tm_yday and lt.tm_year == ln.tm_year:
@@ -2997,7 +2999,8 @@ def last_water_reply(hive, n):
     else:
         when = time.strftime("%a %d %b at %H:%M", lt)
     meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
-    how = " - a germination dose from the admin's timer" if stage_name(meta) == "germination" else ""
+    how = " - a germination dose from the admin's timer" if stage_name(meta) == "germination" else \
+        " - by hand: it has no pump, so that's when its soil last climbed" if not has_pump(hive, n.get("kind")) else ""
     return "%s was last watered %s (%s ago)%s." % (name, when, days_ago(t), how)
 
 
