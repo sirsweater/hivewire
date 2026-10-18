@@ -4047,8 +4047,8 @@ def alerts_reply(hive):
                     "%s %s%s" % (w.get("name"), _watch_line(w), " (reads %.0f%% now)" % w["soil"]
                                  if w.get("soil") is not None else "") for w in ws))
     else:
-        mine = ("- **Soil alerts you set**: none yet. Ask me \"tell me if the strawberry drops below 70%\" (any plant, "
-                "any level) and I'll set one up for you to confirm.")
+        mine = ("- **Soil alerts you set**: none yet. Ask \"tell me if the strawberry drops below 70%\" (any plant, "
+                "any level) and a card comes up to confirm it.")
     return ("Phone alerts go out through g4rden%s:\n"
             "- **Soil alerts** for each plant come from g4rden itself, from the readings the hive uploads.\n"
             "- **A node error** that needs a hand: %s.\n"
