@@ -862,7 +862,9 @@ views.flash = async (el) => {
 
 views.g4rden = async (el) => {
   const r = await api("/api/g4rden");
+  const wl = await api("/api/watches").catch(() => ({ watches: [] }));
   const g = r.config, nodes = STATE.nodes;
+  const probeNodes = nodes.filter((n) => ((KINDS[n.kind] || {}).derived || {}).soil);
   // Any node with a soil probe can be a plant's sensor: SoilNode, WaterNode...
   const soilNodes = nodes.filter((n) => ((KINDS[n.kind] || {}).derived || {}).soil || g.devices[n.id]);
   const lastLine = (x) => x ? `${fmtTime(x.ts)} — ${x.ok ? `sent ${x.sent} reading(s) across ${x.nodes} node(s)` : `failed: ${esc(x.error || "HTTP " + x.status)}`}` : "never";
@@ -914,7 +916,36 @@ views.g4rden = async (el) => {
         <label class="f">Minimum gap between samples (s)<input id="g-gap" type="number" min="60" max="86400" value="${g.min_gap_seconds}" style="width:150px"></label>
         <label class="f">Max samples per node<input id="g-max" type="number" min="1" max="500" value="${g.max_per_device}" style="width:120px"></label>
         <button>Save</button></form>
-      <p class="muted small">Readings are sent from where the last upload finished, so an outage catches up instead of leaving a gap. Sample age is sent rather than a clock reading — the site stamps the time.</p></div>`;
+      <p class="muted small">Readings are sent from where the last upload finished, so an outage catches up instead of leaving a gap. Sample age is sent rather than a clock reading — the site stamps the time.</p></div>
+
+    <div class="card stack" style="margin-top:16px"><h2>5 · Soil alerts</h2>
+      <p class="muted small">A phone alert (through g4rden, so the hub has to be paired) when a plant's soil crosses a level you pick — once each time it crosses, and again only after it has been 2 points back over the line. The Chat page can set these too: <span class="mono">tell me if the strawberry drops below 60%</span>.</p>
+      <div class="tablewrap"><table id="watch-table"></table></div>
+      <form id="watchform" class="row" style="align-items:flex-end">
+        <label class="f">Plant<select id="w-node">${probeNodes.map((n) => `<option value="${n.id}">${esc(nodeTitle(n))}</option>`).join("")}</select></label>
+        <label class="f">When its soil goes<select id="w-dir"><option value="below">below</option><option value="above">above</option></select></label>
+        <label class="f">Level (%)<input id="w-level" type="number" min="1" max="99" step="1" value="50" style="width:90px"></label>
+        <button class="primary" ${probeNodes.length ? "" : "disabled"}>Add alert</button></form></div>`;
+
+  const wt = $("#watch-table");
+  wt.innerHTML = `<tr><th>Plant</th><th>Alert when its soil is</th><th>Now</th><th></th></tr>` +
+    ((wl.watches || []).map((w) => `<tr><td>${esc(w.name || "Node " + w.node)}</td>
+      <td>${w.below != null ? "below " + w.below : "above " + w.above}%${w.armed ? "" : ' <span class="muted small">(already past it: waits until it comes back)</span>'}</td>
+      <td>${w.soil != null ? Math.round(w.soil) + "%" : "—"}</td><td><button data-wdel="${w.id}">Remove</button></td></tr>`).join("") ||
+      '<tr><td colspan="4" class="muted">No soil alerts set.</td></tr>');
+  wt.onclick = async (e) => {
+    const id = e.target.dataset.wdel;
+    if (!id) return;
+    try { await api("/api/watch/delete", { id: +id }); toast("Alert removed"); render(); }
+    catch (err) { toast(err.message, 6000); }
+  };
+  $("#watchform").onsubmit = async (e) => {
+    e.preventDefault();
+    const b = { node: +$("#w-node").value };
+    b[$("#w-dir").value] = +$("#w-level").value;
+    try { await api("/api/watch", b); toast("Alert added"); render(); }
+    catch (err) { toast(err.message, 6000); }
+  };
 
   const out = (obj, label) => {
     const box = $("#g-out"); box.hidden = false;

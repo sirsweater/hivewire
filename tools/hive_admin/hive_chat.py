@@ -4037,16 +4037,199 @@ def alerts_reply(hive):
     paired = (g.get("config") or {}).get("paired")
     codes = (hive.call("GET", "/api/problems") or {}).get("codes") or {}
     names = ["E%d %s" % (c, (codes.get(str(c)) or {}).get("title", "")) for c in ALERT_CODES if codes.get(str(c))]
+    ws = _watches(hive)
+    if ws is None:
+        mine = ("The alert rules are set in the admin's code; this chat can't add new ones, such as an alert for one "
+                "plant dropping below a number.")
+    elif ws:
+        mine = ("- **Soil alerts you set**: %s - one alert each time the reading crosses the line. Ask me \"stop the "
+                "soil alert for the X\" to remove one." % "; ".join(
+                    "%s %s%s" % (w.get("name"), _watch_line(w), " (reads %.0f%% now)" % w["soil"]
+                                 if w.get("soil") is not None else "") for w in ws))
+    else:
+        mine = ("- **Soil alerts you set**: none yet. Ask me \"tell me if the strawberry drops below 70%\" (any plant, "
+                "any level) and I'll set one up for you to confirm.")
     return ("Phone alerts go out through g4rden%s:\n"
             "- **Soil alerts** for each plant come from g4rden itself, from the readings the hive uploads.\n"
             "- **A node error** that needs a hand: %s.\n"
             "- **A node gone quiet** for 30 minutes (once per outage), and **the gateway not answering** for 10 minutes.\n"
+            "%s\n"
             "Not alerted (only logged on the Problems page): a weak link (E104), an unexpected restart, low power on "
-            "the Pi. The same problem alerts at most once every 6 hours. The alert rules are set in the admin's code; "
-            "this chat can't add new ones, such as an alert for one plant dropping below a number." % (
+            "the Pi. The same problem alerts at most once every 6 hours." % (
                 " - the hub is paired with g4rden, so they reach your phone" if paired else
                 " - but the hub isn't paired with g4rden right now, so none will reach your phone (pair it on the "
-                "admin page)", "; ".join(names)))
+                "admin page)", "; ".join(names), mine))
+
+
+# --- soil alerts the person sets (2026-10-17): "tell me if the strawberry drops below 70 %" ---------------------
+# The admin checks them after every poll and sends one phone alert (through g4rden) each time a reading crosses the
+# line (hive_admin.HiveAlerts.check_watches); here they're added and removed, always through a Confirm card.
+WATCH_ASK = re.compile(r"(?i)\b(tell|alert|notify|warn|ping|text|message|let|buzz)\s+(me|us)\b|"
+                       r"\b(set( up)?|add|create|make|give me|i want|i'd like)\b[^?.]{0,25}\b(alert|notification|warning|"
+                       r"reminder)s?\b|\bsend (me )?(an? )?(alert|notification|push)\b")
+WATCH_LEVEL = re.compile(r"(?i)(\d{1,3}(?:\.\d+)?)\s*(%|percent\b|per cent\b)")
+WATCH_BELOW = re.compile(r"(?i)\b(drops?|dropping|falls?|falling|goes (below|under|down)|go (below|under|down)|"
+                         r"gets? (below|under|down|to)|below|under|less than|lower than|dips?|sinks?|dri?y?er than|down to)\b")
+WATCH_ABOVE = re.compile(r"(?i)\b(above|over|more than|higher than|rises?|rising|climbs?|climbing|goes (above|over|up)|"
+                         r"go (above|over|up)|gets? (above|over|up)|exceeds?|wetter than|up to)\b")
+WATCH_PAST = re.compile(r"(?i)\b(yesterday|last (night|week)|ago|did|was|were|went|dropped|fell|has it|have they|been)\b")
+WATCH_DRYWORD = re.compile(r"(?i)\b(dry|dries|dry out|drier|needs? water(ing)?|thirsty|wet|soggy|too (wet|dry))\b")
+WATCH_DEL_Q = re.compile(r"(?i)\b(stop|cancel|remove|delete|turn off|switch off|clear|drop|get rid of|no more)\b[^?.]{0,40}"
+                         r"\b(alert|notif|warning|ping)\w*|\b(don't|do not) (alert|notify|warn|ping|tell) me\b")
+
+
+def _watches(hive):
+    """The soil alerts set on the admin, or None when this admin has none to offer (an older one: no route)."""
+    try:
+        return (hive.call("GET", "/api/watches") or {}).get("watches") or []
+    except RuntimeError:
+        return None
+
+
+def _watch_line(w):
+    return "%s %g%%" % ("below" if w.get("below") is not None else "above",
+                        w.get("below") if w.get("below") is not None else w.get("above"))
+
+
+def watch_pairs(q):
+    """[(direction, level)] from "drops below 70% or goes above 90%": each level takes the direction word nearest
+    before it (or after it, when none comes before)."""
+    out, start = [], 0
+    for m in WATCH_LEVEL.finditer(q):
+        seg = q[start:m.start()]
+        words = [("below", x.end()) for x in WATCH_BELOW.finditer(seg)] + [("above", x.end()) for x in WATCH_ABOVE.finditer(seg)]
+        if not words:
+            after = q[m.end():m.end() + 25]
+            words = [("below", -x.start()) for x in WATCH_BELOW.finditer(after)] + \
+                    [("above", -x.start()) for x in WATCH_ABOVE.finditer(after)]
+        if words:
+            out.append((max(words, key=lambda x: x[1])[0], float(m.group(1))))
+        start = m.end()
+    return out
+
+
+def watch_add_reply(hive, nodes, q):
+    soil_nodes = [n for n in nodes if "soil" in ((hive.kinds().get(n.get("kind")) or {}).get("derived") or {})]
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    pairs = watch_pairs(q)
+    if not named:
+        return ("Which plant? Soil alerts are set one plant at a time - for example \"tell me if the %s drops below "
+                "60%%\". The plants with a soil probe: %s." % (
+                    (soil_nodes[0].get("name") or "node %s" % soil_nodes[0]["id"]).lower() if soil_nodes else "strawberry",
+                    ", ".join(n.get("name") or "node %s" % n["id"] for n in soil_nodes) or "none"))
+    if len(named) > 1:
+        return ("One plant at a time, please - which one: %s?" % " or ".join(n.get("name") or "node %s" % n["id"]
+                                                                         for n in named))
+    n = named[0]
+    nm = n.get("name") or "node %s" % n["id"]
+    if n not in soil_nodes:
+        return "%s has no soil probe, so there's no reading to set an alert on. Nothing was changed." % nm
+    meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
+    band = band_of(meta)
+    if not pairs:
+        return ("At what level? For example \"tell me if the %s drops below %g%%\"%s. Soil alerts go off when the "
+                "reading crosses a number you pick." % (nm.lower(), band[0] if band else 50,
+                                                         " - its band is %g-%g%%" % tuple(band) if band else ""))
+    bad = [v for _, v in pairs if not 1 <= v <= 99]
+    if bad:
+        return "A soil alert's level is 1-99%%, not %g%%. Nothing was changed." % bad[0]
+    if _watches(hive) is None:
+        return ("This hive's admin doesn't have soil alerts yet (it needs the update that adds them). Nothing was "
+                "changed.")
+    soil = (n.get("derived") or {}).get("soil")
+    paired = bool((((hive.call("GET", "/api/g4rden") or {}).get("config") or {}).get("paired")))
+    done, waiting, no = [], [], []
+    for d, v in pairs[:2]:
+        what = "%s's soil %s %g%%" % (nm, "drops below" if d == "below" else "goes above", v)
+        r = write(hive, "add a phone alert: %s (node %s) soil %s %g %% - through g4rden, once each time it crosses" % (
+            nm, n["id"], d, v), "/api/watch", {"node": n["id"], d: v})
+        if r.get("awaiting_approval"):
+            waiting.append(what)
+        elif r.get("sent"):
+            done.append(what)
+        else:
+            no.append(r.get("say") or "Nothing was sent.")
+    notes = []
+    if soil is not None:
+        notes.append("It reads %.0f%% now." % soil)
+        for d, v in pairs[:2]:
+            if (d == "below" and soil < v) or (d == "above" and soil > v):
+                notes.append("That's already %s %g%%, so the first alert comes once it has been back over the line "
+                             "(by 2 points) and crosses it again." % (d, v))
+    elif PROBE_OUT_WARNING in (n.get("warnings") or []):
+        notes.append("Its probe is out of the soil right now, so it can't alert until the probe is back in.")
+    if not paired:
+        notes.append("The hub isn't paired with g4rden right now, so the alerts can't reach your phone until it is "
+                     "(the admin's g4rden page).")
+    out = []
+    if waiting:
+        out.append("Press Confirm on the card%s to add %s: you'll get a phone alert (through g4rden) when %s - once "
+                   "each time it crosses the line." % ("s" if len(waiting) > 1 else "", "them" if len(waiting) > 1
+                                                       else "it", " or ".join(waiting)))
+    if done:
+        out.append("Added: you'll get a phone alert (through g4rden) when %s - once each time it crosses the line." %
+                   " or ".join(done))
+    out += no
+    return " ".join(out + notes)
+
+
+def watch_del_reply(hive, nodes, q):
+    ws = _watches(hive)
+    if ws is None:
+        return None
+    keep = SAID[:]
+    SAID[:] = [q]
+    try:
+        named = [n for n in nodes if named_by_person(n)]
+    finally:
+        SAID[:] = keep
+    every = bool(re.search(r"(?i)\b(all|every|each)\b", q))
+    mine = bool(re.search(r"(?i)\b(soil|my|the) (alert|notification)s?\b|\balerts? (i|you) (set|added|made)\b", q))
+    if not ws:
+        return ("There are no soil alerts set, so there's nothing to remove. The hive's own problem alerts (a "
+                "reservoir empty, a node gone quiet, the gateway not answering) are built in - g4rden's app can mute "
+                "them on your phone.")
+    by_node = {}
+    for w in ws:
+        by_node.setdefault(w["node"], []).append(w)
+    if named:
+        pick = [n["id"] for n in named if n["id"] in by_node]
+        if not pick:
+            return "No soil alert is set for %s. Set now: %s." % (
+                " or ".join(n.get("name") or "node %s" % n["id"] for n in named),
+                "; ".join("%s %s" % (w.get("name"), _watch_line(w)) for w in ws))
+    elif every or (mine and len(by_node) == 1):
+        pick = list(by_node)
+    elif len(by_node) == 1 and mine:
+        pick = list(by_node)
+    else:
+        return ("Which one? The soil alerts set now: %s. (The hive's own problem alerts are built in; g4rden's app can "
+                "mute them.)" % "; ".join("%s %s" % (w.get("name"), _watch_line(w)) for w in ws))
+    waiting, done, no = [], [], []
+    for nid in pick:
+        lines = ", ".join(_watch_line(w) for w in by_node[nid])
+        label = by_node[nid][0].get("name") or "node %s" % nid
+        r = write(hive, "remove the phone alert%s for %s: %s" % ("s" if len(by_node[nid]) > 1 else "", label, lines),
+                  "/api/watch/delete", {"node": nid})
+        what = "%s (%s)" % (label, lines)
+        if r.get("awaiting_approval"):
+            waiting.append(what)
+        elif r.get("sent"):
+            done.append(what)
+        else:
+            no.append(r.get("say") or "Nothing was sent.")
+    out = []
+    if waiting:
+        out.append("Press Confirm to remove the soil alert%s for %s." % ("s" if len(waiting) > 1 or ", " in waiting[0]
+                                                                       else "", " and ".join(waiting)))
+    if done:
+        out.append("Removed the soil alerts for %s." % " and ".join(done))
+    return " ".join(out + no)
 
 
 FOLLOW_WHEN = re.compile(r"(?i)^\W*(and |what about |how about |same for )?(tomorrow|tonight|this weekend|the weekend|later|"
@@ -5392,6 +5575,17 @@ def ask(hive, messages, q, on_tool=None):
         if notes and not confirmed:
             fixed = "No - you declined it, so nothing was sent: %s." % "; ".join(
                 re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
+    if not fixed and WATCH_DEL_Q.search(q) and not WATCH_LEVEL.search(q):
+        try:
+            fixed = watch_del_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
+    elif not fixed and WATCH_ASK.search(q) and not WATCH_PAST.search(q) and (
+            WATCH_LEVEL.search(q) and (WATCH_BELOW.search(q) or WATCH_ABOVE.search(q)) or WATCH_DRYWORD.search(q)):
+        try:
+            fixed = watch_add_reply(hive, nodes, q)
+        except RuntimeError:
+            fixed = None
     if not fixed and not COMMAND.search(q) and BAROMETER_Q.search(q) and not BAROMETER_NOT.search(q):
         fixed = BAROMETER_REPLY
     if not fixed and not COMMAND.search(q) and ADAPTIVE_HOW_Q.search(q) and not ADAPTIVE_HOW_NOT.search(q) and not [

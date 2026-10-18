@@ -150,5 +150,72 @@ app.cfg.data["g4rden"]["enabled"] = False
 sent = run({5: node(code=301, count=11)}, T0 + 3700)
 check(sent == [], "g4rden uploads off: nothing sent", sent)
 
+# 11. Soil alerts the person asked for ("tell me if the strawberry drops below 70 %").
+app.cfg.data["g4rden"]["enabled"] = True
+app.cfg.nodes[7] = {"name": "Strawberry"}
+app.cfg.save = lambda: None
+app.kinds = {"WaterNode": {"derived": {"soil": {"type": "soil_pct", "from": 1}}}, "WeatherNode": {"derived": {}}}
+SOIL = {"v": 81.0, "age": 10}
+app.state = lambda: {"nodes": [{"id": 7, "kind": "WaterNode", "age": SOIL["age"], "hidden": False,
+                                "derived": {"soil": SOIL["v"]}},
+                               {"id": 20, "kind": "WeatherNode", "age": 10, "hidden": False, "derived": {}}]}
+
+
+def soil_at(v, age=10):
+    SOIL["v"], SOIL["age"] = v, age
+    return A.check_watches(app.state()["nodes"])
+
+
+w = A.add_watch(7, below=70)
+check(w["armed"] and w["below"] == 70 and w["soil"] == 81.0, "a soil alert set at 81 % for below 70 %: armed", w)
+check(soil_at(75) == [], "75 %: nothing")
+ev = soil_at(69.4)
+check(len(ev) == 1 and "Strawberry" in ev[0]["title"] and "69%" in ev[0]["title"] and ev[0]["kind"] == "node_error"
+      and "below 70%" in ev[0]["body"], "69 %: one alert, through g4rden's hive-alert kind", ev)
+check(soil_at(68) == [] and soil_at(71) == [], "...not again while it stays near the line (68, then 71: not 2 points back)")
+check(soil_at(72.5) == [] and app.cfg.data["watches"][0]["armed"], "...re-armed at 72.5 %")
+check(len(soil_at(69)) == 1, "...and the next drop alerts again")
+check(soil_at(72.5) == [] and soil_at(None) == [] and app.cfg.data["watches"][0]["armed"] and soil_at(50, age=4000) == [],
+      "no reading (probe out) or a node not heard lately: no alert, nothing changes")
+A.remove_watches(nid=7)
+SOIL["v"] = 65.0
+w = A.add_watch(7, below=70)
+check(not w["armed"] and soil_at(64) == [], "set while already below the line: no alert until it has come back")
+check(soil_at(73) == [] and len(soil_at(69)) == 1, "...then it alerts on the next drop")
+w2 = A.add_watch(7, below=60)
+check(len([x for x in app.cfg.data["watches"] if x["node"] == 7 and x["below"] is not None]) == 1 and w2["below"] == 60,
+      "a second 'below' alert for the same plant replaces the first")
+SOIL["v"] = 85.0
+w3 = A.add_watch(7, above=90)
+check(w3["armed"] and len([x for x in app.cfg.data["watches"] if x["node"] == 7]) == 2,
+      "an 'above' alert sits beside the 'below' one")
+SOIL["v"] = 85.0
+soil_at(85)
+ev = soil_at(91)
+check(len(ev) == 1 and "above 90%" in ev[0]["body"], "above 90 %: alerts at 91", ev)
+check(soil_at(89) == [] and soil_at(88) == [] and len(soil_at(91)) == 1, "...re-armed at 88 (2 points back), alerts again")
+for kw, why in (({}, "no line"), ({"below": 50, "above": 90}, "two lines"), ({"below": 150}, "150 %"), ({"below": 0}, "0 %")):
+    try:
+        A.add_watch(7, **kw)
+        check(False, "refused: %s" % why)
+    except ValueError:
+        check(True, "refused: %s" % why)
+for nid, why in ((20, "a node with no soil probe"), (99, "a node that isn't reporting")):
+    try:
+        A.add_watch(nid, below=50)
+        check(False, "refused: %s" % why)
+    except ValueError:
+        check(True, "refused: %s" % why)
+n_before = len(app.cfg.data["watches"])
+check(A.remove_watches(wid=app.cfg.data["watches"][0]["id"]) == 1 and len(app.cfg.data["watches"]) == n_before - 1,
+      "one soil alert removed by its id")
+check(A.remove_watches(nid=7) >= 1 and app.cfg.data["watches"] == [], "...or every one for a node")
+SOIL["v"] = 80.0
+A.add_watch(7, below=70)
+SOIL["v"] = 66.0
+sent = run({}, T0 + 9000)
+check(len(sent) == 1 and "Strawberry" in sent[0]["title"], "the soil alert goes to the phones with the other alerts", sent)
+check(any("soil alert added: Strawberry (node 7) below 70%" in t for _, t in app.store.events), "adding one is logged")
+
 print("\n%d failure(s)" % failed if failed else "\nhive alerts: all checks passed")
 sys.exit(1 if failed else 0)

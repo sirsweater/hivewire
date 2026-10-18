@@ -1687,5 +1687,47 @@ for q in ("how's the wether station?", "is the plant thirsty?", "rename the cact
           "my larkspur looks droopy and yellowing", "the soil is soggy"):
     check(C.fix_typos(q, _tn)[1] == [], "...left alone: %r" % q, C.fix_typos(q, _tn))
 
+# --- soil alerts set from the chat (the admin's watches) ------------------------------------
+_pid = pump["id"]
+app.cfg.set_node(_pid, {"soil_dry": 4000, "soil_wet": 1000})
+_conv = C.Conversation()
+fake_llm.calls.clear()
+_o = _conv.ask(hive, "tell me if node %d drops below 50%%" % _pid)
+check(_o["pending"] and "Press Confirm" in _o["answer"] and "drops below 50%" in _o["answer"] and not fake_llm.calls,
+      "'tell me if it drops below 50%': a card, answered in code", (_o, fake_llm.calls))
+check(_o["pending"] and "/api/watch" == _conv.pending[_o["pending"][0]["id"]]["path"], "...the card adds a soil alert", _o)
+_conv.approve(hive, _o["pending"][0]["id"])
+_ws = hive.call("GET", "/api/watches")["watches"]
+check(len(_ws) == 1 and _ws[0]["node"] == _pid and _ws[0]["below"] == 50, "...confirmed: the admin keeps it", _ws)
+_a = C.alerts_reply(hive)
+check("Soil alerts you set" in _a and "below 50%" in _a and "can't add new ones" not in _a,
+      "'what alerts do I have?' lists it", _a)
+_keep_confirm = C.confirm
+C.confirm = lambda *a, **k: False
+try:
+    _a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "alert me if node %d goes above 95%%" % _pid)
+    check(_a.startswith("Nothing was sent - you answered no to: add a phone alert"), "...declined: nothing added", _a)
+finally:
+    C.confirm = _keep_confirm
+check(len(hive.call("GET", "/api/watches")["watches"]) == 1, "...and the admin still has only the one")
+_a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "notify me when node %d is dry" % _pid)
+check(_a.startswith("At what level?"), "'tell me when it's dry': asks for a level", _a)
+_a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "tell me if node %d drops below 150%%" % _pid)
+check("1-99%" in _a and "Nothing was changed" in _a, "...a level over 99 % is refused", _a)
+_nosoil = next((n for n in hive.call("GET", "/api/state")["nodes"]
+                if "soil" not in ((hive.kinds().get(n["kind"]) or {}).get("derived") or {})), None)
+check(_nosoil is not None, "the fake hive has a node with no soil probe")
+if _nosoil:
+    _a = C.watch_add_reply(hive, hive.call("GET", "/api/state")["nodes"], "tell me if node %d drops below 30%%" % _nosoil["id"])
+    check("has no soil probe" in _a, "...a node without a soil probe can't have one", _a)
+_o = _conv.ask(hive, "stop alerting me about node %d" % _pid)
+check(_o["pending"] and _conv.pending[_o["pending"][0]["id"]]["path"] == "/api/watch/delete" and "remove" in _o["answer"],
+      "'stop alerting me about it': a card to remove it", _o)
+_conv.approve(hive, _o["pending"][0]["id"])
+check(hive.call("GET", "/api/watches")["watches"] == [], "...confirmed: gone")
+_a = C.watch_del_reply(hive, hive.call("GET", "/api/state")["nodes"], "remove all my soil alerts")
+check(_a.startswith("There are no soil alerts set"), "...and with none left, there's nothing to remove", _a)
+app.cfg.set_node(_pid, {"soil_dry": None, "soil_wet": None})
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

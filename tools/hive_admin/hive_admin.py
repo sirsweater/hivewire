@@ -804,6 +804,8 @@ class HiveAlerts:
     QUIET_S = 30 * 60
     GW_SILENT_S = 10 * 60
     COOLDOWN_S = 6 * 3600
+    WATCH_GAP = 2.0                 # a soil alert re-arms once the reading is this far back over its line
+    MAX_WATCHES = 20
 
     def __init__(self, app):
         self.app = app
@@ -872,8 +874,95 @@ class HiveAlerts:
                                        "cable and power; readings are not being collected." % p["detail"]})
         elif not p:
             self.gw_alerted = False
+        try:
+            if self.app.cfg.data.get("watches"):
+                events += self.check_watches(self.app.state()["nodes"])
+        except Exception as e:      # a watch bug must never stop the problem alerts
+            print("alerts: watches: %s: %s" % (type(e).__name__, e), flush=True)
         self.baselined = True
         self.queue(events, t)
+
+    def check_watches(self, nodes):
+        """Soil alerts the person asked for ("tell me if the strawberry drops below 70 %"): one each time the
+        reading crosses the line, re-armed once it is WATCH_GAP back on the other side - so a reading wobbling at
+        the line doesn't buzz every poll. No reading (not calibrated, probe out of the soil, node not heard
+        lately) changes nothing. Whether one is armed is kept in the config, so a restart doesn't re-alert."""
+        ws = self.app.cfg.data.get("watches") or []
+        if not ws:
+            return []
+        stale = self.app.cfg.data.get("stale_seconds", 300)
+        by_id = {n["id"]: n for n in nodes}
+        events, changed = [], False
+        for w in ws:
+            n = by_id.get(w.get("node"))
+            soil = ((n or {}).get("derived") or {}).get("soil")
+            if n is None or soil is None or n.get("hidden") or (n.get("age") or 0) > stale:
+                continue
+            below, above = w.get("below"), w.get("above")
+            over = soil < below if below is not None else soil > above
+            back = soil >= below + self.WATCH_GAP if below is not None else soil <= above - self.WATCH_GAP
+            if w.get("armed", True) and over:
+                w["armed"], changed = False, True
+                line = "below %g%%" % below if below is not None else "above %g%%" % above
+                # (g4rden takes node_error / node_quiet / gateway / test and delivers them all alike, as a hive
+                # alert; a soil watch goes as node_error until it lists a kind of its own)
+                events.append({"key": "watch:%s" % w.get("id"), "kind": "node_error", "node": w["node"],
+                               "title": "🌱 %s: soil %.0f%%" % (self.label(w["node"]), soil),
+                               "body": "Its soil reads %.0f%% - %s, the alert you set. You'll hear again only after "
+                                       "it has been back over the line." % (soil, line)})
+            elif not w.get("armed", True) and back:
+                w["armed"], changed = True, True
+        if changed:
+            self.app.cfg.save()
+        return events
+
+    def add_watch(self, nid, below=None, above=None):
+        """A soil alert for one node, from the page or a confirmed chat card. Returns the watch."""
+        if (below is None) == (above is None):
+            raise ValueError("give one line: below a level or above it")
+        v = float(below if below is not None else above)
+        if not 1 <= v <= 99:
+            raise ValueError("a soil alert's level is 1-99 %%, not %g" % v)
+        node = next((n for n in self.app.state()["nodes"] if n["id"] == int(nid)), None)
+        if node is None:
+            raise ValueError("node %s isn't reporting, so there is no reading to watch" % nid)
+        if "soil" not in ((self.app.kinds.get(node.get("kind")) or {}).get("derived") or {}):
+            raise ValueError("%s has no soil probe to watch" % self.label(int(nid)))
+        ws = [w for w in (self.app.cfg.data.get("watches") or [])
+              if not (w.get("node") == int(nid) and (w.get("below") is None) == (below is None))]
+        if len(ws) >= self.MAX_WATCHES:
+            raise ValueError("there are already %d soil alerts; remove one first" % len(ws))
+        soil = (node.get("derived") or {}).get("soil")
+        # already over the line when it's set: not armed until it comes back, or it would buzz at once
+        armed = soil is None or (soil >= v if below is not None else soil <= v)
+        w = {"id": max([x.get("id", 0) for x in self.app.cfg.data.get("watches") or []] + [0]) + 1,
+             "node": int(nid), "below": v if below is not None else None, "above": v if above is not None else None,
+             "armed": armed, "created": now()}
+        self.app.cfg.data["watches"] = ws + [w]
+        self.app.cfg.save()
+        self.app.store.event("config", "soil alert added: %s %s %g%%" % (
+            self.label(int(nid)), "below" if below is not None else "above", v))
+        return dict(w, soil=soil)
+
+    def remove_watches(self, wid=None, nid=None):
+        """Remove one soil alert (by id) or every one for a node. Returns how many went."""
+        ws = self.app.cfg.data.get("watches") or []
+        keep = [w for w in ws if not ((wid is not None and w.get("id") == int(wid)) or
+                                      (nid is not None and w.get("node") == int(nid)))]
+        gone = [w for w in ws if w not in keep]
+        if gone:
+            self.app.cfg.data["watches"] = keep
+            self.app.cfg.save()
+            for w in gone:
+                self.app.store.event("config", "soil alert removed: %s %s %g%%" % (
+                    self.label(w["node"]), "below" if w.get("below") is not None else "above",
+                    w.get("below") if w.get("below") is not None else w.get("above")))
+        return len(gone)
+
+    def watch_list(self):
+        nodes = {n["id"]: n for n in self.app.state()["nodes"]}
+        return [dict(w, name=self.label(w["node"]), soil=((nodes.get(w["node"]) or {}).get("derived") or {}).get("soil"))
+                for w in self.app.cfg.data.get("watches") or []]
 
     def queue(self, events, t):
         with self.lock:
@@ -2414,6 +2503,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json({"direct_seconds": direct, "relay_seconds": relay,
                                    "relay_fraction": round(relay / total, 4) if total else None,
                                    "from": t0, "to": t1, "samples": len(pts)})
+        if path == "/api/watches":
+            return self.send_json({"watches": app.alerts.watch_list() if app.alerts else [],
+                                   "paired": bool(app.cfg.data["g4rden"].get("token"))})
         if path == "/api/notes":
             t1 = int(q.get("to") or now())
             t0 = int(q.get("from") or t1 - 86400)
@@ -2727,6 +2819,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/poll":
             app.poller.wake.set()
             return self.send_json({"ok": True})
+        if path == "/api/watch":
+            b = self.jbody()
+            if not app.alerts:
+                raise ValueError("alerts aren't running on this admin")
+            w = app.alerts.add_watch(int(b.get("node")), below=b.get("below"), above=b.get("above"))
+            return self.send_json({"ok": True, "watch": w})
+        if path == "/api/watch/delete":
+            b = self.jbody()
+            if b.get("id") is None and b.get("node") is None:
+                raise ValueError("say which soil alert: its id, or a node for all of that node's")
+            n = app.alerts.remove_watches(b.get("id"), b.get("node")) if app.alerts else 0
+            return self.send_json({"ok": True, "removed": n})
         if path == "/api/node":
             b = self.jbody()
             nid = int(b.pop("id"))
