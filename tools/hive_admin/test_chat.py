@@ -1761,6 +1761,15 @@ try:
 finally:
     C.soil_series = _ss2
 
+_rd = C.readings
+C.readings = lambda h, wx: {"Wind (2-min average) (km/h)": "1.8 km/h", "Gust (10 min) (km/h)": "1.6 km/h", "Wind direction (deg)": "calm"}
+try:
+    a = C.weather_now_reply(hive, {"nodes": [{"id": 20, "kind": "WeatherNode", "name": "Weather station", "slots": {}}]},
+                            "which way is the wind blowing?") or ""
+    check("too light for the vane" in a, "a calm vane in light wind is said, not dropped", a)
+finally:
+    C.readings = _rd
+
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
        {"id": 20, "name": "Weather station"}]

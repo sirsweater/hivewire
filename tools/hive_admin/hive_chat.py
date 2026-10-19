@@ -2856,7 +2856,10 @@ def weather_now_reply(hive, st, q):
                 "calm (%s)" % spd(w) if calm else spd(w) + " (2-minute average)",
                 ", gusting to %s in the last 10 minutes" % spd(g) if ok(g) else "",
                 ", from the %s" % re.search(r"from the (\w+)", str(d)).group(1) + " (%s)" % str(d).split()[0]
-                if ok(d) and re.search(r"from the (\w+)", str(d)) and not calm else ""))
+                if ok(d) and re.search(r"from the (\w+)", str(d)) and not calm else
+                # "which way is the wind blowing?" at 1.8 km/h with the vane reading calm had got no direction at all
+                " - too light for the vane to give a direction (it reads calm)" if ok(d) and "calm" in str(d).lower() and not calm
+                else ""))
     if re.search(r"(?i)\brain\w*|drizzl|pouring|wet out", q) and ok(pick("Rain, last hour")):
         rv = pick("Rain, last hour")
         parts.append("%s - %s in the last hour" % ("it is NOT raining" if num(rv) == 0 else "it IS raining", rv))
