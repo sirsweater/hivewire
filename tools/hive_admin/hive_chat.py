@@ -2885,7 +2885,22 @@ def weather_now_reply(hive, st, q):
     if not parts:
         return None
     s = "; ".join(parts)
-    return "At the %s right now, %s." % (wx.get("name") or "weather station", s)
+    out = "At the %s right now, %s." % (wx.get("name") or "weather station", s)
+    if re.search(r"(?i)\b(is (that|it|this) (high|low|normal|unusual|a lot|much|typical|ok|bad))\b|\b(high|low|normal|unusual) for\b", q):
+        # "what's the humidity right now and is that high?" got indoor-comfort advice for an outdoor station (probe-hive-6):
+        # the station's own last 7 days to judge it by
+        lbl = "Humidity" if re.search(r"(?i)\bhumid", q) else "Air temperature" if re.search(
+            r"(?i)\b(temp\w*|hot|cold|warm|cool)\b", q) else "Wind (2-min average)" if re.search(r"(?i)\bwind", q) else None
+        sid = slot_by_label(hive, wx["kind"], lbl) if lbl else None
+        if sid is not None:
+            lt = time.localtime()
+            start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - 6, 0, 0, 0, 0, 0, -1))
+            h = t_slot_history(hive, str(wx["id"]), sid, hours=int((time.time() - start) // 3600) + 1)
+            o = h.get("overall")
+            if o:
+                out += " Over the last 7 days the station's %s ran %s to %s, averaging %s - that's what \"high\" or \"low\" " \
+                       "means here." % (lbl.split(" (")[0].lower(), o["min"], o["max"], o["average"])
+    return out
 
 
 RAIN_RECORD_Q = re.compile(r"(?i)\b(when|last time)\b[^?]*\brain\w*|\brain\w*\b[^?]*\b(this|last|past) (month|year|"
@@ -3942,6 +3957,9 @@ def split_questions(q):
     parts = [x.strip(" ,") for x in SPLIT_Q.split(q) if x and x.strip(" ,")]
     if len(parts) == 2 and not parts[1].endswith("?") and not QUESTION_START.match(parts[1]):
         return [q]          # "is the pressure dropping? feels like a storm" - a remark after the question, not a second one
+    if len(parts) == 2 and re.match(r"(?i)^\W*(and\s+)?(is|was) (that|it|this) (high|low|normal|unusual|a lot|much|typical|ok|"
+                                    r"okay|bad|good)\b", parts[1]):
+        return [q]          # "what's the humidity right now and is that high?": the second part is about the first's answer
     parts = [x if x.endswith("?") else x + "?" for x in parts]
     return parts if len(parts) == 2 and all(len(x.split()) >= 3 for x in parts) else [q]
 
@@ -7078,7 +7096,7 @@ def ask(hive, messages, q, on_tool=None):
             elif (WEATHER_Q.search(re.sub(r"(?i)\bweather (station|node)\b", "", q)) or
                   re.match(r"(?i)^\W*what'?s the (temp\w*|temperature)\b", q)) and NOW_WORD.search(q) and \
                     not plants_named and not re.search(r"(?i)\b(firmware|battery|signal|uptime|reboot|pressure|"
-                                                       r"barometer|average|high|low|max|min)\b", q):
+                                                       r"barometer|average|(?<!that )(?<!this )(?<!it )high|(?<!that )(?<!this )(?<!it )low|max|min)\b", q):
                 fixed = weather_now_reply(hive, st, q)
         except RuntimeError:
             fixed = None
