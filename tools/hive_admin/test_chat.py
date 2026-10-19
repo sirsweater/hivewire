@@ -1693,7 +1693,7 @@ check(C._clock(_tm.time()).startswith("at ") and C._clock(_tm.time() + 86400).st
 for q, rx in (("summarize today", C.TODAY_REPORT_Q), ("how was today?", C.TODAY_REPORT_Q), ("did it rain today?", C.RAIN_DAY_Q),
               ("how much rain did we get last night?", C.RAIN_DAY_Q), ("which plant needs water first?", C.NEED_FIRST_Q),
               ("what needs watering?", C.NEED_FIRST_Q), ("should I put a cover on the strawberry seeds?", C.SEED_CARE_Q),
-              ("what's the uptime of the strawberry node?", C.UPTIME_Q), ("how's everything?", C.ATTENTION_Q),
+              ("what's the uptime of the strawberry node?", C.UPTIME_ASK_Q), ("how's everything?", C.ATTENTION_Q),
               ("show me the strawberry's moisture over the last 12 hours", C.TREND_Q)):
     check(rx.search(q), "probe-hive-2 routing: %r" % q)
 for q, rx in (("summarize the week", C.TODAY_REPORT_Q), ("what cover crop seeds?", C.SEED_CARE_Q),
@@ -1737,6 +1737,29 @@ C.LAST_ANSWER[:] = [a]
 check([n["name"] for n in C.pronoun_nodes(_stt, "and is its automatic watering on?")] == ["Strawberry"],
       "...and 'its' in the follow-up is the plant it led with")
 C.LAST_ANSWER[:] = []
+
+# --- probe-hive-3 (2026-10-18) -------------------------------------------------------------
+for q, rx in (("how often does the strawberry get dosed?", C.GERM_FREQ_Q), ("what time was the last dose?", C.GERM_LAST_Q),
+              ("how much has the strawberry had since germination started?", C.GERM_TOTAL_Q),
+              ("what's the humidity been like today?", C.WX_DAY_Q), ("how windy was it yesterday?", C.WX_DAY_Q),
+              ("which node restarted most recently?", C.RESTART_RANK_Q), ("how did yesterday go?", C.YESTERDAY_REPORT_Q),
+              ("when does the sun come up tomorrow?", C.SUN_Q), ("is it safe to leave for a week?", C.AWAY_Q)):
+    check(rx.search(q), "probe-hive-3 routing: %r" % q)
+check(not C.YESTERDAY_REPORT_Q.search("did it rain yesterday?") and not C.WX_DAY_Q.search("is it windy?"),
+      "...a single fact about yesterday, or the wind now, isn't these")
+_rs = {"nodes": [{"id": 7, "name": "Strawberry", "kind": "WaterNode", "age": 10, "slots": {"8": 120}},
+                 {"id": 20, "name": "Weather station", "kind": "WeatherNode", "age": 10, "slots": {"8": 3000}}]}
+a = C.restart_rank_reply(_UpHive(), _rs) or ""
+check(a.startswith("Strawberry restarted most recently") and a.index("Strawberry") < a.index("Weather station"),
+      "'which node restarted most recently?': newest start first, from uptime minutes", a)
+_ss2 = C.soil_series
+_base = _tm.time() - 96 * 3600
+C.soil_series = lambda h, n, hours, res="hour": [(_base + i * 3600, (88.0 if i < 30 else 57.0) - 0.001 * i, 50.0, 90.0) for i in range(96)]
+try:
+    r = C.plant_rates(hive, {"nodes": [{"id": 6, "name": "Cactus", "derived": {"soil": 57.0}}]})
+    check(r.get(6, 0) < 0.3, "a probe swap's step down isn't counted as drying (the Cactus's 8.9 points a day)", r)
+finally:
+    C.soil_series = _ss2
 
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},

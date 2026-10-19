@@ -3223,6 +3223,11 @@ GERM_SET_Q = re.compile(r"(?i)\b(set|change|make|increase|raise|lower|decrease|b
                         r"\bdoses?\b[^?]{0,20}\b(to|at)\s+\d+(\.\d+)?\s*ml\b")
 GERM_MAX_Q = re.compile(r"(?i)\b(most|max\w*|limit|cap|up to|how much)\b[^?]{0,40}\b(per day|a day|each day|daily|in a day|"
                         r"24 ?h\w*|a 24)\b")
+GERM_FREQ_Q = re.compile(r"(?i)\bhow often\b[^?]{0,40}\b(dos\w*|water\w*|get|gets)\b")
+GERM_LAST_Q = re.compile(r"(?i)\b(when|what time)\b[^?]{0,30}\b(last|latest|previous|most recent)\s+(dose|watering)\b|"
+                         r"\b(when|what time)\b[^?]{0,30}\b(was it|did it get)\s+(last\s+)?(dosed|watered)\b")
+GERM_TOTAL_Q = re.compile(r"(?i)\bhow (much|many ml)\b[^?]{0,50}\bsince\b[^?]{0,30}\b(germination|it started|the start|"
+                          r"sowing|seeding|planting)\b")
 GERM_ETA_Q = re.compile(r"(?i)\b(how (long|many days|soon)|when)\b[^?]{0,50}\b(germinat\w*|sprout\w*|come up|emerge\w*|pop up)\b")
 
 
@@ -3259,6 +3264,28 @@ def germ_control_reply(hive, nodes, q):
         if cap:
             out += " The node's own cap, Max per 24 h, is %s ml." % cap
         return out
+    if GERM_FREQ_Q.search(q):
+        # "how often does the strawberry get dosed?" had taken 88 seconds to say very little
+        return ("%s gets %s ml every %g hours from germination mode's timer - but only while the probe reads below %g%%; "
+                "at that level or above the dose waits until it drops.%s" % (
+                    nm, ml, every, skip if skip is not None else 80,
+                    (" " + dose_timer_text(n, meta).split(". ", 1)[1]) if ". " in dose_timer_text(n, meta) else ""))
+    if GERM_LAST_Q.search(q) or GERM_TOTAL_Q.search(q):
+        # "what time was the last dose?" had said Oct 16 23:54, "36 minutes ago"; "how much since germination started?"
+        # had said 8 ml. The waterings since the stage began, from the log.
+        ev = [e for e in watering_events(hive, n, time.time() - since + 60) if e[0] >= since and e[1] is not None]
+        if GERM_TOTAL_Q.search(q):
+            return ("Since germination mode started (%s), %s has had %s ml in %d watering%s%s." % (
+                time.strftime("%a %d %b %H:%M", time.localtime(since)), nm, nice_qty(sum(e[1] for e in ev)), len(ev),
+                "" if len(ev) == 1 else "s", (": " + ", ".join("%s ml %s" % (nice_qty(ml), _clock(t)) for t, ml, _ in ev[-8:]))
+                if ev else ""))
+        last = sm.get("last") or (ev[-1][0] if ev else None)
+        if not last:
+            return "%s hasn't had a dose since germination mode started (%s)." % (
+                nm, time.strftime("%a %d %b %H:%M", time.localtime(since)))
+        nxt = dose_timer_text(n, meta).split(". ", 1)
+        return "%s's last dose was %s ml %s (%s ago).%s" % (nm, ml, _clock(last), ago(int(time.time() - last)),
+                                                           " " + nxt[1] if len(nxt) > 1 else "")
     if GERM_ETA_Q.search(q):
         return ("The hive can't tell - %s's probe measures soil moisture, not seeds, so it can't see them come up. It's day "
                 "%d of germination mode (since %s). How many days seeds take isn't in the hive's data; the plant "
@@ -4093,17 +4120,21 @@ def week_report(hive, st, only=None):
 
 
 # --- probe-hive-2 (2026-10-18): today's summary, rain today, who needs water first, "them", uptime, seed care ------
+YESTERDAY_REPORT_Q = re.compile(r"(?i)\bhow (was|did) yesterday( go)?\b|\b(summar\w*|recap|overview|report|rundown)\b[^?]{0,15}\byesterday\b|"
+                                r"\bwhat happened yesterday\b")
 TODAY_REPORT_Q = re.compile(r"(?i)\b(summar\w*|recap|overview|report|rundown|run-down|round-?up)\b[^?]{0,25}\b(today|the day|so far)\b|"
                             r"\bhow (was|did|is|'s) (today|the day)( go(ing)?)?\b|\bwhat happened today\b|"
                             r"\btoday'?s (summary|report|recap)\b|^\W*summar\w*( of)? today\W*$")
 
 
-def today_report(hive, st):
+def today_report(hive, st, day="today"):
     """ "Summarize today" had been "the admin started the Raspberry Pi multiple times" from the event log. Today since
-    midnight, from the readings: weather, each plant against its band, its waterings, and what needs a look."""
-    t0 = day_window("today")[0]
+    midnight (or yesterday, midnight to midnight), from the readings: weather, each plant against its band, its
+    waterings, and what needs a look."""
+    t0, t1, _ = day_window(day)
     now = time.time()
-    lines = ["**Today so far** (%s, since midnight)" % time.strftime("%a %d %b")]
+    lines = ["**Today so far** (%s, since midnight)" % time.strftime("%a %d %b") if day == "today" else
+             "**Yesterday** (%s)" % time.strftime("%a %d %b", time.localtime(t0))]
     wx = weather_node(st)
     if wx:
         bits = []
@@ -4111,10 +4142,10 @@ def today_report(hive, st):
             sid = slot_by_label(hive, wx["kind"], label)
             if sid is None:
                 continue
-            o = t_slot_history(hive, str(wx["id"]), sid, day="today").get("overall")
+            o = t_slot_history(hive, str(wx["id"]), sid, day=day).get("overall")
             if o:
                 bits.append("strongest gust %s" % o["max"] if word else "high %s, low %s" % (o["max"], o["min"]))
-        mm = rain_total(hive, st, int(t0), int(now))
+        mm = rain_total(hive, st, int(t0), int(min(now, t1)))
         if mm is not None:
             bits.append("rain %.1f mm" % mm if mm >= 0.1 else "no rain")
         if bits:
@@ -4129,18 +4160,25 @@ def today_report(hive, st):
             why = "probe out of the soil" if PROBE_OUT_WARNING in (n.get("warnings") or []) else "not calibrated"
             lines.append("- **%s**: no reading (%s)." % (nm, why))
             continue
-        pts = [p for p in soil_series(hive, n, int((now - t0) // 3600) + 2) if p[0] >= t0]
-        rng = " (today %.0f-%.0f %%)" % (min(p[2] for p in pts), max(p[3] for p in pts)) if pts else ""
+        pts = [p for p in soil_series(hive, n, int((now - t0) // 3600) + 2) if t0 <= p[0] < t1]
+        rng = " (%s %.0f-%.0f %%)" % ("today" if day == "today" else "that day", min(p[2] for p in pts), max(p[3] for p in pts)) \
+            if pts else ""
+        if day != "today" and pts:
+            soil = sum(p[1] for p in pts) / len(pts)        # a past day is judged on its own average
         where = ""
         if band:
             where = ", above its %g-%g %% band" % tuple(band) if soil > band[1] else \
                 ", below its %g-%g %% band" % tuple(band) if soil < band[0] else ", inside its %g-%g %% band" % tuple(band)
         if stage_name(meta) == "germination":
             where += " - germination mode"
-        ev = [e for e in watering_events(hive, n, now - t0 + 60) if e[0] >= t0]
+        ev = [e for e in watering_events(hive, n, now - t0 + 60) if t0 <= e[0] < t1]
         water = "; watered: %s" % ", ".join(("%s ml %s" % (nice_qty(ml), _clock(t))) if ml is not None else "by hand %s" % _clock(t)
                                            for t, ml, _ in ev) if ev else "; no watering"
-        lines.append("- **%s**: soil %.0f %% now%s%s%s." % (nm, soil, rng, where, water))
+        if day == "today":
+            lines.append("- **%s**: soil %.0f %% now%s%s%s." % (nm, soil, rng, where, water))
+        else:
+            lines.append("- **%s**: soil averaged %.0f %%%s%s%s." % (nm, soil, rng, where,
+                                                                  water.replace("no watering", "no watering that day")))
     look = [x.get("name") or "node %s" % x["id"] for x in st.get("silent") or [] if (x.get("age") or 0) < 7 * 86400]
     p = t_list_problems(hive)
     if look or p["active_now"] != "none":
@@ -4249,6 +4287,32 @@ def rank_reply(hive, st, q):
     return out
 
 
+WX_DAY_Q = re.compile(r"(?i)\b(humidity|humid|wind|windy|temperature|temp|gusts?)\b[^?]{0,30}\b(been|range|all day|so far|"
+                      r"like)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b|\bhow (humid|windy|hot|warm|cold) (has it been|was it)\b")
+WX_DAY_SLOTS = (("humid", "Humidity"), ("gust", "Gust (10 min)"), ("wind", "Wind (2-min average)"), ("temp", "Air temperature"),
+                ("hot", "Air temperature"), ("warm", "Air temperature"), ("cold", "Air temperature"))
+
+
+def wx_day_reply(hive, st, q):
+    """ "What's the humidity been like today?" got the reading right now. The day's range and average from the hourly
+    history."""
+    wx = weather_node(st)
+    if not wx:
+        return None
+    label = next((lb for k, lb in WX_DAY_SLOTS if re.search(r"(?i)\b%s" % k, q)), None)
+    sid = slot_by_label(hive, wx["kind"], label) if label else None
+    if sid is None:
+        return None
+    day = next((d for d in ("yesterday", "last night", "overnight") if re.search(r"(?i)\b%s\b" % d, q)), "today")
+    h = t_slot_history(hive, str(wx["id"]), sid, day="last night" if day == "overnight" else day)
+    o = h.get("overall")
+    if not o:
+        return h.get("note") and "At the weather station, %s." % h["note"]
+    now = hive.fmt(wx["kind"], sid, (wx.get("slots") or {}).get(str(sid))) if day == "today" else None
+    return "At the weather station, %s %s: low %s, high %s, average %s%s." % (
+        label.split(" (")[0].lower(), h.get("window", day), o["min"], o["max"], o["average"], "; %s now" % now if now else "")
+
+
 def them_nodes(st, q):
     """The plants the person's earlier messages named, for "which of them is driest?" (it had ranked other plants)."""
     if not re.search(r"(?i)\b(of )?(them|those|these|the two|both|either)\b", q) or len(SAID) < 2:
@@ -4287,7 +4351,29 @@ def them_rank_reply(st, q):
                                                   ", ".join("%s %.0f %%" % (nm, v) for v, nm in have), gap)
 
 
-UPTIME_Q = re.compile(r"(?i)\b(uptime|up time)\b|\bhow long\b[^?]{0,30}\b(been )?(up|running|on)\b|\b(last|when)\b[^?]{0,30}"
+RESTART_RANK_Q = re.compile(r"(?i)\bwhich (node|one|nodes)\b[^?]{0,30}\b(restart|reboot|start|boot)\w*\b[^?]{0,25}"
+                            r"\b(most recently|last|latest|recently|lately)\b|\b(what|anything) (restarted|rebooted)\b")
+
+
+def restart_rank_reply(hive, st):
+    """ "Which node restarted most recently?" got the Strawberry "around Sat 17 Oct 21:57" (it was Fri 22:55). Each node's
+    last start from its uptime (minutes), newest first."""
+    rows = []
+    for n in st.get("nodes", []):
+        up = (n.get("slots") or {}).get("8")
+        if n.get("hidden") or up is None or "uptime" not in str(hive.slot_spec(n.get("kind"), 8).get("label", "")).lower():
+            continue
+        rows.append((time.time() - float(up) * 60 - (n.get("age") or 0), n.get("name") or "%s %s" % (n.get("kind"), n["id"]), up))
+    if not rows:
+        return None
+    rows.sort(reverse=True)
+    return "%s restarted most recently, %s. Last starts, newest first: %s." % (
+        rows[0][1], time.strftime("%a %d %b %H:%M", time.localtime(rows[0][0])),
+        "; ".join("%s %s (up %s)" % (nm, time.strftime("%a %d %b %H:%M", time.localtime(t)),
+                                     "%.1f h" % (up / 60.0) if up < 2880 else "%.1f days" % (up / 1440.0)) for t, nm, up in rows))
+
+
+UPTIME_ASK_Q = re.compile(r"(?i)\b(uptime|up time)\b|\bhow long\b[^?]{0,30}\b(been )?(up|running|on)\b|\b(last|when)\b[^?]{0,30}"
                       r"\b(restart\w*|reboot\w*|start\w*)\b|\b(did|has)\b[^?]{0,30}\b(restart\w*|reboot\w*)\b")
 
 
@@ -4791,7 +4877,12 @@ def plant_rates(hive, st):
     for n in st.get("nodes", []):
         if n.get("hidden") or (n.get("derived") or {}).get("soil") is None:
             continue
-        pts = soil_series(hive, n, 96)
+        pts, _ = settled(soil_series(hive, n, 96))
+        # a probe swap whose new calibration was applied to the old readings shows as a step down no soil can dry in an
+        # hour (the Cactus's Oct 16 swap: 80-92 % -> 57 %, counted as 8.9 points a day of drying): count from after it
+        step = max((i for i in range(1, len(pts)) if pts[i - 1][1] - pts[i][1] > 12), default=None)
+        if step is not None:
+            pts = pts[step:]
         per = {}
         for ts, avg, _, _ in pts:
             per.setdefault(int(ts // 86400), []).append(avg)
@@ -4868,7 +4959,8 @@ def morning_reply(hive, st):
 
 AWAY_Q = re.compile(r"(?i)\b(going away|go away|away for|on vacation|on holiday|out of town|leaving for|be gone|be away|"
                     r"while i'?m (away|gone)|trip|(we'?re|we are|i'?m|i am|we'?ll be|i'?ll be) (away|gone)|away (this|next|for the) (weekend|week)|"
-                    r"gone (this|next|for the) (weekend|week))\b")
+                    r"gone (this|next|for the) (weekend|week)|(leave|leaving) (it |them |the plants |everything )?(alone )?for (a|the|\d+|one|"
+                    r"two|three|four|five|six|seven) (week|weekend|days?|nights?))\b")
 
 
 def away_reply(hive, st, q):
@@ -5282,7 +5374,7 @@ def forecast_reply(hive, q):
 
 
 SUN_Q = re.compile(r"(?i)\b(sunrise|sunset|sun ?(rise|set|up|down)|dawn|dusk|daylight|day length|hours of (sun|light)|"
-                   r"when does it get (dark|light))\b")
+                   r"when does it get (dark|light)|sun (come|comes|coming|go|goes|going|get|gets) (up|down)|(get|gets) (dark|light))\b")
 
 
 def sun_times(lat, lon, day):
@@ -5933,7 +6025,9 @@ def ask(hive, messages, q, on_tool=None):
                 re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
     if not fixed and is_question(q) and not COMMAND.search(q):
         try:
-            if TODAY_REPORT_Q.search(q):
+            if YESTERDAY_REPORT_Q.search(q):
+                fixed = today_report(hive, st, "yesterday")
+            elif TODAY_REPORT_Q.search(q):
                 fixed = today_report(hive, st)
             elif RAIN_DAY_Q.search(q):
                 fixed = rain_day_reply(hive, st, q)
@@ -5943,6 +6037,10 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = seed_care_reply(hive, nodes, q)
             if not fixed:
                 fixed = them_rank_reply(st, q)
+            if not fixed and RESTART_RANK_Q.search(q):
+                fixed = restart_rank_reply(hive, st)
+            if not fixed and WX_DAY_Q.search(q):
+                fixed = wx_day_reply(hive, st, q)
             if not fixed and RANK_Q.search(q):
                 keep = SAID[:]
                 SAID[:] = [q]
@@ -5952,12 +6050,13 @@ def ask(hive, messages, q, on_tool=None):
                     SAID[:] = keep
                 if not rn:
                     fixed = rank_reply(hive, st, q)
-            if not fixed and UPTIME_Q.search(q) and not re.search(r"(?i)\b(pi|admin|gateway|hive)\b", q):
+            if not fixed and UPTIME_ASK_Q.search(q) and not re.search(r"(?i)\b(pi|admin|gateway|hive)\b", q):
                 un, _ = _one_named(hive, nodes, q)
                 fixed = uptime_reply(hive, un, q) if un else None
         except RuntimeError:
             fixed = None
-    if not fixed and (GERM_STOP_Q.search(q) or GERM_SET_Q.search(q) or GERM_MAX_Q.search(q) or GERM_ETA_Q.search(q)):
+    if not fixed and (GERM_STOP_Q.search(q) or GERM_SET_Q.search(q) or GERM_MAX_Q.search(q) or GERM_ETA_Q.search(q) or
+                      GERM_FREQ_Q.search(q) or GERM_LAST_Q.search(q) or GERM_TOTAL_Q.search(q)):
         try:
             fixed = germ_control_reply(hive, nodes, q)
         except RuntimeError:
@@ -6172,7 +6271,7 @@ def ask(hive, messages, q, on_tool=None):
         try:
             if NEW_NODE_Q.search(q):
                 fixed = NEW_NODE_REPLY
-            elif AWAY_Q.search(q) and re.search(r"(?i)\b(ok|okay|fine|survive|be alright|need|water|dry)\b", q):
+            elif AWAY_Q.search(q) and re.search(r"(?i)\b(ok|okay|fine|survive|be alright|need|water|dry|safe|all right)\b", q):
                 fixed = away_reply(hive, st, q)
             elif NIGHT_Q.search(q):
                 fixed = night_summary(hive, st)
