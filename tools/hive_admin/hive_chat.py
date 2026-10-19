@@ -4110,6 +4110,7 @@ BEST_TIME_FACT = ("WATERING TIME: the general advice is early morning, so the wa
 
 # --- the week in one answer (new, 2026-10-13) --------------------------------------------
 WEEK_REPORT_Q = re.compile(r"(?i)\b(week(ly)?|7 days|past week|last week)\b[^?]*\b(report|summary|recap|review|overview|roundup)\b|"
+                           r"\bsummari[sz]e (this|the|my|last) week\b|\bweek in review\b|"
                            r"\b(report|summary|recap|review|overview|roundup)\b[^?]*\b(week|7 days)\b|"
                            r"\bhow (did|has|was) (the |my )?(garden|hive|week)\b[^?]*\b(do|done|doing|go|gone|been|week)\b")
 SPARK = "▁▂▃▄▅▆▇█"
@@ -4167,6 +4168,12 @@ def week_report(hive, st, only=None):
         pts = soil_series(hive, n, hours)
         if not pts:
             continue
+        # a probe swap mid-week (the Cactus's Oct 16) had made its week "0-100 %" (probe-hive-9): from after it, said so
+        swap = ""
+        step = max((i for i in range(1, len(pts)) if pts[i - 1][1] - pts[i][1] > 12), default=None)
+        if step is not None and len(pts) - step >= 6:
+            swap = " - since its probe was changed %s" % time.strftime("%a", time.localtime(pts[step][0]))
+            pts = pts[step + 2:]
         per = {}
         for ts, avg, mn, mx in pts:
             per.setdefault(int((ts - start) // 86400), []).append(avg)
@@ -4194,7 +4201,7 @@ def week_report(hive, st, only=None):
             jumps = [(b[0]) for a, b in zip(pts, pts[1:]) if b[1] - a[1] >= 10 and a[2] > 5]
             if jumps:
                 water = "; watered by hand %s" % time.strftime("%a", time.localtime(jumps[-1]))
-        lines.append("- **%s**: soil %.0f-%.0f %%%s `%s`%s." % (n.get("name") or "node %s" % n["id"], lo, hi, where,
+        lines.append("- **%s**: soil %.0f-%.0f %%%s%s `%s`%s." % (n.get("name") or "node %s" % n["id"], lo, hi, swap, where,
                                                               sparkline(daily), water))
     errs = []
     for n in st.get("nodes", []):
@@ -4306,6 +4313,7 @@ def rain_day_reply(hive, st, q):
 NEED_FIRST_Q = re.compile(r"(?i)\bwhich (plant|one|pot|of (them|my plants))\b[^?]{0,30}\b(needs?|wants?|should (i|we) water)\b|"
                           r"\b(who|what|which plants?) needs? (water|watering)\b|\bwhat (should|do) (i|we) water (first|next)\b|"
                           r"\b(closest|nearest) to need(ing|s)? (water|watering)\b|\bneeds? (water|watering) (next|soonest)\b|"
+                          r"\bshould i water anything\b|\b(does )?anything need (water|watering)\b|\bwater anything (today|now)\b|"
                           r"\bwill need (water|watering) (first|next|soonest)\b")
 
 
@@ -5214,6 +5222,113 @@ def date_water_reply(hive, nodes, q):
                                                                          "" if len(have) == 1 else "s") if have else "",
                                "; ".join(("%s ml %s - %s" % (nice_qty(ml), _clock(t), how)) if ml is not None else
                                          "%s (%s)" % (how, _clock(t)) for t, ml, how in ev), fault)
+
+# --- probe-hive-9 (2026-10-19) ---------------------------------------------------------------
+# "How's my signal across the hive?" got node 5 only.
+SIGNAL_ALL_Q = re.compile(r"(?i)\b(signals?|links?|reception|connections?)\b[^?]{0,30}\b(across|all|every|each|whole|overall|the hive|"
+                          r"nodes|everything)\b|\b(which|what) node\b[^?]*\b(best|worst|strongest|weakest) (signal|link|reception)\b")
+
+
+def signal_all_reply(hive, st, q):
+    rows = []
+    for n in st.get("nodes", []):
+        if n.get("hidden"):
+            continue
+        sg = signal_now(hive, n)
+        if not sg:
+            continue
+        v = _num_unit(sg)[0]
+        e104 = next((w for w in n.get("warnings") or [] if w.startswith("E104")), None)
+        rows.append((v if v is not None else -999, "%s (node %s)" % (n.get("name") or n.get("kind"), n["id"]), sg, e104))
+    if not rows:
+        return None
+    rows.sort(reverse=True)
+    lead = ""
+    if re.search(r"(?i)\b(best|strongest)\b", q):
+        lead = "Best: %s at %s.\n" % (rows[0][1], rows[0][2])
+    elif re.search(r"(?i)\b(worst|weakest)\b", q):
+        lead = "Weakest: %s at %s.\n" % (rows[-1][1], rows[-1][2])
+    return ("%sSignal for each node, strongest first:\n%s\n(Closer to 0 dBm is stronger; E104 counts the times the link dipped "
+            "below -90 dBm since the node started.)" % (lead, "\n".join("- %s: %s%s" % (nm, sg, "; %s" % e.split(" (")[0] + " (" +
+                                                                                       e.split(" (")[-1] if e else "")
+                                                                   for _, nm, sg, e in rows)))
+
+
+# "When's the next watering for anything?" got "16:30 ... since the last command at 16:26" (made up).
+NEXT_ANY_Q = re.compile(r"(?i)\b(next|upcoming) (watering|dose)s?\b[^?]*\b(anything|any (plant|of them)|everything|anyone|all)\b|"
+                        r"\banything\b[^?]{0,20}\b(due|scheduled|getting)\b[^?]{0,20}\bwater|\bwhat'?s next to (be )?water")
+
+
+def next_any_reply(hive, st, nodes):
+    cfg = (hive.call("GET", "/api/config") or {}).get("nodes") or {}
+    rows = []
+    for n in nodes:
+        if not has_pump(hive, n.get("kind")):
+            continue
+        meta = cfg.get(str(n["id"])) or {}
+        nm = n.get("name") or "node %s" % n["id"]
+        issue = known_issue(n["id"]) or ""
+        if stage_name(meta) == "germination":
+            m = re.search(r"So the next one is due at (\d\d:\d\d)", dose_timer_text(n, meta))
+            rows.append("%s: next germination dose %s, only if it reads below %g %%" % (
+                nm, "due " + m.group(1) if m else "on the timer", (band_of(meta) or [0, 80])[1]))
+        elif PROBE_OUT.search(issue) or PROBE_OUT_WARNING in (n.get("warnings") or []):
+            rows.append("%s: nothing scheduled - its probe is out of the soil" % nm)
+        elif (n.get("slots") or {}).get("49") == 0:
+            rows.append("%s: nothing scheduled - its automatic watering is off" % nm)
+        else:
+            m = re.match(r"\s*(\d+(?:\.\d+)?)", str(t_watering_advice(hive, str(n["id"])).get(
+                "automatic watering starts when soil falls below") or ""))
+            soil = (n.get("derived") or {}).get("soil")
+            rows.append("%s: waters itself when its soil falls below %s%s" % (
+                nm, "%s %%" % m.group(1) if m else "its band", " (reads %.0f %% now)" % soil if soil is not None else ""))
+    if not rows:
+        return None
+    return "Next waterings:\n" + "\n".join("- " + r for r in rows) + "\nPlants with no pump are only watered by hand."
+
+
+# "How many days of data do you have?" got "I don't have information about that".
+DATA_SPAN_Q = re.compile(r"(?i)\bhow (many|much) (days|weeks|months) of (data|history|records|readings)\b|\bhow far back\b[^?]*\b(data|"
+                         r"history|records|readings|go)\b|\bwhen (do|did) (the |its |your )?(records|data|history) (start|begin)\b")
+
+
+def data_span_reply(hive, st):
+    rows = []
+    t1 = int(time.time())
+    for n in st.get("nodes", []):
+        if n.get("hidden"):
+            continue
+        kind = n.get("kind")
+        sid = ((((hive.kinds().get(kind) or {}).get("derived") or {}).get("soil") or {}).get("from") or
+               slot_by_label(hive, kind, "Air temperature") or 8)
+        r = (hive.call("GET", "/api/rollup", {"node": n["id"], "slot": int(sid), "res": "day", "from": t1 - 400 * 86400, "to": t1})
+             or {}).get("rows") or []
+        if r:
+            rows.append((r[0]["ts"], "%s (node %s)" % (n.get("name") or kind, n["id"])))
+    if not rows:
+        return None
+    rows.sort()
+    return "The hive's records begin %s (%d days ago) - per node, oldest first: %s. It keeps the hourly history from then on." % (
+        time.strftime("%a %d %b %Y", time.localtime(rows[0][0])), (t1 - rows[0][0]) // 86400,
+        "; ".join("%s from %s" % (nm, time.strftime("%d %b", time.localtime(t))) for t, nm in rows))
+
+
+# "Is the rhubarb probe back in?" - from the known issues and the reading.
+PROBE_BACK_Q = re.compile(r"(?i)\bprobe\b[^?]*\b(back in|back in the (soil|pot|bed)|in yet|reinserted|put back|replaced yet)\b")
+
+
+def probe_back_reply(hive, nodes, q):
+    n, _ = _one_named(hive, nodes, q)
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    issue = known_issue(n["id"]) or ""
+    m = re.search(r"PROBE OUT OF THE SOIL since ([0-9-]+ [0-9:]+)", issue)
+    soil = (n.get("derived") or {}).get("soil")
+    if m or PROBE_OUT_WARNING in (n.get("warnings") or []):
+        return ("Not as far as the hive knows - its known-issues note still says %s's probe is out of the soil%s, and it gives no "
+                "soil reading. Once it's back in, that note needs updating." % (nm, " (since %s)" % m.group(1) if m else ""))
+    return "Yes - %s's probe is in and reading %s." % (nm, "%.0f %%" % soil if soil is not None else "(no reading right now)")
 
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
@@ -6235,7 +6350,8 @@ def admin_reply(hive, st, nodes, q):
     return None
 
 
-ATTENTION_Q = re.compile(r"(?i)\b(needs?|need) (attention|looking at|a look|checking|fixing)\b|\bwhat'?s wrong\b|\banything (wrong|to fix|to check)\b|"
+ATTENTION_Q = re.compile(r"(?i)\b(needs?|need) (my |your |some )?(attention|looking at|a look|checking|fixing)\b|"
+                         r"\banything (i should|i need to) (fix|check|look at)\b|\bwhat'?s wrong\b|\banything (wrong|to fix|to check)\b|"
                          r"\b(problems?|issues?) (in|with) (the )?(hive|garden|nodes?|plants?)\b|\bwhat should i (check|fix|look at)\b|"
                          # ("how's everything?" got "weak signal (-69 dBm)" and a filler offer from the model)
                          r"^\W*(how'?s|how is|how are) (everything|it all|things|all the plants|the plants|the hive)( doing| going| looking)?\W*$|"
@@ -6347,7 +6463,10 @@ def hive_wide_facts(hive, st, named, q):
 FORECAST_Q = re.compile(r"(?i)\b(today'?s|today) (weather|forecast)\b|\bweather (for |like )?(later )?today\b|\bplan for today'?s? weather\b|"
                         r"\b(will it|is it going to|gonna|should I expect|chance of|any)\b[^?]{0,30}\b(rain|snow|"
                         r"freeze|frost|storm|wind|windy|hot|cold|warm)\w*|\bforecast\b|\b(rain|weather|wind|temperature|"
-                        r"high|low)s? (for )?(tomorrow|tonight|this week(end)?|next week|later)\b|\b(tomorrow|tonight)'?s? "
+                        r"high|low)s? (for )?(tomorrow|tonight|this week(end)?|next week|later)\b|"
+                        # "how's the weather looking for the next two days?" got the event log (probe-hive-9)
+                        r"\b(next|coming) (two|2|three|3|few|couple( of)?) days\b|\bweather (looking|look like|shaping up)\b|"
+                        r"\b(tomorrow|tonight)'?s? "
                         r"(weather|high|low|rain|forecast)\b|\bhow (hot|cold|warm|windy) will it\b")
 MODEL_NAME = {"gfs_global": "GFS", "gfs_hrrr": "HRRR", "ecmwf_ifs025": "ECMWF", "icon_seamless": "ICON"}
 
@@ -7163,6 +7282,15 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = snow_reply(hive, st, q)
             if not fixed and DATE_WATER_Q.search(q):
                 fixed = date_water_reply(hive, nodes, q)
+            # probe-hive-9
+            if not fixed and SIGNAL_ALL_Q.search(q):
+                fixed = signal_all_reply(hive, st, q)
+            if not fixed and NEXT_ANY_Q.search(q):
+                fixed = next_any_reply(hive, st, nodes)
+            if not fixed and DATA_SPAN_Q.search(q):
+                fixed = data_span_reply(hive, st)
+            if not fixed and PROBE_BACK_Q.search(q):
+                fixed = probe_back_reply(hive, nodes, q)
             if not fixed and WX_COMPARE_Q.search(q):
                 fixed = wx_compare_reply(hive, st, q)
             # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
