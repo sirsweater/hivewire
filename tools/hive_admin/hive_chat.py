@@ -4505,7 +4505,13 @@ def wx_week_reply(hive, st, q):
         return h.get("note") and "At the weather station, %s." % h["note"]
     days = h.get("by_day") or []
     extra = ""
-    if days and label == "Air temperature":
+    if days and re.search(r"(?i)\b(when|which day|what day)\b", q):
+        # "what's the lowest humidity this week and when?" gave the range and no day (probe-hive-8)
+        lowq = bool(re.search(r"(?i)\b(lowest|min\w*|coldest|coolest|least)\b", q))
+        pick = (min(days, key=lambda d: _num_unit(d["min"])[0] if _num_unit(d["min"])[0] is not None else 1e9) if lowq else
+                max(days, key=lambda d: _num_unit(d["max"])[0] if _num_unit(d["max"])[0] is not None else -1e9))
+        extra = " The %s was on %s (%s)." % ("lowest" if lowq else "highest", pick["day"], pick["min"] if lowq else pick["max"])
+    elif days and label == "Air temperature":
         warm = max(days, key=lambda d: _num_unit(d["max"])[0] or -99)
         cold = min(days, key=lambda d: _num_unit(d["min"])[0] or 99)
         extra = " Warmest: %s (high %s); coldest: %s (low %s)." % (warm["day"], warm["max"], cold["day"], cold["min"])
@@ -5123,6 +5129,92 @@ def restart_today_reply(hive, st, q):
     label = label.split(" (")[0]
     return ("Yes - restarted %s: %s." % (label, "; ".join(rows)) if rows else
             "No - no node restarted %s. %s" % (label, restart_rank_reply(hive, st) or ""))
+
+# --- probe-hive-8 (2026-10-19) ---------------------------------------------------------------
+# "💧🍓?" got the germination hold rule backwards from the model. Plant emoji are the plant's name.
+EMOJI_WORDS = [("🍓", "strawberry"), ("🌵", "cactus"), ("🌧", "rain"), ("☔", "rain"), ("🌡", "temperature"), ("🌬", "wind"),
+               ("💨", "wind"), ("☀", "sun")]
+
+
+def emoji_question(nodes, q):
+    if not re.search(r"[\U0001F300-\U0001FAFF☀-➿]", q):
+        return None
+    t = q
+    for e, w in EMOJI_WORDS:
+        t = t.replace(e, " %s " % w)
+    t = re.sub(r"[\U0001F300-\U0001FAFF☀-➿️]", " ", t)
+    words = re.sub(r"\s+", " ", t).strip(" ?!.")
+    named = [n for n in nodes if n.get("name") and re.fullmatch(r"(?i)(the )?%s" % re.escape(n["name"]), words)]
+    if named and q.rstrip().endswith("?"):
+        return "how's the %s?" % named[0]["name"].lower()       # a plant emoji and a question mark: its status
+    return None
+
+
+# "Did it snow today?" got a tour of the event log and an offer to fetch "an external source".
+SNOW_Q = re.compile(r"(?i)\b(did|has|was|is) (it )?(snow|sleet|hail)\w*\b|\bany (snow|sleet|hail)\b")
+
+
+def snow_reply(hive, st, q):
+    wx = weather_node(st)
+    if not wx:
+        return None
+    day = next((d for d in ("yesterday", "last night", "overnight") if re.search(r"(?i)\b%s\b" % d, q)), "today")
+    t0, t1, label = asked_period(q if day != "today" else "today")
+    mm = rain_total(hive, st, int(t0), int(t1))
+    sid = slot_by_label(hive, wx["kind"], "Air temperature")
+    h = t_slot_history(hive, str(wx["id"]), sid, day="last night" if day == "overnight" else day) if sid is not None else {}
+    low = (h.get("overall") or {}).get("min")
+    lowv = _num_unit(low)[0] if low else None
+    return ("The weather station has no snow sensor, so it can't say directly. %s its rain gauge caught %.1f mm%s%s" % (
+        label[0].upper() + label[1:], mm or 0.0, " and the lowest temperature was %s" % low if low else "",
+        " - too warm for snow." if lowv is not None and lowv > 3 else "." if lowv is None else
+        " - cold enough that frost or snow was possible."))
+
+
+# "Can you turn off the gateway?" got made-up wiring ("keeps running even if the Pi or the Meshtastic radio are unplugged").
+GW_OFF_Q = re.compile(r"(?i)\b(turn|switch|shut|power)\w*\b[^?]{0,15}\b(off|down)\b[^?]{0,20}\b(gateway|the pi|raspberry pi|hub|"
+                      r"admin|hive)\b|\b(reboot|restart)\w*\b[^?]{0,15}\b(gateway|the pi|raspberry pi|hub)\b")
+GW_OFF_REPLY = ("No - this chat can't power off or restart the gateway (the radio on the Pi's USB) or the Pi itself. While "
+                "they're off, the hive can't hear the nodes or send them anything - waterings and germination doses from "
+                "the hive included. Nothing was changed.")
+
+
+# "How much did the rhubarb get on Oct 5?" got "no water was delivered" - the day its pump ran on by itself.
+DATE_WATER_Q = re.compile(r"(?i)\bhow much\b[^?]{0,40}\b(water|ml|get|got|had)\b[^?]{0,30}\bon\s+(?:(?:mon|tue|wed|thu|fri|sat|sun)\w*\s+)?"
+                          r"((jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}|\d{1,2}\s+"
+                          r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*)\b")
+
+
+def date_water_reply(hive, nodes, q):
+    n, _ = _one_named(hive, nodes, q, lambda n, c: has_pump(hive, n.get("kind")))
+    if not n:
+        return None
+    m = DATE_WATER_Q.search(q)
+    try:
+        d = time.strptime(re.sub(r"(?i)^(\d+)\s+(\w{3})\w*$", r"\2 \1", m.group(2)).replace(".", "")[:3] + " " +
+                          re.search(r"\d+", m.group(2)).group(0) + " %d" % time.localtime().tm_year, "%b %d %Y")
+    except ValueError:
+        return None
+    t0 = int(time.mktime((d.tm_year, d.tm_mon, d.tm_mday, 0, 0, 0, 0, 0, -1)))
+    if t0 > time.time():
+        t0 = int(time.mktime((d.tm_year - 1, d.tm_mon, d.tm_mday, 0, 0, 0, 0, 0, -1)))
+    t1 = t0 + 86400
+    nm = n.get("name") or "node %s" % n["id"]
+    label = time.strftime("on %a %d %b", time.localtime(t0))
+    ev = [e for e in watering_events(hive, n, time.time() - t0 + 60) if t0 <= e[0] <= t1]
+    issue = known_issue(n["id"]) or ""
+    fault = ""
+    day_iso = time.strftime("%Y-%m-%d", time.localtime(t0))
+    if day_iso in issue and re.search(r"(?i)pump", issue):
+        fault = (" But the hive's known issues say that's the day its pump ran on by itself while the firmware said it was "
+                 "off - so it got water the count can't show, an amount nobody measured.")
+    if not ev:
+        return "No watering shows up for %s %s.%s" % (nm, label, fault)
+    have = [e for e in ev if e[1] is not None]
+    return "%s %s: %s%s.%s" % (nm, label, "%s ml in %d watering%s - " % (nice_qty(sum(e[1] for e in have)), len(have),
+                                                                         "" if len(have) == 1 else "s") if have else "",
+                               "; ".join(("%s ml %s - %s" % (nice_qty(ml), _clock(t), how)) if ml is not None else
+                                         "%s (%s)" % (how, _clock(t)) for t, ml, how in ev), fault)
 
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
@@ -6927,7 +7019,7 @@ def ask(hive, messages, q, on_tool=None):
     if _fx:
         q = q3
         SAID[-1] = q
-    q2 = corrected_request(nodes, q) or followup_question(q) or correction_question(nodes, q)
+    q2 = corrected_request(nodes, q) or followup_question(q) or correction_question(nodes, q) or emoji_question(nodes, q)
     if q2:
         q = q2
         SAID[-1] = q
@@ -6952,6 +7044,8 @@ def ask(hive, messages, q, on_tool=None):
         if notes and not confirmed:
             fixed = "No - you declined it, so nothing was sent: %s." % "; ".join(
                 re.sub(r"^.*it was NOT sent: |\]$", "", n).split("\n")[0] for n in notes)
+    if not fixed and GW_OFF_Q.search(q):
+        fixed = GW_OFF_REPLY
     if not fixed and RAIN_WEEKS_Q.search(q) and not COMMAND.search(q):
         try:
             fixed = rain_weeks_reply(hive, st)      # ("compare this week's rain to last week" isn't put as a question)
@@ -7016,6 +7110,11 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = doses_today_reply(hive, nodes, q)
             if not fixed and RESTART_TODAY_Q.search(q):
                 fixed = restart_today_reply(hive, st, q)
+            # probe-hive-8
+            if not fixed and SNOW_Q.search(q):
+                fixed = snow_reply(hive, st, q)
+            if not fixed and DATE_WATER_Q.search(q):
+                fixed = date_water_reply(hive, nodes, q)
             if not fixed and WX_COMPARE_Q.search(q):
                 fixed = wx_compare_reply(hive, st, q)
             # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
