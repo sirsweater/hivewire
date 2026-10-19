@@ -845,6 +845,7 @@ def t_slot_history(hive, node, slot, hours=24, day=None):
         return rain_history(hive, kind, node, slot, rows, res)
     f = lambda v: hive.fmt(kind, slot, v)  # noqa: E731
     soil_from = (((hive.kinds().get(kind) or {}).get("derived") or {}).get("soil") or {}).get("from")
+    probe_note = out_note = None
     if soil_from == int(slot):
         # The raw probe reading means nothing to a person (or a model): give the
         # admin's own calibrated %, same formula, same dry/wet points.
@@ -855,6 +856,19 @@ def t_slot_history(hive, node, slot, hours=24, day=None):
             # Lower raw = wetter, so the wettest % comes from the lowest raw reading.
             rows = [dict(x, avg=pct(x["avg"]), min=pct(x["max"]), max=pct(x["min"])) for x in rows]
             f = lambda v: "%.0f %%" % v  # noqa: E731
+            # A probe swap shows as a step down no soil dries in an hour ("the cactus's average this week" had been 76 %,
+            # the old probe's wetter readings mixed in): the figures are from after it, and the note says why.
+            step = max((i for i in range(1, len(rows)) if rows[i - 1]["avg"] - rows[i]["avg"] > 12), default=None)
+            if step is not None and len(rows) - step >= 4:
+                before = rows[:step]
+                step += 2       # (the first hours after a swap are the probe settling and being recalibrated: 0 and 100 %)
+                probe_note = ("the probe was changed or moved at %s - readings before that (%.0f-%.0f %%) don't compare with "
+                              "the ones after, so these figures are from after it" % (
+                                  time.strftime("%a %d %b %H:%M", time.localtime(rows[step - 2]["ts"])),
+                                  min(x["min"] for x in before), max(x["max"] for x in before)))
+                rows = rows[step:]
+    if probe_note:
+        out_note = probe_note
     step = max(1, len(rows) // 24)  # keep it small enough for a small model
     label = hive.slot_spec(kind, slot).get("label")
     if soil_from == int(slot) and f(0).endswith("%"):
@@ -876,6 +890,8 @@ def t_slot_history(hive, node, slot, hours=24, day=None):
                       "avg": f(x["avg"] if isinstance(x["avg"], float) and soil_from == int(slot) else round(x["avg"])),
                       "min": f(x["min"]), "max": f(x["max"])}
                      for x in rows[::step]]
+    if out_note:
+        out["probe_change"] = out_note
     return out
 
 
@@ -3466,6 +3482,7 @@ def no_battery_reply(n):
 
 
 WATER_COUNT_Q = re.compile(r"(?i)\bhow many (times|waterings)\b[^?]*\b(water(ed|ing)?s?|pump(ed)?)\b|"
+                           r"\bhow many (waterings|doses)\b[^?]*\b(get|got|had|have|has)\b|"
                            r"\bhow often\b[^?]*\b(was|has|did)\b[^?]*\bwatered\b")
 
 
@@ -4374,6 +4391,107 @@ def probe_out_soil_reply(hive, nodes, q):
             "there's no soil reading to give. Once the probe is back in, its readings count again." % (
                 nm, " (since %s)" % m.group(1) if m else ""))
 
+TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
+                    r"what('?s| is) today'?s date)\W*$")
+
+
+def time_reply():
+    """ "What time is it?" got "Monday, October 16, 2023" from the model."""
+    return "It's %s, %s (the hive's clock)." % (time.strftime("%H:%M"), time.strftime("%A %d %B %Y"))
+
+
+NODE_PROBLEM_Q = re.compile(r"(?i)\bwhat'?s (the )?(matter|problem|wrong|up) with\b|\bwhat (is|are) (the )?\w+('s)? (problems?|issues?)\b|"
+                            r"\bwhat'?s (the )?\w+'s (problem|issue)\b|\b(problems?|issues?|trouble) with (the |my )?\w+\b")
+
+
+def node_problem_reply(hive, nodes, q):
+    """ "What's the rhubarb's problem?" got its E104 count only - not the probe out of the soil or the pump fault. Every
+    problem the hive knows of for one node."""
+    n, meta = _one_named(hive, nodes, q)
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    items = []
+    issue = known_issue(n["id"]) or ""
+    if "NOT TRUSTED" in issue.upper():
+        items.append("its pump isn't trusted: %s" % pump_fault_text(issue))
+    if PROBE_OUT.search(issue) or PROBE_OUT_WARNING in (n.get("warnings") or []):
+        m = re.search(r"PROBE OUT OF THE SOIL since ([0-9-]+ [0-9:]+)", issue)
+        items.append("its probe is out of the soil%s, so there's no soil reading" % (" (since %s)" % m.group(1) if m else ""))
+    for w in n.get("warnings") or []:
+        if w != PROBE_OUT_WARNING and not w.startswith("soil raw"):
+            items.append(w + (" - the radio link dipped weak at times; harmless unless it keeps climbing" if w.startswith("E104") else ""))
+    soil, band = (n.get("derived") or {}).get("soil"), band_of(meta)
+    if soil is not None and band and not band[0] <= soil <= band[1]:
+        items.append("its soil reads %.0f %%, %s its %g-%g %% band" % (soil, "above" if soil > band[1] else "below", band[0], band[1]))
+    if not items:
+        return "Nothing the hive can see is wrong with %s: no errors, warnings or known issues%s." % (
+            nm, ", and its soil is inside its band" if soil is not None and band else "")
+    return "What the hive knows is wrong with %s:\n%s" % (nm, "\n".join("- " + x[0].upper() + x[1:] for x in items))
+
+
+WX_COMPARE_Q = re.compile(r"(?i)\b(windier|calmer|hotter|warmer|colder|cooler|more humid|less humid|muggier|gustier)\b[^?]{0,40}"
+                          r"\b(yesterday|today)\b[^?]{0,10}\bor\b[^?]{0,15}\b(yesterday|today)\b")
+
+
+def wx_compare_reply(hive, st, q):
+    """ "Was it windier yesterday or today?" got yesterday's figures only. Both days' averages and highs, and which."""
+    wx = weather_node(st)
+    if not wx:
+        return None
+    w = WX_COMPARE_Q.search(q).group(1).lower()
+    label = ("Wind (2-min average)" if w in ("windier", "calmer") else "Gust (10 min)" if w == "gustier" else
+             "Humidity" if "humid" in w or w == "muggier" else "Air temperature")
+    sid = slot_by_label(hive, wx["kind"], label)
+    if sid is None:
+        return None
+    days = {}
+    for d in ("yesterday", "today"):
+        o = t_slot_history(hive, str(wx["id"]), sid, day=d).get("overall")
+        if not o and d == "today" and days.get("yesterday"):
+            y = days["yesterday"]
+            return ("At the weather station, %s: yesterday averaged %s (high %s). Today has only just begun (it's %s), so "
+                    "there's no full hour of readings yet to compare." % (label.split(" (")[0].lower(), y["average"], y["max"],
+                                                                         time.strftime("%H:%M")))
+        if not o:
+            return None
+        days[d] = o
+    num = lambda v: float(str(v).split()[0])  # noqa: E731
+    more = w in ("windier", "hotter", "warmer", "more humid", "muggier", "gustier")
+    hi = "yesterday" if num(days["yesterday"]["average"]) > num(days["today"]["average"]) else "today"
+    lo = "today" if hi == "yesterday" else "yesterday"
+    pick = hi if more else lo
+    return ("At the weather station, %s: yesterday averaged %s (high %s); today so far %s (high %s). So %s was %s, by the "
+            "average." % (label.split(" (")[0].lower(), days["yesterday"]["average"], days["yesterday"]["max"],
+                          days["today"]["average"], days["today"]["max"], pick, w))
+
+
+WATERED_Q = re.compile(r"(?i)\b(has|was|did|have|were)\b[^?]{0,30}\b(been watered|get watered|got watered|get (any )?water|"
+                       r"been dosed|get (a |its )?dose|had (any )?water)\b")
+
+
+def watered_reply(hive, nodes, q):
+    """ "Has the strawberry been watered today?" got "not watered today due to the germination stage's conditions" - it
+    was 00:08 and its last dose was 22:00. The waterings in the window asked about, then the last one and the next."""
+    n, meta = _one_named(hive, nodes, q, lambda n, c: has_pump(hive, n.get("kind")))
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    t0, t1, label = asked_period(q)
+    ev = [e for e in watering_events(hive, n, time.time() - t0 + 60) if t0 <= e[0] <= t1]
+    if ev:
+        return "Yes - %s %s: %s." % (nm, "was watered " + label, "; ".join(
+            ("%s ml %s - %s" % (nice_qty(ml), _clock(t), how) if ml is not None else "%s (%s)" % (how, _clock(t)))
+            for t, ml, how in ev))
+    last = last_watered_at(hive, n)
+    out = "No - nothing %s%s." % (label, "" if label != "today" else " (it's %s)" % time.strftime("%H:%M"))
+    if last:
+        out += " Its last watering was %s (%s ago)." % (_clock(last), days_ago(last))
+    if stage_name(meta) == "germination":
+        nxt = dose_timer_text(n, meta).split(". ", 1)
+        out += (" " + nxt[1]) if len(nxt) > 1 else ""
+    return out
+
 RESTART_RANK_Q = re.compile(r"(?i)\bwhich (node|one|nodes)\b[^?]{0,30}\b(restart|reboot|start|boot)\w*\b[^?]{0,25}"
                             r"\b(most recently|last|latest|recently|lately)\b|\b(what|anything) (restarted|rebooted)\b")
 
@@ -4425,9 +4543,10 @@ def uptime_reply(hive, n, q=""):
         " Its boot counter reads %s - every start it has ever had, not since then." % boots_text(boots) if boots is not None else "")
 
 
-SEED_CARE_Q = re.compile(r"(?i)\b(cover(ing)?|dome|plastic wrap|cling film|lid|heat mat|bottom heat|humidity)\b(?! crops?)[^?]{0,40}"
-                         r"\b(seeds?|seedlings?|seed (pot|tray))\b|\b(seeds?|seedlings?|seed (pot|tray))\b[^?]{0,40}"
-                         r"\b(cover(ed|ing)?|dome|plastic wrap|lid|heat mat|bottom heat)\b")
+SEED_CARE_Q = re.compile(r"(?i)\b(cover(ing)?|dome|plastic wrap|cling film|lid|heat mat|bottom heat|humidity|warm enough|too cold|"
+                         r"too hot)\b(?! crops?)[^?]{0,40}\b(seeds?|seedlings?|seed (pot|tray))\b|\b(seeds?|seedlings?|seed (pot|tray))\b[^?]{0,40}"
+                         r"\b(cover(ed|ing)?|dome|plastic wrap|lid|heat mat|bottom heat|warm enough|too cold|too hot)\b|"
+                         r"\b(move|put|take)\b[^?]{0,30}\b(somewhere |a )?(warmer|cooler|sunnier)\b")
 
 
 def seed_care_reply(hive, nodes, q):
@@ -4436,6 +4555,11 @@ def seed_care_reply(hive, nodes, q):
     n, meta = _one_named(hive, nodes, q, lambda n, c: stage_name(c) in ("germination", "seedling"))
     out = ("That's seed-starting care, which the plant assistant (the `plants` bot on the devbox) answers from the "
            "University of Minnesota Extension's seed-starting guide - ask it there.")
+    if n and re.search(r"(?i)\b(warm|cold|hot|cool)\w*\b", q):
+        t = soil_temp_reply(hive, n)
+        if t:
+            out += " What the hive can add: " + t
+            return out
     if n and (n.get("derived") or {}).get("soil") is not None:
         sm = meta.get("seed_mode") or {}
         out += " What the hive can add: %s's probe reads %.0f %% now%s." % (
@@ -4542,6 +4666,11 @@ def watch_add_reply(hive, nodes, q):
     finally:
         SAID[:] = keep
     pairs = watch_pairs(q)
+    if not named and re.search(r"(?i)\b(rain\w*|wind\w*|gust\w*|frost\w*|freez\w*|storm\w*|temperature|cold|hot|heat)\b", q):
+        # "set an alert for when it rains" had been asked which node
+        return ("The alerts you can set here are soil levels for a plant (\"tell me if the strawberry drops below 70%\"). "
+                "There's no alert for rain. g4rden sends its own phone alerts for frost and strong wind from the weather "
+                "station, if they're on in its app. Nothing was changed.")
     if not named:
         return ("Which plant? Soil alerts are set one plant at a time - for example \"tell me if the %s drops below "
                 "60%%\". The plants with a soil probe: %s." % (
@@ -5076,9 +5205,10 @@ CAL_HOW_REPLY = (
     "Or, without moving it: the row shows the wettest and driest readings the probe held over the last 1, 7 or 30 "
     "days - **Wettest as wet** / **Driest as dry** fill those in. This chat can't change calibration.")
 GATEWAY_Q = re.compile(r"(?i)\b(gateway|the pi|raspberry pi|hub|admin (server|page)|host)\b[^?]*\b(ok|okay|working|running|alive|up|fine|"
-                       r"healthy|answering|down)\b")
+                       r"healthy|answering|down|connected|online|offline|talking|plugged in)\b")
 HIDDEN_Q = re.compile(r"(?i)\b(hidden|retired|hide)\b[^?]*\bnodes?\b|\bnodes?\b[^?]*\b(hidden|retired)\b")
-FW_LAST_Q = re.compile(r"(?i)\b(last|latest|recent|when)\b[^?]*\b(firmware|ota|update|flash\w*|push\w*)\b(?![^?]*\b(running|version|same|which)\b)")
+FW_LAST_Q = re.compile(r"(?i)\b(last|latest|recent|when)\b[^?]*\b(firmware|ota|update|flash\w*|push\w*)\b(?![^?]*\b(running|version|same|which)\b)|"
+                       r"\bhow old\b[^?]*\bfirmware\b")
 SEED_Q = re.compile(r"(?i)\bseed mode\b")
 # "What mode is it in", not "how long do strawberries take to germinate": the node facts carry the stage for those.
 STAGE_Q = re.compile(r"(?i)\b(?:germination|seedling) mode\b|\bgrow(?:th)? stage\b|\bwhat (stage|mode)\b")
@@ -6060,6 +6190,16 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = seed_care_reply(hive, nodes, q)
             if not fixed:
                 fixed = them_rank_reply(st, q)
+            if not fixed and TIME_Q.search(q):
+                fixed = time_reply()
+            if not fixed and WX_COMPARE_Q.search(q):
+                fixed = wx_compare_reply(hive, st, q)
+            # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
+            if not fixed and WATERED_Q.search(q) and not WHY_NOT_WATERED_Q.search(q) and not any(
+                    "the person declined" in str(m.get("content", "")) for m in messages[-4:]):
+                fixed = watered_reply(hive, nodes, q)
+            if not fixed and NODE_PROBLEM_Q.search(q):
+                fixed = node_problem_reply(hive, nodes, q)
             if not fixed:
                 fixed = probe_out_soil_reply(hive, nodes, q)
             if not fixed and RESTART_RANK_Q.search(q):

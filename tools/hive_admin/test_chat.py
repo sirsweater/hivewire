@@ -162,7 +162,7 @@ past = "It was last watered on Oct 05 at 14:04. Since then, no watering has been
 script[:] = [say(past)]
 # ("when was it last watered?" is answered in code now - last_water_reply - so the model's past-tense line is asked
 # for another way)
-out = conv.ask(hive, "has node %d been watered lately?" % pump["id"])
+out = conv.ask(hive, "any watering news for node %d lately?" % pump["id"])
 check(out["answer"] == past and len(fake_llm.calls) == 1, "'no watering has been sent' isn't taken for a claim",
       out["answer"])
 
@@ -1791,6 +1791,32 @@ try:
           "...not for the probe itself or the soil temperature")
 finally:
     C.KNOWN_ISSUES_FILE = _ki_keep
+
+# --- probe-hive-4 (2026-10-19) -------------------------------------------------------------
+for q, rx in (("what time is it?", C.TIME_Q), ("what's the date today?", C.TIME_Q), ("what's the rhubarb's problem?", C.NODE_PROBLEM_Q),
+              ("what's wrong with the cactus?", C.NODE_PROBLEM_Q), ("was it windier yesterday or today?", C.WX_COMPARE_Q),
+              ("has the strawberry been watered today?", C.WATERED_Q), ("how many waterings did the strawberry get yesterday?", C.WATER_COUNT_Q),
+              ("is the gateway connected?", C.GATEWAY_Q), ("how old is the weather station's firmware?", C.FW_LAST_Q),
+              ("is the strawberry warm enough for the seeds?", C.SEED_CARE_Q), ("should I move the strawberry somewhere warmer?", C.SEED_CARE_Q)):
+    check(rx.search(q), "probe-hive-4 routing: %r" % q)
+check(not C.TIME_Q.search("what time does the grow light turn on?") and not C.TIME_Q.search("what time was the last dose?"),
+      "...a question about a time isn't 'what time is it?'")
+check(re.match(r"It's \d\d:\d\d, \w+day \d\d \w+ 20\d\d", C.time_reply()), "the time from the hive's clock", C.time_reply())
+_keep_ki2 = C.KNOWN_ISSUES_FILE
+_kf3 = os.path.join(tmp, "ki3.json")
+json.dump({"5": "PUMP NOT TRUSTED: it ran on. PROBE OUT OF THE SOIL since 2026-10-16 19:13 (sealing)"}, open(_kf3, "w"))
+C.KNOWN_ISSUES_FILE = _kf3
+try:
+    _np = [{"id": 5, "name": "Rhubarb", "kind": "WaterNode", "derived": {"soil": None},
+            "warnings": ["E104 Link to the hive weaker than -90 dBm (34 since boot)"]}]
+    C.SAID[:] = ["what's the rhubarb's problem?"]
+    a = C.node_problem_reply(_NoCfg(), _np, "what's the rhubarb's problem?") or ""
+    check("pump isn't trusted" in a and "probe is out of the soil" in a and "E104" in a,
+          "'what's the rhubarb's problem?': the known issues and the warnings, not just its error count", a)
+finally:
+    C.KNOWN_ISSUES_FILE = _keep_ki2
+a = C.watch_add_reply(_NoCfg(), [], "set an alert for when it rains") or ""
+check("no alert for rain" in a and "Which plant" not in a, "'set an alert for when it rains': what can and can't be alerted", a)
 
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
