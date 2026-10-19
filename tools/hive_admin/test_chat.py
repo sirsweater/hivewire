@@ -1817,6 +1817,9 @@ finally:
     C.KNOWN_ISSUES_FILE = _keep_ki2
 a = C.watch_add_reply(_NoCfg(), [], "set an alert for when it rains") or ""
 check("no alert for rain" in a and "Which plant" not in a, "'set an alert for when it rains': what can and can't be alerted", a)
+check(C.WATCH_ASK.search("set an alert for when it rains") and C.WATCH_WX.search("set an alert for when it rains") and
+      C.WATCH_WORD.search("set an alert for when it rains") and not C.WATCH_WORD.search("tell me if it will rain tomorrow"),
+      "...and it's routed there; 'tell me if it will rain' isn't")
 
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},

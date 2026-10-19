@@ -4616,6 +4616,8 @@ WATCH_EITHER = re.compile(r"(?i)\b(gets? to|reach(es)?|hits?|is at|at)\b")    # 
 WATCH_ABOVE = re.compile(r"(?i)\b(above|over|more than|higher than|rises?|rising|climbs?|climbing|goes (above|over|up)|"
                          r"go (above|over|up)|gets? (above|over|up)|exceeds?|wetter than|up to)\b")
 WATCH_PAST = re.compile(r"(?i)\b(yesterday|last (night|week)|ago|did|was|were|went|dropped|fell|has it|have they|been)\b")
+WATCH_WX = re.compile(r"(?i)\b(rain\w*|wind\w*|gust\w*|frost\w*|freez\w*|storm\w*)\b")
+WATCH_WORD = re.compile(r"(?i)\b(alert|notif\w*|warn|warning|reminder|push|ping|buzz)\b")
 WATCH_DRYWORD = re.compile(r"(?i)\b(dry|dries|dry out|drier|needs? water(ing)?|thirsty|wet|soggy|too (wet|dry))\b")
 # a change ("drops", "goes above") or "when" makes it an alert; "let me know if it's below 70%" asks about now
 WATCH_CHANGE = re.compile(r"(?i)\b(drops?|dropping|falls?|falling|goes|go|gets?|getting|dips?|sinks?|rises?|rising|climbs?|"
@@ -6233,7 +6235,8 @@ def ask(hive, messages, q, on_tool=None):
             fixed = None
     elif not fixed and WATCH_ASK.search(q) and not WATCH_PAST.search(q) and (
             WATCH_LEVEL.search(q) and (WATCH_BELOW.search(q) or WATCH_ABOVE.search(q) or WATCH_EITHER.search(q)) or
-            WATCH_DRYWORD.search(q)):
+            WATCH_DRYWORD.search(q) or (WATCH_WX.search(q) and WATCH_WORD.search(q))):
+        # ("set an alert for when it rains" had been asked which node; "tell me if it'll rain" is a forecast question)
         try:
             fixed = watch_add_reply(hive, nodes, q)
         except RuntimeError:
