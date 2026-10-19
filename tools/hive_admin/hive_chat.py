@@ -4354,6 +4354,26 @@ def them_rank_reply(st, q):
                                                   ", ".join("%s %.0f %%" % (nm, v) for v, nm in have), gap)
 
 
+PROBE_SOIL_Q = re.compile(r"(?i)\b(soil|moisture|wet|wetter|wettest|dry|drier|driest|reading|readings|percent|%)\b")
+
+
+def probe_out_soil_reply(hive, nodes, q):
+    """ "What was the lowest the rhubarb's soil moisture got yesterday?" got "1 % at 12:00" - its probe has been out of the
+    soil since Oct 16 (known issue), so that's air. A soil question about a plant whose probe is out says so."""
+    if not PROBE_SOIL_Q.search(q) or re.search(r"(?i)\b(probe|sensor|back in|temp\w*|warm\w*|hot\w*|cold\w*|cool\w*|degrees|battery|signal|pump\w*|water(ed|ing)? (it|now))\b", q):
+        return None
+    n, _ = _one_named(hive, nodes, q)
+    if not n:
+        return None
+    issue = known_issue(n["id"]) or ""
+    if PROBE_OUT_WARNING not in (n.get("warnings") or []) and not PROBE_OUT.search(issue):
+        return None
+    m = re.search(r"PROBE OUT OF THE SOIL since ([0-9-]+ [0-9:]+)", issue)
+    nm = n.get("name") or "node %s" % n["id"]
+    return ("%s's probe is out of the soil%s, so its readings since then are the probe in the air (near 0 %%), not the bed - "
+            "there's no soil reading to give. Once the probe is back in, its readings count again." % (
+                nm, " (since %s)" % m.group(1) if m else ""))
+
 RESTART_RANK_Q = re.compile(r"(?i)\bwhich (node|one|nodes)\b[^?]{0,30}\b(restart|reboot|start|boot)\w*\b[^?]{0,25}"
                             r"\b(most recently|last|latest|recently|lately)\b|\b(what|anything) (restarted|rebooted)\b")
 
@@ -6040,6 +6060,8 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = seed_care_reply(hive, nodes, q)
             if not fixed:
                 fixed = them_rank_reply(st, q)
+            if not fixed:
+                fixed = probe_out_soil_reply(hive, nodes, q)
             if not fixed and RESTART_RANK_Q.search(q):
                 fixed = restart_rank_reply(hive, st)
             if not fixed and WX_DAY_Q.search(q):

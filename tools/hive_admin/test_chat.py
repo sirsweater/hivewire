@@ -1770,6 +1770,26 @@ try:
 finally:
     C.readings = _rd
 
+_kf2 = os.path.join(tmp, "ki2.json")
+json.dump({"5": "PROBE OUT OF THE SOIL since 2026-10-16 19:13 (being sealed)"}, open(_kf2, "w"))
+_ki_keep = C.KNOWN_ISSUES_FILE
+C.KNOWN_ISSUES_FILE = _kf2
+try:
+    _po = [{"id": 5, "name": "Rhubarb", "kind": "WaterNode", "derived": {"soil": None}, "warnings": []}]
+
+
+    class _NoCfg:
+        def call(self, *a, **k):
+            return {"nodes": {}}
+
+    a = C.probe_out_soil_reply(_NoCfg(), _po, "what was the lowest the rhubarb's soil moisture got yesterday?") or ""
+    check("out of the soil (since 2026-10-16 19:13)" in a and "in the air" in a, "a soil question about a probe-out plant: air, not the bed", a)
+    check(C.probe_out_soil_reply(_NoCfg(), _po, "is the rhubarb probe back in?") is None and
+          C.probe_out_soil_reply(_NoCfg(), _po, "how warm did the rhubarb's soil get today?") is None,
+          "...not for the probe itself or the soil temperature")
+finally:
+    C.KNOWN_ISSUES_FILE = _ki_keep
+
 # --- typo repair (typo_words.json) ---------------------------------------------------------
 _tn = [{"id": 5, "name": "Rhubarb"}, {"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"},
        {"id": 20, "name": "Weather station"}]
