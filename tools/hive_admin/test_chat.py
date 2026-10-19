@@ -1650,7 +1650,9 @@ _we, _hp = C.watering_events, C.has_pump
 C.has_pump = lambda h, k: k == "WaterNode"
 try:
     _n7w = dict(_n7, kind="WaterNode")
-    C.watering_events = lambda h, n, back: [(_t0 + 3600 * 8.5, 5, "a germination mode dose")]
+    # (inside "this morning so far" at any hour: an 08:30 dose is still in the future just after midnight)
+    _evt = _t0 + min(3600 * 8.5, max(1, (_tm.time() - _t0) / 2))
+    C.watering_events = lambda h, n, back: [(_evt, 5, "a germination mode dose")]
     a = C.why_not_watered_reply(_WNHive(), [_n7w], "why didn't the strawberry get watered this morning?")
     check(a and a.startswith("It was - Strawberry was watered this morning: 5 ml at") and "germination mode dose" in a,
           "'why didn't it get watered this morning?' when it was: the premise corrected from the events", a)
