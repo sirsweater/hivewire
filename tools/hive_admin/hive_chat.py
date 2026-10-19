@@ -4899,8 +4899,9 @@ def node_count_reply(st):
 
 
 # "How many ml has the strawberry had today?" / "and yesterday?" got "16 ml ... 8 ml at noon" (it was 4 x 5 ml).
+# (not "this week": WATER_TOTAL's pump-count fact answers that, with a pump fault's note)
 ML_PERIOD_Q = re.compile(r"(?i)\bhow (much|many)\b[^?]{0,40}\b(water|ml|millilit\w*)\b[^?]{0,40}\b(yesterday|last night|overnight|"
-                         r"this morning|this week|last 7 days|past week)\b")
+                         r"this morning)\b")
 
 
 def ml_period_reply(hive, nodes, q):
