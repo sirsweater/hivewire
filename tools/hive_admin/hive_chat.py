@@ -7462,6 +7462,9 @@ def ask(hive, messages, q, on_tool=None):
     fixed = fixed or next((a for pat, a in FIXED_REPLIES if pat.search(q)), None)
     if fixed:
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": fixed}]
+        # what "it" points back to next ("how's the rhubarb?" / "and when will it need water?" lost the rhubarb once the
+        # status came from code)
+        LAST_ANSWER[:] = [fixed]
         return fixed
     if (CALIBRATE.search(q) or (FLOW_WRONG.search(q) and not re.search(r"\d", re.sub(r"(?i)\bnode\s*#?\d+|\(\d+\)", "", q)))) and re.search(r"(?i)pump|flow", q):
         a = ("Pump calibration isn't done from this chat: it runs the pump into a measuring cup while you watch. "
