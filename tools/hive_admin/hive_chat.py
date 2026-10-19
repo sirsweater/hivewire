@@ -3192,15 +3192,34 @@ def pumped_day_reply(hive, nodes, q):
     nm = n.get("name") or "node %s" % n["id"]
     ev = [e for e in watering_events(hive, n, 86400) if e[1] is not None]
     when = lambda t: time.strftime("%a %H:%M", time.localtime(t))  # noqa: E731
-    out = "%s's pump has delivered %d ml in the last 24 hours (the node's own count)." % (nm, own)
-    if ev:
-        sent = sum(ml for _, ml, how in ev if "pump (automatic" not in how)
-        out += " Waterings in that time: %s." % "; ".join("%d ml at %s - %s" % (ml, when(t), how) for t, ml, how in ev)
+    # The firmware's count runs in 24-hour blocks from a fixed start (HivewirePump.h loop(): _winStart), not a rolling
+    # day, and rounds each run down to the whole ml (5 ml at 95 ml/min = 3157 ms counts as 4). It had said "because the
+    # node restarted" for a node up 2.4 days (2026-10-19).
+    t1 = int(time.time())
+    pts = (hive.call("GET", "/api/series", {"node": n["id"], "slot": int(sid), "from": t1 - 2 * 86400, "to": t1})
+           or {}).get("points") or []
+    resets = [t for (_, a), (t, b) in zip(pts, pts[1:]) if a is not None and b is not None and b < a]
+    since = resets[-1] if resets else None
+    up = (n.get("slots") or {}).get("8")
+    restarted = up is not None and "uptime" in str(hive.slot_spec(n.get("kind"), 8).get("label", "")).lower() and \
+        float(up) * 60 < 86400
+    out = "%s's pump has delivered %d ml %s (the node's own count)." % (
+        nm, own, "since its counter last started a new 24-hour block, %s" % _clock(since) if since and not restarted
+        else "in the last 24 hours")
+    cov = [e for e in ev if e[0] >= since] if since and not restarted else ev      # the waterings the count covers
+    if cov:
+        sent = sum(ml for _, ml, how in cov if "pump (automatic" not in how)
+        out += " Waterings in that time: %s." % "; ".join("%d ml at %s - %s" % (ml, when(t), how) for t, ml, how in cov)
         if sent > own + 3:
             out += (" The count is lower than what was sent because the node restarted in between - a restart starts its "
-                    "24-hour count again.")
+                    "24-hour count again." if restarted else
+                    " The two differ because the node's count runs in 24-hour blocks rather than a rolling day, and it "
+                    "rounds each run down to the whole ml - a 5 ml dose counts as 4.")
+    if len(ev) > len(cov) and not re.search(r"(?i)\btoday\b", q):
+        out += " Over the full last 24 hours the hive sent %d ml: %s." % (
+            sum(ml for _, ml, _ in ev), "; ".join("%d ml at %s" % (ml, when(t)) for t, ml, _ in ev))
     if re.search(r"(?i)\btoday\b", q):
-        # the node only keeps a rolling 24 h, so "today" is the waterings since midnight, added up here
+        # the node's count isn't a calendar day, so "today" is the waterings since midnight, added up here
         t0 = day_window("today")[0]
         today = [e for e in ev if e[0] >= t0]
         out += (" Since midnight: %d ml (%s)." % (sum(ml for _, ml, _ in today), " + ".join(
