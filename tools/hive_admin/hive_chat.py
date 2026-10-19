@@ -4749,6 +4749,31 @@ def soil_ext_reply(hive, nodes, q):
         o["average"], (" Note: %s." % h["probe_change"]) if h.get("probe_change") else "")
 
 
+
+# "Is it a good day to water outside?" got "the Cactus is too wet ... not ideal to water the outdoor beds" (the hive doesn't
+# know which plants are outside). The rain coming and which plants are under their band.
+WATER_DAY_Q = re.compile(r"(?i)\b(good|right|bad|ok|okay) (day|time|morning|evening)\b[^?]{0,20}\bto water\b|"
+                         r"\bshould i water\b[^?]{0,20}\b(outside|outdoors|the garden|the beds?|the yard)\b|"
+                         r"\bwater (outside|outdoors)\b[^?]{0,15}\b(today|tonight|now)\b")
+
+
+def water_day_reply(hive, st):
+    models = (hive.call("GET", "/api/forecast") or {}).get("models") or {}
+    t0, t1 = time.time(), time.time() + 24 * 3600
+    rains = [sum(v for t, v in vars_.get("rain") or [] if t0 <= t < t1) for vars_ in models.values() if vars_.get("rain")]
+    if not rains:
+        rain = "no forecast stored"
+    elif max(rains) < 0.5:
+        rain = "none expected (all %d models under 0.5 mm)" % len(rains)
+    elif min(rains) >= 0.5:
+        rain = "likely - %.1f to %.1f mm across the models" % (min(rains), max(rains))
+    else:
+        rain = "uncertain - up to %.1f mm in some models, none in others" % max(rains)
+    _, need = soil_verdicts(hive, st)
+    return ("The hive doesn't know which plants are outdoors, so here's what it has. **Rain in the next 24 hours:** %s. "
+            "**Under their band (could do with water):** %s." % (
+                rain, ", ".join(need) if need else "none - every plant with a probe reads at or above its band"))
+
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
 
@@ -6576,6 +6601,8 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = bring_in_reply(hive, st, nodes, q)
             if not fixed and SOIL_EXT_Q.search(q):
                 fixed = soil_ext_reply(hive, nodes, q)
+            if not fixed and WATER_DAY_Q.search(q):
+                fixed = water_day_reply(hive, st)
             if not fixed and WX_COMPARE_Q.search(q):
                 fixed = wx_compare_reply(hive, st, q)
             # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
