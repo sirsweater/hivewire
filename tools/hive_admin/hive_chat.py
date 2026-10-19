@@ -5137,8 +5137,7 @@ EMOJI_WORDS = [("🍓", "strawberry"), ("🌵", "cactus"), ("🌧", "rain"), ("�
 
 
 def emoji_question(nodes, q):
-    if not re.search(r"[\U0001F300-\U0001FAFF☀-➿]", q):
-        return None
+    """ "💧🍓?" or a bare "rhubarb?" (that had got "Nothing was changed." - hive-full33): the plant's status."""
     t = q
     for e, w in EMOJI_WORDS:
         t = t.replace(e, " %s " % w)
@@ -5685,6 +5684,33 @@ DRY_RANK_Q = re.compile(r"(?i)\b(which|what|who)\b[^?]*\b(fastest|quickest|slowe
                         r"\bhow (fast|quickly)\b|\b(drying|dry) rate\b|\brate\b[^?]*\bdry|\b(fastest|slowest)\b")
 
 
+# "The cactus has been drying out really fast in the new soil, should I water it?" got its signal strength (hive-full33).
+# The premise checked against its readings, then its band - in code.
+DRY_PREMISE_Q = re.compile(r"(?i)\b(drying|dried|dries|drying out|dried out|dries out)\b[^?]{0,15}\b(really |very |so |super |too )?(fast|"
+                           r"quick\w*|rapidly)\b")
+
+
+def dry_premise_reply(hive, nodes, q):
+    n, meta = _one_named(hive, nodes, q, lambda n, c: (n.get("derived") or {}).get("soil") is not None)
+    if not n:
+        return None
+    t = drying_fact(hive, n)
+    m = re.match(r"DRYING CHECK for .+?: (.+?) it went from (\d+)% to (\d+)%: (.+?)\. If the message", t or "")
+    nm = n.get("name") or "node %s" % n["id"]
+    soil, band = n["derived"]["soil"], band_of(meta)
+    head = ("By its readings %s isn't drying fast - %s it went from %s%% to %s%% (%s)." % (
+        nm, m.group(1), m.group(2), m.group(3), m.group(4)) if m and m.group(4).startswith(("NOT", "drying slowly")) else
+            "By its readings %s is %s - %s it went from %s%% to %s%%." % (nm, m.group(4), m.group(1), m.group(2), m.group(3))
+            if m else "%s doesn't have enough settled readings yet to say how fast it's drying." % nm)
+    if not band:
+        return head
+    r = round(soil)
+    verdict = ("It reads %d %%, over its %g-%g %% band, so it doesn't need water." % (r, band[0], band[1]) if r > band[1] else
+               "It reads %d %%, under its %g-%g %% band, so yes - it could use water." % (r, band[0], band[1]) if r < band[0] else
+               "It reads %d %%, inside its %g-%g %% band, so it doesn't need water yet." % (r, band[0], band[1]))
+    return head + " " + verdict
+
+
 def drying_fact(hive, n):
     """What one pot's reading did lately, for a message that says it's drying (fast): settled readings only."""
     pts, cut = settled(soil_series(hive, n, 72))
@@ -5865,6 +5891,26 @@ def auto_switch_reply(nodes, q, hive=None):
 
 
 SOIL_TEMP_NOW_Q = re.compile(r"(?i)\bsoil\b[^?]{0,30}\b(temp\w*|warm|hot|cold|cool|degrees)\b|\b(temp\w*|warm|hot|cold|cool)\b[^?]{0,30}\bsoil\b")
+
+
+# "Is it cold at the strawberry?" got its soil probe's 20.7 C as "the temperature at the strawberry" (hive-full33): it has
+# no air sensor; the weather station has the air.
+COLD_AT_Q = re.compile(r"(?i)\b(is it|how) (cold|warm|hot|chilly|cool|freezing)\b[^?]{0,20}\b(at|by|near|for|around|where)\b")
+
+
+def cold_at_reply(hive, st, n):
+    nm = n.get("name") or "node %s" % n["id"]
+    # (readings() spells out "NO READING - sensor not fitted": the raw slot alone read as 0.0 C)
+    av = next((v for k, v in readings(hive, n).items() if k.startswith("Air temperature (")), None)
+    if av and re.match(r"-?\d", str(av)):
+        return "The air at %s is %s right now (its own sensor)." % (nm, with_f(av))
+    soil = soil_temp_reply(hive, n)
+    wx = weather_node(st)
+    wsid = slot_by_label(hive, wx["kind"], "Air temperature") if wx else None
+    wraw = (wx.get("slots") or {}).get(wsid) if wsid else None
+    wv = hive.fmt(wx["kind"], wsid, wraw) if wraw is not None else None
+    return "%s has no air sensor, so the hive can't say how cold the air is right there.%s%s" % (
+        nm, (" " + soil) if soil else "", (" The weather station's air is %s now." % with_f(wv)) if wv and re.match(r"-?\d", str(wv)) else "")
 
 
 def soil_temp_reply(hive, n):
@@ -7088,6 +7134,8 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = soil_ext_reply(hive, nodes, q)
             if not fixed and WATER_DAY_Q.search(q):
                 fixed = water_day_reply(hive, st)
+            if not fixed and DRY_PREMISE_Q.search(q) and re.search(r"(?i)\b(should|do|does|need)\b[^?]*\bwater", q):
+                fixed = dry_premise_reply(hive, nodes, q)
             # probe-hive-6
             if not fixed and FIXED_PREMISE_Q.search(q):
                 fixed = fixed_premise_reply(hive, nodes, q)
@@ -7496,6 +7544,13 @@ def ask(hive, messages, q, on_tool=None):
             fixed = anyone_watered_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
+    if not fixed and is_question(q) and COLD_AT_Q.search(q):
+        cn, _ = _one_named(hive, nodes, q, lambda n, c: n.get("kind") != "WeatherNode")
+        if cn:
+            try:
+                fixed = cold_at_reply(hive, st, cn)
+            except RuntimeError:
+                fixed = None
     if not fixed and is_question(q) and SOIL_TEMP_NOW_Q.search(q) and not DAY_WORD.search(re.sub(r"(?i)\btoday\b", "", q)) \
             and not EXTREME_WORD.search(q) and not re.search(r"(?i)\b(high|low|average|get|got|was|did)\b", q):
         keep = SAID[:]
@@ -7656,7 +7711,7 @@ def ask(hive, messages, q, on_tool=None):
         messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         return a
     messages.append({"role": "user", "content": q + focus_facts(hive, q)})
-    msg, writes, nudged = {}, [], False
+    msg, writes, nudged, water_nudged = {}, [], False, False
     done_writes = set()
     asking = not (REQUEST.search(q) or REQUEST_CLAUSE.search(q))      # a question gets read-only tools
     if SYMPTOM.search(q) and not re.search(r"(?i)\b(water|pump|reboot|restart|reset|set|rename|stop|turn|give)\b", q):
@@ -7690,7 +7745,7 @@ def ask(hive, messages, q, on_tool=None):
                 # after refusing doesn't)
                 # "that's wrong, it's bone dry, I just checked. water it 200 ml" (probe out of the soil) got "I would not
                 # recommend watering" and no card. The card shows the reading and known issues; the person decides.
-                nudged = True
+                nudged = water_nudged = True
                 messages.append({"role": "user", "content": "[From the hive, not the person: they asked for water with "
                                  "an amount and you proposed nothing. Call water_now for what they asked - the card "
                                  "shows them the reading and any known issues, and they decide. Don't decide for "
@@ -7715,6 +7770,29 @@ def ask(hive, messages, q, on_tool=None):
                 on_tool(call, result)
             messages.append({"role": "tool", "tool_name": call["function"]["name"], "tool_call_id": call.get("id"),
                              "content": json.dumps(result, default=str)[:12000]})
+    if water_nudged and not writes:
+        # Still no card after the nudge ("it's bone dry, I just checked. water it 200 ml" - hive-full33): the card is
+        # proposed here - one plant, one amount, as asked - and the person decides on it.
+        keep = SAID[:]
+        SAID[:] = [q]
+        try:
+            fn = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+        finally:
+            SAID[:] = keep
+        fn = fn or [n for n in pronoun_nodes(st, q) if has_pump(hive, n.get("kind"))]
+        if not fn and len(SAID) >= 2:
+            SAID_ = SAID[:]
+            SAID[:] = [SAID_[-2]]
+            try:
+                fn = [n for n in nodes if named_by_person(n) and has_pump(hive, n.get("kind"))]
+            finally:
+                SAID[:] = SAID_
+        mls = [float(x) for x in re.findall(r"(?i)\b(\d+(?:\.\d+)?)\s*(?:ml|millilit\w*)\b", q)]
+        if len(fn) == 1 and len(mls) == 1 and mls[0] > 0:
+            res = t_water_now(hive, str(fn[0]["id"]), mls[0])
+            writes.append(("water_now", res))
+            msg = {"role": "assistant", "content": res.get("say") or res.get("reason") or ""}
+            messages.append(msg)
     if len(messages) > 40:  # keep the context small for a small model; cut at a question
         tail = messages[-30:]
         first_q = next((i for i, m in enumerate(tail) if m["role"] == "user"), len(tail))
