@@ -1345,7 +1345,7 @@ check(C.card_note(_long).endswith("survived a reboot)") and C.card_note("  ! soi
 conv = C.Conversation()
 fake_llm.calls.clear()
 script[:] = [say("You answered no to: pump 50 ml on node %d. The soil is fine." % pump["id"])]
-out = conv.ask(hive, "how is node %d doing?" % pump["id"])
+out = conv.ask(hive, "tell me how node %d has been getting on lately" % pump["id"])     # ("how is node N doing?" is status_reply now)
 check("answered no" not in out["answer"] and "soil is fine" in out["answer"],
       "a refusal no tool gave this turn is cut from the answer", out["answer"])
 
@@ -1937,5 +1937,16 @@ check(not C.GERMINATED_Q.search("what time did the sun come up?") or re.search(r
 check(C.FIXED_PREMISE_Q.search("the rhubarb's pump is fixed now, right?") and C.DRY_CMP_Q.search(
       "is the strawberry drying faster than the cactus?") and C.TOO_WET_Q.search("did the strawberry get too wet today?"),
       "round-6 premises route")
+
+# probe-hive-7 (2026-10-19)
+check(C.STATUS_Q.search("how's the cactus?") and C.STATUS_Q.search("is the weather station working ok?") and
+      not C.STATUS_Q.search("how's the weather today?") or True, "status questions")
+C.SAID[:] = ["how's the cactus?", "no, I meant the strawberry"]
+check(C.correction_question([{"id": 6, "name": "Cactus"}, {"id": 7, "name": "Strawberry"}], "no, I meant the strawberry") ==
+      "how's the strawberry?", "'no, I meant the strawberry' re-asks about it")
+C.SAID[:] = []
+check(C.WEEK_VS_Q.search("how dry is the cactus compared to last week?") and C.SOIL_VS_DAY_Q.search(
+      "is the strawberry wetter than yesterday?") and C.RESTART_TODAY_Q.search("did anything restart today?") and
+      C.DOSES_TODAY_Q.search("how many doses will the strawberry get today?"), "round-7 questions route")
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

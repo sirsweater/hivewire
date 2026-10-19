@@ -2921,9 +2921,32 @@ def rain_record_reply(hive, st, q):
     lt = time.localtime()
     month0 = time.mktime((lt.tm_year, lt.tm_mon, 1, 0, 0, 0, 0, 0, -1))
     month = sum((x.get("sum") or 0) for x in rows if x["ts"] >= month0) * mm
+    name = wx.get("name") or "weather station"
+    if re.search(r"(?i)\blast month\b", q):
+        # "what was the rain total last month?" got this month's (probe-hive-7)
+        pm0 = time.mktime((lt.tm_year, lt.tm_mon - 1, 1, 0, 0, 0, 0, 0, -1))
+        if rows[0]["ts"] > pm0 + 86400:
+            return ("The %s's records begin %s, so it has no full total for %s. This month so far: %.1f mm." % (
+                name, first, time.strftime("%B", time.localtime(pm0)), month))
+        tot = sum((x.get("sum") or 0) for x in rows if pm0 <= x["ts"] < month0) * mm
+        return "Rain at the %s in %s: %.1f mm (%.2f in)." % (name, time.strftime("%B", time.localtime(pm0)), tot, tot / 25.4)
+    over = re.search(r"(?i)\b(more than|over|above|at least)\s+(\d+(?:\.\d+)?)\s*(mm|millimet\w*|in(?:ch(?:es)?)?)\b", q)
+    if over:
+        # "when did it last rain more than 1 mm?" got the last rain, 0.6 mm (probe-hive-7)
+        lim = float(over.group(2)) * (25.4 if over.group(3).lower().startswith("in") else 1)
+        big = [x for x in rows if (x.get("sum") or 0) * mm >= lim]
+        if not big:
+            most = max(rows, key=lambda x: x.get("sum") or 0)
+            return ("No day since the %s's records begin (%s) has had %s %g %s - the wettest day was %s with %.1f mm." % (
+                name, first, over.group(1).lower(), float(over.group(2)), over.group(3),
+                time.strftime("%a %b %d", time.localtime(most["ts"])), (most.get("sum") or 0) * mm))
+        b = big[-1]
+        return "The last day with %s %g %s was %s: %.1f mm." % (over.group(1).lower(), float(over.group(2)), over.group(3),
+                                                                time.strftime("%a %b %d", time.localtime(b["ts"])),
+                                                                (b.get("sum") or 0) * mm)
     if not wet:
         return ("The %s hasn't recorded any rain since its records begin (%s) - %d days with none. So none this "
-                "month either." % (wx.get("name") or "weather station", first, len(rows)))
+                "month either." % (name, first, len(rows)))
     last = wet[-1]
     return ("The last rain at the %s was on %s: %.1f mm that day%s. This month so far: %.1f mm. (Records begin %s.)" % (
         wx.get("name") or "weather station", time.strftime("%a %b %d", time.localtime(last["ts"])),
@@ -3391,7 +3414,8 @@ def asked_period(q):
         return t0, min(now, t0 + 12 * 3600), "this morning"
     if re.search(r"(?i)\b(this|past|last) week\b|\blast 7 days\b|\bpast 7 days\b", q):
         return now - 7 * 86400, now, "in the last 7 days"
-    for word, key in (("last night|overnight", "last night"), ("today", "today"), ("yesterday", "yesterday"),
+    for word, key in (("last night|overnight|while i (was )?(asleep|sleeping)|while i slept", "last night"), ("today", "today"),
+                      ("yesterday", "yesterday"),
                       ("this afternoon", None)):
         if re.search(r"(?i)\b(%s)\b" % word, q):
             if key is None:
@@ -4936,6 +4960,152 @@ def ml_period_reply(hive, nodes, q):
         nm, nice_qty(sum(e[1] for e in ev)), label, len(ev), "" if len(ev) == 1 else "s",
         "; ".join("%s ml %s - %s" % (nice_qty(ml), _clock(t), how) for t, ml, how in ev[-8:]))
 
+# --- probe-hive-7 (2026-10-19) ---------------------------------------------------------------
+# "How's the cactus?" took 29 s and mixed up its known-issues notes; "is the weather station working ok?" said "88 boots
+# since boot". One node's state, said in code.
+STATUS_Q = re.compile(r"(?i)^\W*(how'?s|how is|hows|how are)\s+(the\s+|my\s+|our\s+)?[a-z][\w' -]{1,30}?(\s+(doing|getting on|"
+                      r"looking|going))?(\s+(today|now|right now|at the moment))?\W*$|"
+                      r"^\W*is (the |my )?[a-z][\w' -]{1,30}? (working|ok|okay|alright|all right|fine|healthy|doing ok|doing okay)"
+                      r"( ok| okay| properly)?\W*$")
+
+
+def status_reply(hive, st, nodes, q):
+    n, meta = _one_named(hive, nodes, q)
+    if not n or not (n.get("kind") == "WeatherNode" or "soil" in ((hive.kinds().get(n.get("kind")) or {}).get("derived") or {})):
+        return None         # (a relay's "how's node 3 doing?" keeps its own reply)
+    nm = n.get("name") or "node %s" % n["id"]
+    bits = []
+    if n.get("kind") == "WeatherNode":
+        r = readings(hive, n)
+        pick = lambda lbl: next((v for k, v in r.items() if k.startswith(lbl + " (")), None)  # noqa: E731
+        now = [x for x in ("Air temperature", "Humidity", "Wind (2-min average)") if pick(x) and not
+               str(pick(x)).startswith(("NO READING", "invalid"))]
+        bits.append("reporting (last heard %s ago): %s" % (ago(n.get("age") or 0), ", ".join(
+            "%s %s" % (x.split(" (")[0].lower(), pick(x)) for x in now) or "no readings"))
+    else:
+        soil = (n.get("derived") or {}).get("soil")
+        band = band_of(meta)
+        issue = known_issue(n["id"]) or ""
+        if PROBE_OUT.search(issue) or PROBE_OUT_WARNING in (n.get("warnings") or []):
+            bits.append("no soil reading - its probe is out of the soil")
+        elif soil is not None:
+            r = round(soil)
+            where = ("%d point%s over" % (r - band[1], "" if r - band[1] == 1 else "s") if r > band[1] else
+                     "%d point%s under" % (band[0] - r, "" if band[0] - r == 1 else "s") if r < band[0] else
+                     "at the top of" if r >= band[1] - 1 else "at the bottom of" if r <= band[0] + 1 else "inside") \
+                if band else None
+            stage = stage_name(meta)
+            bits.append("soil %d %%%s" % (r, (" - %s its %s%g-%g %% band" % (
+                where, "germination " if stage == "germination" else "seedling " if stage == "seedling" else "",
+                band[0], band[1])) if band else ""))
+        if has_pump(hive, n.get("kind")):
+            last = last_watered_at(hive, n)
+            if last:
+                bits.append("last watered %s (%s ago)" % (_clock(last), days_ago(last)))
+            if stage_name(meta) == "germination":
+                nxt = re.search(r"So the next one is due at (\d\d:\d\d)", dose_timer_text(n, meta))
+                if nxt:
+                    bits.append("next germination dose due %s, only if it reads below %g %%" % (
+                        nxt.group(1), band[1] if band else 80))
+        elif soil is not None:
+            bits.append("no pump - it's watered by hand")
+    prob = node_problem_reply(hive, nodes, "what's wrong with %s?" % nm) or ""
+    probs = [x[2:].rstrip(". ") for x in prob.split("\n")[1:] if x.startswith("- ") and not x.startswith("- Its soil reads")]
+    low = lambda p: p[0].lower() + p[1:] if len(p) > 1 and p[1].islower() else p  # noqa: E731  ("E104 ..." keeps its case)
+    bits.append(("problems: " + "; ".join(low(p) for p in probs)) if probs else
+                "no errors, warnings or known issues")
+    return "**%s**: %s." % (nm, "; ".join(bits))
+
+
+# "No, I meant the strawberry" after "how's the cactus?" - the question again, about the other plant.
+CORRECTION_Q = re.compile(r"(?i)^\W*(no,?\s*|sorry,?\s*|oops,?\s*)?(i meant|i mean|meant)\s+(the\s+|my\s+)?([a-z][\w' -]{1,30}?)\W*$")
+
+
+def correction_question(nodes, q):
+    m = CORRECTION_Q.match(q)
+    if not m or len(SAID) < 2:
+        return None
+    new = m.group(4).strip()
+    prev = SAID[-2]
+    for n in nodes:
+        nm = n.get("name")
+        if nm and re.search(r"(?i)\b%s\b" % re.escape(nm), prev):
+            return re.sub(r"(?i)\b%s\b" % re.escape(nm), new, prev, count=1)
+    return None
+
+
+# "Is the strawberry wetter than yesterday?" got "the last recorded event was at 03:32 AM ... likely the same".
+SOIL_VS_DAY_Q = re.compile(r"(?i)\b(wetter|drier|dryer|moister|damper)\b[^?]{0,20}\bthan (it was )?(yesterday|this morning|last night)\b|"
+                           r"\b(compared (to|with)|vs\.?|versus) (yesterday|this morning|last night)\b")
+
+
+def soil_vs_day_reply(hive, nodes, q):
+    n, meta = _one_named(hive, nodes, q, lambda n, c: (n.get("derived") or {}).get("soil") is not None)
+    if not n:
+        return probe_out_soil_reply(hive, nodes, q)
+    nm = n.get("name") or "node %s" % n["id"]
+    soil = n["derived"]["soil"]
+    word = re.search(r"(?i)\b(yesterday|this morning|last night)\b", q).group(1).lower()
+    t = time.time() - 86400 if word == "yesterday" else day_window("today")[0] + 7 * 3600 if word == "this morning" \
+        else day_window("today")[0] + 2 * 3600 - (0 if time.localtime().tm_hour >= 2 else 86400)
+    pts = soil_series(hive, n, max(2, int((time.time() - t) // 3600) + 2))
+    then = min(pts, key=lambda p: abs(p[0] - t)) if pts else None
+    if not then or abs(then[0] - t) > 2 * 3600:
+        return "%s has no reading from %s to compare with." % (nm, word)
+    d = soil - then[1]
+    say = "%s at this time" % word if word == "yesterday" else word
+    return "%s reads %.0f %% now, against %.0f %% %s (the hour from %s) - %s." % (
+        nm, soil, then[1], say, time.strftime("%H:%M", time.localtime(then[0])),
+        "wetter by %.0f points" % d if d >= 1 else "drier by %.0f points" % -d if d <= -1 else "about the same")
+
+
+# "How many doses will the strawberry get today?" got the ones it had already had.
+DOSES_TODAY_Q = re.compile(r"(?i)\bhow many (doses|waterings)\b[^?]{0,30}\b(will|going to|gonna|left|still|more)\b[^?]{0,30}\btoday\b|"
+                           r"\bhow many (more )?(doses|waterings)\b[^?]{0,30}\b(left|still|more)\b")
+
+
+def doses_today_reply(hive, nodes, q):
+    n, meta = _one_named(hive, nodes, q, lambda n, c: stage_name(c) == "germination")
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    sm = meta.get("seed_mode") or {}
+    every = float(sm.get("every_h") or 6)
+    t0 = day_window("today")[0]
+    ev = [e for e in watering_events(hive, n, time.time() - t0 + 60) if e[0] >= t0 and e[1] is not None]
+    last = ev[-1][0] if ev else last_watered_at(hive, n)
+    due, t = [], (last or time.time()) + every * 3600
+    while t < t0 + 86400:
+        if t > time.time():
+            due.append(time.strftime("%H:%M", time.localtime(t)))
+        t += every * 3600
+    band = band_of(meta)
+    return "%s has had %d dose%s today%s. The timer has %d more due today%s - each only if the probe reads below %g %% then." % (
+        nm, len(ev), "" if len(ev) == 1 else "s", (" (%s)" % ", ".join(time.strftime("%H:%M", time.localtime(e[0])) for e in ev))
+        if ev else "", len(due), (": " + ", ".join(due)) if due else "", band[1] if band else 80)
+
+
+# "Did anything restart today?" was answered by the model with the restart times off.
+RESTART_TODAY_Q = re.compile(r"(?i)\b(did |has )?(anything|any node|any of them|a node|something)\b[^?]{0,10}\b(restart|reboot)\w*\b"
+                             r"[^?]{0,20}\b(today|last night|overnight|yesterday|this week)\b")
+
+
+def restart_today_reply(hive, st, q):
+    word = re.search(r"(?i)\b(today|last night|overnight|yesterday|this week)\b", q).group(1).lower()
+    t0, t1, label = (time.time() - 7 * 86400, time.time(), "in the last 7 days") if word == "this week" else \
+        day_window("last night" if word == "overnight" else word)
+    rows = []
+    for n in st.get("nodes", []):
+        up = (n.get("slots") or {}).get("8")
+        if n.get("hidden") or up is None or "uptime" not in str(hive.slot_spec(n.get("kind"), 8).get("label", "")).lower():
+            continue
+        t = time.time() - float(up) * 60 - (n.get("age") or 0)
+        if t0 <= t <= t1:
+            rows.append("%s at %s" % (n.get("name") or "node %s" % n["id"], time.strftime("%a %H:%M", time.localtime(t))))
+    label = label.split(" (")[0]
+    return ("Yes - restarted %s: %s." % (label, "; ".join(rows)) if rows else
+            "No - no node restarted %s. %s" % (label, restart_rank_reply(hive, st) or ""))
+
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
 
@@ -5753,12 +5923,24 @@ NEW_NODE_REPLY = (
 
 
 WEEK_VS_Q = re.compile(r"(?i)\b(this|past) week\b[^?]*\b(than|vs\.?|versus|compared (to|with))\b[^?]*\b(last|previous) week\b|"
-                       r"\b(wetter|drier|dryer)\b[^?]*\bthan last week\b")
+                       r"\b(wetter|drier|dryer)\b[^?]*\bthan last week\b|"
+                       # "how dry is the cactus compared to last week?" got its band wrong and the dates off (probe-hive-7)
+                       r"\b(compared (to|with)|vs\.?|versus)\s+last week\b")
 
 
 def week_vs_reply(hive, n):
     pts = soil_series(hive, n, 14 * 24)
     t1 = time.time()
+    # A probe swap shows as a step down no soil dries in an hour: the Cactus's Oct 16 swap made "this week" 77 % against 52 %
+    # (the old probe's wet readings in it) - probe-hive-7. Readings before it don't compare.
+    step = max((i for i in range(1, len(pts)) if pts[i - 1][1] - pts[i][1] > 12), default=None)
+    if step is not None and len(pts) - step >= 4:
+        after = [p[1] for p in pts[step + 2:]]
+        nm_ = n.get("name") or "node %s" % n["id"]
+        return ("%s's probe was changed or moved at %s, and readings before that don't compare with the ones after - so "
+                "there's no like-for-like week to compare with yet. Since then it has averaged %.0f%% (range %.0f-%.0f%%)." % (
+                    nm_, time.strftime("%a %d %b %H:%M", time.localtime(pts[step][0])), sum(after) / len(after),
+                    min(after), max(after))) if after else None
     a = [p[1] for p in pts if p[0] >= t1 - 7 * 86400]
     b = [p[1] for p in pts if t1 - 14 * 86400 <= p[0] < t1 - 7 * 86400]
     nm = n.get("name") or "node %s" % n["id"]
@@ -6727,7 +6909,7 @@ def ask(hive, messages, q, on_tool=None):
     if _fx:
         q = q3
         SAID[-1] = q
-    q2 = corrected_request(nodes, q) or followup_question(q)
+    q2 = corrected_request(nodes, q) or followup_question(q) or correction_question(nodes, q)
     if q2:
         q = q2
         SAID[-1] = q
@@ -6805,6 +6987,17 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = node_count_reply(st)
             if not fixed and ML_PERIOD_Q.search(q):
                 fixed = ml_period_reply(hive, nodes, q)
+            # probe-hive-7
+            if not fixed and STATUS_Q.search(q) and not re.search(
+                    r"(?i)\b(pumps?|batt?er(y|ies)|signal|probe|sensor|gateway|relay|hub|pi|everything|everyone|all|"
+                    r"weather)\b(?! station)", q):
+                fixed = status_reply(hive, st, nodes, q)
+            if not fixed and SOIL_VS_DAY_Q.search(q):
+                fixed = soil_vs_day_reply(hive, nodes, q)
+            if not fixed and DOSES_TODAY_Q.search(q):
+                fixed = doses_today_reply(hive, nodes, q)
+            if not fixed and RESTART_TODAY_Q.search(q):
+                fixed = restart_today_reply(hive, st, q)
             if not fixed and WX_COMPARE_Q.search(q):
                 fixed = wx_compare_reply(hive, st, q)
             # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
@@ -6900,7 +7093,18 @@ def ask(hive, messages, q, on_tool=None):
         m2 = re.match(r"AIR TEMPERATURE at the (.+?), (.+?): high (.+?), low (.+?), average (.+?) \(from its hourly "
                       r"readings; use these numbers\)\.(.*)$", t or "")
         if m:
-            fixed = "Daily highs and lows at the %s:\n%s" % (m.group(1), "\n".join(
+            days_ = [tuple(re.match(r"(\w+ \d+ \w+) (.+?) / (.+)$", d).groups()) for d in m.group(2).split("; ")
+                     if re.match(r"(\w+ \d+ \w+) (.+?) / (.+)$", d)]
+            lead = ""
+            hot = re.search(r"(?i)\b(hottest|warmest|highest)\b", q)
+            if days_ and (hot or re.search(r"(?i)\b(coldest|coolest|lowest)\b", q)):
+                # "what's the hottest it's been this week?" got the table with no answer on top (probe-hive-7)
+                vals = [(float(d[1].split()[0]) if hot else float(d[2].split()[0]), d[0]) for d in days_]
+                top = max(vals)[0] if hot else min(vals)[0]
+                on = [dd for v, dd in vals if v == top]
+                lead = "The %s: %.1f °C (%.0f °F), on %s.\n\n" % ("hottest" if hot else "coldest", top, top * 9 / 5.0 + 32,
+                                                                 " and ".join(on))
+            fixed = lead + "Daily highs and lows at the %s:\n%s" % (m.group(1), "\n".join(
                 "- %s: high %s, low %s" % tuple(re.match(r"(\w+ \d+ \w+) (.+?) / (.+)$", d).groups())
                 for d in m.group(2).split("; ") if re.match(r"(\w+ \d+ \w+) (.+?) / (.+)$", d)))
         elif m2:
