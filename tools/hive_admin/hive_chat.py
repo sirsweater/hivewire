@@ -6749,7 +6749,10 @@ def ask(hive, messages, q, on_tool=None):
                     re.search(r"(?i)\b\d+(\.\d+)?\s*(ml|millilit\w*|cups?)\b", q) and not re.search(
                         r"(?i)\bin (an?|\d+|a few|a couple of) (hours?|minutes?|mins?)\b|\b(later|tomorrow|tonight|this "
                         r"(evening|afternoon)|at \d|every|each (day|morning|night)|daily|schedul\w*)\b|-\s*\d", q) and \
-                    not (msg.get("content") or "").strip().endswith("?"):
+                    not re.search(r"(?i)\b(which|how much|how many|what amount|in ml|or cups)\b[^?]*\?\s*$",
+                                  (msg.get("content") or "").strip()):
+                # (a question back about which plant or how much stands; "Would you like me to reposition the probe?"
+                # after refusing doesn't)
                 # "that's wrong, it's bone dry, I just checked. water it 200 ml" (probe out of the soil) got "I would not
                 # recommend watering" and no card. The card shows the reading and known issues; the person decides.
                 nudged = True
