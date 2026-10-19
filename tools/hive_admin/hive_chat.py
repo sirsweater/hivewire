@@ -7330,6 +7330,8 @@ def ask(hive, messages, q, on_tool=None):
             lw = [n for n in nodes if named_by_person(n) and n.get("kind") != "WeatherNode"]
         finally:
             SAID[:] = keep
+        if not lw:
+            lw = pronoun_nodes(st, q)       # "no, I meant the strawberry" / "when was it last watered?"
         if len(lw) == 1:
             try:
                 fixed = last_water_reply(hive, lw[0])
