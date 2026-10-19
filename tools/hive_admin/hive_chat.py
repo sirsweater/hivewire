@@ -3020,7 +3020,11 @@ def last_water_reply(hive, n):
     meta = ((hive.call("GET", "/api/config") or {}).get("nodes") or {}).get(str(n["id"])) or {}
     how = " - a germination dose from the admin's timer" if stage_name(meta) == "germination" else \
         " - by hand: it has no pump, so that's when its soil last climbed" if not has_pump(hive, n.get("kind")) else ""
-    return "%s was last watered %s (%s ago)%s." % (name, when, days_ago(t), how)
+    secs = now_ - t
+    # ("how many days ago...?" at 01:00 got "yesterday at 22:01 (3h ago)" - no number of days)
+    since = "%s ago" % days_ago(t) if secs >= 86400 else "less than a day ago - %s" % (
+        "%d minutes" % max(1, secs // 60) if secs < 7200 else "%d hours" % (secs // 3600))
+    return "%s was last watered %s (%s)%s." % (name, when, since, how)
 
 
 def dry_top_reply(hive, nodes, q):
@@ -6740,6 +6744,19 @@ def ask(hive, messages, q, on_tool=None):
                 messages.append({"role": "user", "content": "[From the hive, not the person: you called no tool, "
                                  "so nothing was proposed and there is no card. Call the tool for what they asked "
                                  "now.]"})
+                continue
+            if not nudged and not asking and not writes and re.search(r"(?i)\b(water|pump|give)\b", q) and \
+                    re.search(r"(?i)\b\d+(\.\d+)?\s*(ml|millilit\w*|cups?)\b", q) and not re.search(
+                        r"(?i)\bin (an?|\d+|a few|a couple of) (hours?|minutes?|mins?)\b|\b(later|tomorrow|tonight|this "
+                        r"(evening|afternoon)|at \d|every|each (day|morning|night)|daily|schedul\w*)\b|-\s*\d", q) and \
+                    not (msg.get("content") or "").strip().endswith("?"):
+                # "that's wrong, it's bone dry, I just checked. water it 200 ml" (probe out of the soil) got "I would not
+                # recommend watering" and no card. The card shows the reading and known issues; the person decides.
+                nudged = True
+                messages.append({"role": "user", "content": "[From the hive, not the person: they asked for water with "
+                                 "an amount and you proposed nothing. Call water_now for what they asked - the card "
+                                 "shows them the reading and any known issues, and they decide. Don't decide for "
+                                 "them.]"})
                 continue
             break
         for call in msg["tool_calls"]:

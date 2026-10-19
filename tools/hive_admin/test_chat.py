@@ -771,6 +771,13 @@ check(all(C.WET_DRY_Q.search(x) and not C.WET_DRY_NOT.search(x) for x in (
 
 a = C.last_water_reply(hive, pump)
 check(a and (" was last watered " in a or "no watering on record" in a), "when it was last watered: in code", a)
+_keep_lw = C.last_watered_at
+C.last_watered_at = lambda hive_, n_: _tm.time() - 3 * 3600 - 60
+try:
+    a = C.last_water_reply(hive, pump) or ""
+finally:
+    C.last_watered_at = _keep_lw
+check("less than a day ago - 3 hours" in a and "3h ago" not in a, "under a day: 'less than a day ago - 3 hours'", a)
 
 # A germinating pot over its top isn't a to-do: germination mode is holding its doses.
 _n = {"id": pump["id"], "name": "Seedpot", "kind": "WaterNode", "derived": {"soil": 85.0}, "warnings": []}
