@@ -1922,5 +1922,20 @@ _a = C.watch_del_reply(hive, hive.call("GET", "/api/state")["nodes"], "remove al
 check(_a.startswith("There are no soil alerts set"), "...and with none left, there's nothing to remove", _a)
 app.cfg.set_node(_pid, {"soil_dry": None, "soil_wet": None})
 
+
+# probe-hive-6 (2026-10-19)
+C.SAID[:] = ["how many ml has the strawberry had today?", "and yesterday?"]
+check(C.followup_question("and yesterday?") == "how many ml has the strawberry had yesterday?", "'and yesterday?' swaps the period")
+C.SAID[:] = ["what's the weather tomorrow?", "and today?"]
+check(C.followup_question("and today?") != "what's the weather tomorrow today?", "...not glued onto a question with no period")
+C.SAID[:] = []
+check(C.NOW_WORD.search("what's the temperature in fahrenheit?"), "'what's the temperature in fahrenheit?' is a now question")
+check(C.WX_DAY_Q.search("was it windy last night?") and C.NEED_FIRST_Q.search("which plant is closest to needing water?"),
+      "'was it windy last night?' and 'closest to needing water' route")
+check(not C.GERMINATED_Q.search("what time did the sun come up?") or re.search(r"(?i)\bsun\b", "what time did the sun come up?"),
+      "the sun coming up isn't seeds")
+check(C.FIXED_PREMISE_Q.search("the rhubarb's pump is fixed now, right?") and C.DRY_CMP_Q.search(
+      "is the strawberry drying faster than the cactus?") and C.TOO_WET_Q.search("did the strawberry get too wet today?"),
+      "round-6 premises route")
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)
