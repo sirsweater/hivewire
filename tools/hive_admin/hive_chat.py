@@ -3421,9 +3421,25 @@ WHY_NOT_WATERED_Q = re.compile(r"(?i)\bwhy\b[^?]{0,30}\b(didn't|did not|hasn't|h
                                r"\b(water(ed|ing)?|dose[ds]?|pump(ed)?)\b")
 
 
+WEEKDAY_Q = re.compile(r"(?i)\b(since |on |last |this )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|"
+                       r"thur?s?|fri|sat|sun)\b(?! \d)")
+
+
 def asked_period(q):
-    """(t0, t1, words) for "this morning" / "last night" / "today" / "yesterday"; the last 24 h when it doesn't say."""
+    """(t0, t1, words) for "this morning" / "last night" / "today" / "yesterday" / "on Saturday" / "since Friday"; the last
+    24 h when it doesn't say."""
     now = int(time.time())
+    wd = WEEKDAY_Q.search(q)
+    if wd and not re.search(r"(?i)\bsun(rise|set| (come|comes|came|go|goes|went|up|down))\b|\bthe sun\b", q):
+        # "how many waterings did the strawberry get on Saturday?" got the whole week; "since Friday" got "Friday 13 October"
+        t0, t1, label = day_window(wd.group(2))
+        if (wd.group(1) or "").strip().lower() == "since":
+            return t0, now, "since %s" % time.strftime("%a %d %b", time.localtime(t0))
+        return t0, min(now, t1), time.strftime("on %a %d %b", time.localtime(t0))
+    if re.search(r"(?i)\bsince yesterday\b", q):
+        return day_window("yesterday")[0], now, "since yesterday"
+    if re.search(r"(?i)\bsince this morning\b", q):
+        return day_window("today")[0], now, "since midnight"
     if re.search(r"(?i)\bthis morning\b", q):
         t0 = day_window("today")[0]
         return t0, min(now, t0 + 12 * 3600), "this morning"
@@ -3565,8 +3581,12 @@ def water_count_reply(hive, nodes, q):
     if len(named) != 1:
         return None
     n = named[0]
-    back, words = watered_window(q if re.search(r"(?i)\b(today|last|past|this week)\b", q) else q + " this week")
-    ev = watering_events(hive, n, back)
+    if WEEKDAY_Q.search(q) or re.search(r"(?i)\bsince (yesterday|this morning)\b", q):
+        t0, t1, words = asked_period(q)
+        ev = [e for e in watering_events(hive, n, time.time() - t0 + 60) if t0 <= e[0] <= t1]
+    else:
+        back, words = watered_window(q if re.search(r"(?i)\b(today|last|past|this week)\b", q) else q + " this week")
+        ev = watering_events(hive, n, back)
     nm = n.get("name") or "node %s" % n["id"]
     when = lambda t: time.strftime("%a %d %b %H:%M", time.localtime(t))  # noqa: E731
     if not ev:
@@ -4289,8 +4309,9 @@ RAIN_DAY_Q = re.compile(r"(?i)\b(did|has) it (rain(ed)?|been raining)\b|\bhow mu
 
 def rain_day_reply(hive, st, q):
     """ "Did it rain today?" got "it is NOT raining - 0.0 mm in the last hour". The window asked about, added up."""
-    if not re.search(r"(?i)\b(today|this morning|this afternoon|tonight|last night|overnight|yesterday)\b", q):
-        return None
+    if not re.search(r"(?i)\b(today|this morning|this afternoon|tonight|last night|overnight|yesterday)\b", q) and \
+            not WEEKDAY_Q.search(q):
+        return None         # ("how much rain fell last Thursday?" got Oct 12 to today from the model)
     wx = weather_node(st)
     sid = slot_by_label(hive, wx["kind"], "Rain gauge tips") if wx else None
     if sid is None:
@@ -4392,7 +4413,8 @@ def rank_reply(hive, st, q):
 WX_DAY_Q = re.compile(r"(?i)\b(humidity|humid|wind|windy|temperature|temp|gusts?)\b[^?]{0,30}\b(been|range|all day|so far|"
                       r"like)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b|\bhow (humid|windy|hot|warm|cold) (has it been|was it)\b|"
                       # "was it windy last night?" got the range and then made-up event lines (probe-hive-6)
-                      r"\b(was|were) it (windy|humid|hot|cold|warm|gusty|chilly|breezy)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b")
+                      r"\b(was|were) it (windy|humid|hot|cold|warm|gusty|chilly|breezy)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b|"
+                      r"\bhow (windy|humid|hot|warm|cold|gusty)\b[^?]{0,20}\b(on|last) (mon|tue|wed|thu|fri|sat|sun)\w*\b")
 WX_DAY_SLOTS = (("humid", "Humidity"), ("gust", "Gust (10 min)"), ("wind", "Wind (2-min average)"), ("breez", "Wind (2-min average)"),
                 ("temp", "Air temperature"), ("hot", "Air temperature"), ("warm", "Air temperature"), ("cold", "Air temperature"),
                 ("chill", "Air temperature"))
@@ -4408,18 +4430,26 @@ def wx_day_reply(hive, st, q):
     sid = slot_by_label(hive, wx["kind"], label) if label else None
     if sid is None:
         return None
-    day = next((d for d in ("yesterday", "last night", "overnight") if re.search(r"(?i)\b%s\b" % d, q)), "today")
+    wdm = WEEKDAY_Q.search(q)
+    day = next((d for d in ("yesterday", "last night", "overnight") if re.search(r"(?i)\b%s\b" % d, q)),
+               time.strftime("%Y-%m-%d", time.localtime(day_window(wdm.group(2))[0])) if wdm else "today")
     h = t_slot_history(hive, str(wx["id"]), sid, day="last night" if day == "overnight" else day)
     o = h.get("overall")
     if not o:
         return h.get("note") and "At the weather station, %s." % h["note"]
+    if re.search(r"(?i)\bmph\b|miles", q) and label.startswith(("Wind", "Gust")):
+        # "how windy was it on Sunday in mph?" got today, in km/h (probe-hive-10)
+        o = {k: "%.1f mph" % (_num_unit(v)[0] / 1.609344) if _num_unit(v)[0] is not None else v for k, v in o.items()}
     now = hive.fmt(wx["kind"], sid, (wx.get("slots") or {}).get(str(sid))) if day == "today" else None
     gust = ""
     if label.startswith("Wind"):
         gsid = slot_by_label(hive, wx["kind"], "Gust (10 min)")
         gh = t_slot_history(hive, str(wx["id"]), gsid, day="last night" if day == "overnight" else day) if gsid is not None else {}
         if gh.get("overall"):
-            gust = "; the strongest gust was %s" % gh["overall"]["max"]
+            g = gh["overall"]["max"]
+            if re.search(r"(?i)\bmph\b|miles", q) and _num_unit(g)[0] is not None:
+                g = "%.1f mph" % (_num_unit(g)[0] / 1.609344)
+            gust = "; the strongest gust was %s" % g
     return "At the weather station, %s %s: low %s, high %s, average %s%s%s." % (
         label.split(" (")[0].lower(), h.get("window", day), o["min"], o["max"], o["average"], gust,
         "; %s now" % now if now else "")
@@ -4976,7 +5006,7 @@ def node_count_reply(st):
 # "How many ml has the strawberry had today?" / "and yesterday?" got "16 ml ... 8 ml at noon" (it was 4 x 5 ml).
 # (not "this week": WATER_TOTAL's pump-count fact answers that, with a pump fault's note)
 ML_PERIOD_Q = re.compile(r"(?i)\bhow (much|many)\b[^?]{0,40}\b(water|ml|millilit\w*)\b[^?]{0,40}\b(yesterday|last night|overnight|"
-                         r"this morning)\b")
+                         r"this morning|since (yesterday|this morning|mon|tue|wed|thu|fri|sat|sun)\w*|on (mon|tue|wed|thu|fri|sat|sun)\w*)\b")
 
 
 def ml_period_reply(hive, nodes, q):
@@ -5352,6 +5382,46 @@ def thresh_now_reply(hive, nodes, q):
         yes = soil >= lim
     return "%s - %s reads %s now, %s %g %%." % ("Yes" if yes else "No", n.get("name") or "node %s" % n["id"], _pct_vs(soil, lim),
                                                 ("above" if soil > lim else "below" if soil < lim else "exactly at"), lim)
+
+
+# "Is it warmer now than this morning?" compared the cactus's soil temperature (probe-hive-10). The station now against
+# the hour asked about.
+WX_NOW_VS_Q = re.compile(r"(?i)\b(warmer|colder|hotter|cooler|windier|calmer|more humid|less humid|gustier)\b[^?]{0,15}\b(now )?than "
+                         r"(this morning|earlier( today)?|last night|yesterday( at this time)?|an hour ago)\b")
+
+
+def wx_now_vs_reply(hive, st, q):
+    wx = weather_node(st)
+    if not wx:
+        return None
+    m = WX_NOW_VS_Q.search(q)
+    word = m.group(1).lower()
+    lbl = "Humidity" if "humid" in word else "Gust (10 min)" if "gust" in word else \
+        "Wind (2-min average)" if word in ("windier", "calmer") else "Air temperature"
+    sid = slot_by_label(hive, wx["kind"], lbl)
+    raw = (wx.get("slots") or {}).get(str(sid)) if sid is not None else None
+    if raw is None:
+        return None
+    sc = hive.slot_spec(wx["kind"], sid).get("scale", 1)
+    now_v = raw * sc
+    when = m.group(3).lower()
+    t0 = day_window("today")[0]
+    target = {"this morning": t0 + 8 * 3600, "last night": t0 - 3 * 3600, "an hour ago": time.time() - 3600}.get(
+        when, time.time() - 86400 if when.startswith("yesterday") else time.time() - 4 * 3600)    # "earlier": 4 h ago
+    rows = (hive.call("GET", "/api/rollup", {"node": wx["id"], "slot": int(sid), "res": "hour", "from": int(target - 3600),
+                                             "to": int(target + 3600)}) or {}).get("rows") or []
+    rows = [r for r in rows if r.get("avg") is not None]
+    if not rows:
+        return None
+    then = min(rows, key=lambda r: abs(r["ts"] + 1800 - target))
+    then_v = then["avg"] * sc
+    unit = hive.slot_spec(wx["kind"], sid).get("unit") or ""
+    d = now_v - then_v
+    more = word in ("warmer", "hotter", "windier", "more humid", "gustier")
+    yes = d > 0.2 if more else d < -0.2
+    return "%s - at the weather station it's %s now, against %.1f %s %s (the hour from %s)." % (
+        "Yes" if yes else "No" if abs(d) > 0.2 else "About the same", hive.fmt(wx["kind"], sid, raw), then_v, unit, when,
+        time.strftime("%H:%M", time.localtime(then["ts"])))
 
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
@@ -7314,12 +7384,15 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = data_span_reply(hive, st)
             if not fixed and PROBE_BACK_Q.search(q):
                 fixed = probe_back_reply(hive, nodes, q)
+            if not fixed and WX_NOW_VS_Q.search(q):
+                fixed = wx_now_vs_reply(hive, st, q)
             if not fixed and THRESH_NOW_Q.search(q) and not re.search(r"(?i)\b(humid\w*|temp\w*|battery|signal|wind|gust\w*)\b", q):
                 fixed = thresh_now_reply(hive, nodes, q)
             if not fixed and WX_COMPARE_Q.search(q):
                 fixed = wx_compare_reply(hive, st, q)
             # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
-            if not fixed and WATERED_Q.search(q) and not WHY_NOT_WATERED_Q.search(q) and not any(
+            if not fixed and WATERED_Q.search(q) and not WHY_NOT_WATERED_Q.search(q) and not re.match(
+                    r"(?i)^\W*when\b", q) and not any(
                     "the person declined" in str(m.get("content", "")) for m in messages[-4:]):
                 fixed = watered_reply(hive, nodes, q)
             if not fixed and NODE_PROBLEM_Q.search(q):
