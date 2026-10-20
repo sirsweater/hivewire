@@ -5408,6 +5408,9 @@ def wx_now_vs_reply(hive, st, q):
     t0 = day_window("today")[0]
     target = {"this morning": t0 + 8 * 3600, "last night": t0 - 3 * 3600, "an hour ago": time.time() - 3600}.get(
         when, time.time() - 86400 if when.startswith("yesterday") else time.time() - 4 * 3600)    # "earlier": 4 h ago
+    if target > time.time() - 1800:
+        # asked at 04:30, "this morning" (08:00) hadn't come yet - hive-full35: midnight, said so
+        target, when = t0 + 1800, "at midnight"
     rows = (hive.call("GET", "/api/rollup", {"node": wx["id"], "slot": int(sid), "res": "hour", "from": int(target - 3600),
                                              "to": int(target + 3600)}) or {}).get("rows") or []
     rows = [r for r in rows if r.get("avg") is not None]
