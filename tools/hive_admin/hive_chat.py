@@ -3309,8 +3309,8 @@ GERM_MAX_Q = re.compile(r"(?i)\b(most|max\w*|limit|cap|up to|how much)\b[^?]{0,4
 GERM_FREQ_Q = re.compile(r"(?i)\bhow often\b[^?]{0,40}\b(dos\w*|water\w*|get|gets)\b")
 GERM_LAST_Q = re.compile(r"(?i)\b(when|what time)\b[^?]{0,30}\b(last|latest|previous|most recent)\s+(dose|watering)\b|"
                          r"\b(when|what time)\b[^?]{0,30}\b(was it|did it get)\s+(last\s+)?(dosed|watered)\b")
-GERM_TOTAL_Q = re.compile(r"(?i)\bhow (much|many ml)\b[^?]{0,50}\bsince\b[^?]{0,30}\b(germination|it started|the start|"
-                          r"sowing|seeding|planting)\b")
+GERM_TOTAL_Q = re.compile(r"(?i)\bhow (much|many ml|many doses|many waterings|many times)\b[^?]{0,50}\bsince\b[^?]{0,30}\b(germination|"
+                          r"it started|the start|sowing|seeding|planting)\b")
 GERM_ETA_Q = re.compile(r"(?i)\b(how (long|many days|soon)|when)\b[^?]{0,50}\b(germinat\w*|sprout\w*|come up|emerge\w*|pop up)\b")
 
 
@@ -3369,6 +3369,12 @@ def germ_control_reply(hive, nodes, q):
         nxt = dose_timer_text(n, meta).split(". ", 1)
         return "%s's last dose was %s ml %s (%s ago).%s" % (nm, ml, _clock(last), ago(int(time.time() - last)),
                                                            " " + nxt[1] if len(nxt) > 1 else "")
+    if re.search(r"(?i)\bhow long\b[^?]{0,30}\b(been|in)\b[^?]{0,15}\b(germinat\w*|germination mode)\b", q):
+        # "how long has the strawberry been germinating?" opened with "The hive can't tell" (probe-hive-11)
+        d = (time.time() - since) / 86400.0
+        return ("%s has been in germination mode for %.1f days (day %d) - since %s. Whether the seeds are up the hive can't "
+                "see: its probe measures soil moisture. When you see seedlings, press **Seeds germinated: seedling mode** on "
+                "its Grow stage card." % (nm, d, day, time.strftime("%a %d %b %H:%M", time.localtime(since))))
     if GERM_ETA_Q.search(q):
         return ("The hive can't tell - %s's probe measures soil moisture, not seeds, so it can't see them come up. It's day "
                 "%d of germination mode (since %s). How many days seeds take isn't in the hive's data; the plant "
@@ -4411,7 +4417,7 @@ def rank_reply(hive, st, q):
 
 
 WX_DAY_Q = re.compile(r"(?i)\b(humidity|humid|wind|windy|temperature|temp|gusts?)\b[^?]{0,30}\b(been|range|all day|so far|"
-                      r"like)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b|\bhow (humid|windy|hot|warm|cold) (has it been|was it)\b|"
+                      r"like|trend)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b|\bhow (humid|windy|hot|warm|cold) (has it been|was it)\b|"
                       # "was it windy last night?" got the range and then made-up event lines (probe-hive-6)
                       r"\b(was|were) it (windy|humid|hot|cold|warm|gusty|chilly|breezy)\b[^?]{0,20}\b(today|yesterday|last night|overnight)\b|"
                       r"\bhow (windy|humid|hot|warm|cold|gusty)\b[^?]{0,20}\b(on|last) (mon|tue|wed|thu|fri|sat|sun)\w*\b")
@@ -5425,6 +5431,38 @@ def wx_now_vs_reply(hive, st, q):
     return "%s - at the weather station it's %s now, against %.1f %s %s (the hour from %s)." % (
         "Yes" if yes else "No" if abs(d) > 0.2 else "About the same", hive.fmt(wx["kind"], sid, raw), then_v, unit, when,
         time.strftime("%H:%M", time.localtime(then["ts"])))
+
+
+# "What's the UV index?" got 29 s on external weather sites (probe-hive-11).
+NO_SENSOR_Q = re.compile(r"(?i)\b(uv( index)?|ultraviolet|pollen|air quality|aqi|smoke|ozone|lightning|solar radiation|"
+                         r"light level|lux|co2|carbon dioxide|barometric|pressure|barometer)\b")
+
+
+def no_sensor_reply(q):
+    what = NO_SENSOR_Q.search(q).group(1).lower()
+    name = "UV" if what.startswith(("uv", "ultra")) else "air-quality" if what in ("air quality", "aqi") else \
+        "air pressure" if what.startswith(("baro", "press")) else what
+    return ("The hive has no %s sensor, and the forecasts it stores have temperature, rain and gusts only - so it can't give "
+            "that. A weather app for your area will have it." % name)
+
+
+# "What's the strawberry's average water per day this week?" averaged the pump counter's hourly readings (probe-hive-11).
+AVG_WATER_Q = re.compile(r"(?i)\b(average|avg|mean|typical)\b[^?]{0,30}\b(water|ml|watering|dose)\w*\b[^?]{0,20}\b(per|a|each) "
+                         r"(day|week)\b|\b(water|ml)\b[^?]{0,20}\b(per|a) day\b[^?]{0,20}\b(on average|average)\b")
+
+
+def avg_water_reply(hive, nodes, q):
+    n, _ = _one_named(hive, nodes, q, lambda n, c: has_pump(hive, n.get("kind")))
+    if not n:
+        return None
+    nm = n.get("name") or "node %s" % n["id"]
+    ev = [e for e in watering_events(hive, n, 7 * 86400) if e[1] is not None]
+    if not ev:
+        return "%s got no water in the last 7 days." % nm
+    days = min(7.0, max(1.0, (time.time() - ev[0][0]) / 86400.0)) if (time.time() - ev[0][0]) < 6.5 * 86400 else 7.0
+    tot = sum(e[1] for e in ev)
+    return "%s got %s ml in the last 7 days (%d waterings) - about %.0f ml a day%s." % (
+        nm, nice_qty(tot), len(ev), tot / days, "" if days >= 6.9 else " over the %.1f days since its first watering in that week" % days)
 
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
@@ -7389,6 +7427,11 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = probe_back_reply(hive, nodes, q)
             if not fixed and WX_NOW_VS_Q.search(q):
                 fixed = wx_now_vs_reply(hive, st, q)
+            # probe-hive-11
+            if not fixed and NO_SENSOR_Q.search(q) and not re.search(r"(?i)\b(trend|rising|falling|dropping)\b", q):
+                fixed = no_sensor_reply(q)
+            if not fixed and AVG_WATER_Q.search(q):
+                fixed = avg_water_reply(hive, nodes, q)
             if not fixed and THRESH_NOW_Q.search(q) and not re.search(r"(?i)\b(humid\w*|temp\w*|battery|signal|wind|gust\w*)\b", q):
                 fixed = thresh_now_reply(hive, nodes, q)
             if not fixed and WX_COMPARE_Q.search(q):
@@ -7763,7 +7806,8 @@ def ask(hive, messages, q, on_tool=None):
             fixed = pumped_day_reply(hive, nodes, q)
         except RuntimeError:
             fixed = None
-    if not fixed and is_question(q) and WATER_COUNT_Q.search(q):
+    if not fixed and is_question(q) and WATER_COUNT_Q.search(q) and not GERM_TOTAL_Q.search(q):
+        # ("how many doses ... since germination started?" got the week's list, water-now runs and all - probe-hive-11)
         try:
             fixed = water_count_reply(hive, nodes, q)
         except RuntimeError:
