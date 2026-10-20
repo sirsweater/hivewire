@@ -5330,6 +5330,29 @@ def probe_back_reply(hive, nodes, q):
                 "soil reading. Once it's back in, that note needs updating." % (nm, " (since %s)" % m.group(1) if m else ""))
     return "Yes - %s's probe is in and reading %s." % (nm, "%.0f %%" % soil if soil is not None else "(no reading right now)")
 
+
+# "Is the strawberry's soil above 70 percent?" got "80.0 %" from the model while it read 81-83 (hive-full34): the reading
+# now against the number, in code.
+THRESH_NOW_Q = re.compile(r"(?i)^\W*(is|are|was)\b[^?]{0,40}\b(above|over|below|under|more than|less than|higher than|lower than|"
+                          r"at least)\s*(\d+(?:\.\d+)?)\s*(%|percent|per cent)")
+
+
+def thresh_now_reply(hive, nodes, q):
+    m = THRESH_NOW_Q.search(q)
+    out_ = probe_out_soil_reply(hive, nodes, q)
+    if out_:
+        return out_
+    n, _ = _one_named(hive, nodes, q, lambda n, c: (n.get("derived") or {}).get("soil") is not None)
+    if not n:
+        return None
+    soil, lim = n["derived"]["soil"], float(m.group(3))
+    up = not re.match(r"(?i)(below|under|less|lower)", m.group(2))
+    yes = soil > lim if up else soil < lim
+    if m.group(2).lower() == "at least":
+        yes = soil >= lim
+    return "%s - %s reads %s now, %s %g %%." % ("Yes" if yes else "No", n.get("name") or "node %s" % n["id"], _pct_vs(soil, lim),
+                                                ("above" if soil > lim else "below" if soil < lim else "exactly at"), lim)
+
 TIME_Q = re.compile(r"(?i)^\W*(what('?s| is) the (time|date|day)( today)?|what time is it( now)?|what day is (it|today)|"
                     r"what('?s| is) today'?s date)\W*$")
 
@@ -7291,6 +7314,8 @@ def ask(hive, messages, q, on_tool=None):
                 fixed = data_span_reply(hive, st)
             if not fixed and PROBE_BACK_Q.search(q):
                 fixed = probe_back_reply(hive, nodes, q)
+            if not fixed and THRESH_NOW_Q.search(q) and not re.search(r"(?i)\b(humid\w*|temp\w*|battery|signal|wind|gust\w*)\b", q):
+                fixed = thresh_now_reply(hive, nodes, q)
             if not fixed and WX_COMPARE_Q.search(q):
                 fixed = wx_compare_reply(hive, st, q)
             # (not right after a declined card: "did it get watered?" then is about that card, the DID_IT path's answer)
