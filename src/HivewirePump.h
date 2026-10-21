@@ -143,15 +143,22 @@ class HivewirePump {
     _pulses = p.getUChar("apulse", 4);
     if (_pulses < 1 || _pulses > 10) _pulses = 4;
     p.end();
-    // Carry the rolling 24 h total across a restart (see the header note).
-    if (_rtc.magic == RTC_MAGIC && _rtc.elapsedMs < DAY_MS) {
-      _dayMl = _rtc.dayMl;
-      _winStart = millis() - _rtc.elapsedMs;      // unsigned: resumes mid-window
+    // Carry the rolling 24 h total across a restart (see the header note): the
+    // runs of the last 24 h, each with its age, rebuilt against the new millis().
+    if (_rtc.magic == RTC_MAGIC && _rtc.nRuns <= MAX_RUNS) {
+      uint32_t now = millis();
+      _nRuns = 0;
+      for (uint8_t i = 0; i < _rtc.nRuns; i++) {
+        if (_rtc.runAgeMs[i] < DAY_MS) {
+          _runAt[_nRuns] = now - _rtc.runAgeMs[i];   // unsigned: an age before boot
+          _runMl[_nRuns] = _rtc.runMl[i];
+          _nRuns++;
+        }
+      }
       _gapPending = _rtc.autoValid;
       _lastAutoAt = millis() - _rtc.autoElapsedMs;
     } else {
-      _dayMl = 0;
-      _winStart = millis();
+      _nRuns = 0;
       // After a real power loss nobody knows when it last watered: wait out a
       // full gap rather than risk watering twice in quick succession.
       _gapPending = _autoOn;
@@ -203,7 +210,7 @@ class HivewirePump {
   uint16_t maxDose() const  { return _maxDose; }
   uint16_t maxDay() const   { return _maxDay; }
   uint8_t  floatMode() const { return _floatMode; }
-  uint16_t dayMl() const    { return _dayMl + (_running ? runningMl(millis()) : 0); }
+  uint16_t dayMl() const    { return (uint16_t)min<uint32_t>(65535, windowMl(millis()) + (_running ? runningMl(millis()) : 0)); }
   uint8_t  state() const    { return _state; }
   bool     running() const  { return _running; }
   uint16_t lastDoseMl() const { return _deliveredMl; }
@@ -311,10 +318,7 @@ class HivewirePump {
 
   void loop() {
     uint32_t now = millis();
-    if (now - _winStart >= DAY_MS) {                      // rolling window ends
-      _winStart = now;
-      _dayMl = 0;
-    }
+    pruneRuns(now);                                       // runs older than 24 h drop out
     uint16_t m = _pendMask;
     if (m) {
       _pendMask = 0;
@@ -399,9 +403,10 @@ class HivewirePump {
       hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DOSE, "pump: %u ml > dose cap %u", ml, _maxDose);
       return true;
     }
-    if (_flow && (uint32_t)_dayMl + ml > _maxDay) {
+    uint32_t dayNow = windowMl(millis());
+    if (_flow && dayNow + ml > _maxDay) {
       _state = HW_PUMP_REFUSED_LIMIT;
-      hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DAY, "pump: day cap %u (at %u)", _maxDay, _dayMl);
+      hwErr(_node, HW_E_OUTPUT_LIMIT, HW_PUMP_SLOT_MAX_DAY, "pump: day cap %u (at %lu)", _maxDay, (unsigned long)dayNow);
       return true;
     }
     return false;
@@ -412,7 +417,10 @@ class HivewirePump {
   // Nothing runs longer than this, whatever the calibration says: a flow rate
   // entered ten times too low makes a dose long, never endless.
   static const uint32_t MAX_RUN_MS = 10UL * 60 * 1000;
-  static const uint32_t RTC_MAGIC = 0x504d5032;           // "PMP2" (layout 2)
+  static const uint32_t RTC_MAGIC = 0x504d5033;           // "PMP3" (layout 3: the runs of the last 24 h)
+  // Runs remembered for the rolling 24 h total. Auto-watering is 4 pulses a watering and germination doses come 4 a
+  // day, so 32 is plenty; past that the two oldest are merged (the total stays right, that ml expires a little late).
+  static const uint8_t  MAX_RUNS = 32;
   static const uint32_t AUTO_CHECK_MS = 60000;
   static const uint8_t  AUTO_DRY_CONFIRM = 15;            // judgements (minutes)
   static const uint8_t  AUTO_JUMP_WINDOW = 10;            // judgements looked back over
@@ -422,7 +430,7 @@ class HivewirePump {
   static const uint16_t AUTO_PULSE_MIN_ML = 10;
   enum { REQ_NONE, REQ_DOSE, REQ_RUN, REQ_STOP };
 
-  struct RtcState { uint32_t magic, dayMl, elapsedMs, autoElapsedMs, autoValid; };
+  struct RtcState { uint32_t magic, autoElapsedMs, autoValid; uint8_t nRuns; uint32_t runAgeMs[MAX_RUNS]; uint16_t runMl[MAX_RUNS]; };
   static RtcState _rtc;
 
   void handleRequest(uint32_t now) {
@@ -466,23 +474,60 @@ class HivewirePump {
     _node.log("pump on %lu ms (%u ml)", (unsigned long)runMs, ml);
   }
 
+  // To the nearest ml: a 5 ml dose at 95 ml/min runs 3157 ms, which truncated had counted as 4.
   uint16_t runningMl(uint32_t now) const {
     if (!_flow) return 0;
     uint32_t ms = now - _startedAt;
-    return (uint16_t)min<uint32_t>(65535, (uint32_t)_flow * ms / 60000);
+    return (uint16_t)min<uint32_t>(65535, ((uint64_t)_flow * ms + 30000) / 60000);
+  }
+
+  uint32_t windowMl(uint32_t now) const {
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < _nRuns; i++)
+      if (now - _runAt[i] < DAY_MS) sum += _runMl[i];
+    return sum;
+  }
+
+  void pruneRuns(uint32_t now) {
+    uint8_t k = 0;
+    for (uint8_t i = 0; i < _nRuns; i++) {
+      if (now - _runAt[i] < DAY_MS) {
+        _runAt[k] = _runAt[i];
+        _runMl[k] = _runMl[i];
+        k++;
+      }
+    }
+    _nRuns = k;
   }
 
   void addDelivered(uint32_t now) {
     _endedAt = now;
     _deliveredMl = runningMl(now);
-    _dayMl = (uint16_t)min<uint32_t>(65535, (uint32_t)_dayMl + _deliveredMl);
+    pruneRuns(now);
+    if (_nRuns >= MAX_RUNS) {                 // full: fold the oldest into the next
+      _runMl[1] = (uint16_t)min<uint32_t>(65535, (uint32_t)_runMl[0] + _runMl[1]);
+      for (uint8_t i = 1; i < _nRuns; i++) {
+        _runAt[i - 1] = _runAt[i];
+        _runMl[i - 1] = _runMl[i];
+      }
+      _nRuns--;
+    }
+    if (_deliveredMl) {
+      _runAt[_nRuns] = now;
+      _runMl[_nRuns] = _deliveredMl;
+      _nRuns++;
+    }
     saveRtc();
   }
 
   void saveRtc() {
     _rtc.magic = RTC_MAGIC;
-    _rtc.dayMl = _dayMl;
-    _rtc.elapsedMs = millis() - _winStart;
+    uint32_t now = millis();
+    _rtc.nRuns = _nRuns;
+    for (uint8_t i = 0; i < _nRuns; i++) {
+      _rtc.runAgeMs[i] = now - _runAt[i];
+      _rtc.runMl[i] = _runMl[i];
+    }
     _rtc.autoValid = _gapPending;
     _rtc.autoElapsedMs = millis() - _lastAutoAt;
     _rtcSavedAt = millis();
@@ -500,8 +545,11 @@ class HivewirePump {
   bool _activeLow;
   uint16_t _flow = 0, _maxDose = 250, _maxDay = 1500;
   uint8_t _floatMode = 0;
-  uint16_t _dayMl = 0, _deliveredMl = 0;
-  uint32_t _winStart = 0, _startedAt = 0, _runMs = 0, _endedAt = 0, _rtcSavedAt = 0;
+  uint16_t _deliveredMl = 0;
+  uint32_t _startedAt = 0, _runMs = 0, _endedAt = 0, _rtcSavedAt = 0;
+  uint32_t _runAt[MAX_RUNS] = {0};             // millis() each run ended (the last 24 h)
+  uint16_t _runMl[MAX_RUNS] = {0};
+  uint8_t  _nRuns = 0;
   bool _running = false, _hitCeiling = false;
   uint8_t _state = HW_PUMP_IDLE;
   volatile uint8_t _reqKind = REQ_NONE;
