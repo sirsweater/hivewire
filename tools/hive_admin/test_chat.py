@@ -644,6 +644,13 @@ script[:] = [say("Move it out of the sun. Would you like to try any of these ste
 out = conv.ask(hive, "node %d is dying!!! do something" % nopump["id"])
 check("reboot" not in out["answer"].lower() and "out of the sun" in out["answer"],
       "'I can reboot the node' is dropped from a plant problem (it's not what helps a plant)", out["answer"])
+script[:] = [say("It reads too wet.\n\n**Actions:**\n1. **Reboot the node**: a restart may clear it.\n"
+                 "2. **Check the probe position**: fully inserted.\n3. **Monitor**: watch it for a few hours.\n\n"
+                 "If you decide to reboot node %d, I can do that for you now." % nopump["id"])]
+out = conv.ask(hive, "node %d is dying!!! do something" % nopump["id"])
+check("reboot" not in out["answer"].lower() and "1. **Check the probe" in out["answer"] and "2. **Monitor" in out["answer"],
+      "'If you decide to reboot node N, I can do that' is dropped too, and the steps left are renumbered 1, 2", out["answer"])
+check(C.renumber_lists("a\n2. x\n3. y\n\nb\n5. z") == "a\n1. x\n2. y\n\nb\n1. z", "renumber_lists: each run from 1")
 _kf2 = os.path.join(tmp, "ki2.json")
 json.dump({str(pump["id"]): "PUMP NOT TRUSTED. PROBE OUT OF THE SOIL since tonight"}, open(_kf2, "w"))
 _old_ki2 = C.KNOWN_ISSUES_FILE

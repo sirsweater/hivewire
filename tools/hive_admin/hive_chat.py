@@ -8130,6 +8130,7 @@ def ask(hive, messages, q, on_tool=None):
         # "Do you want to proceed?" with nothing waiting for a Confirm: there is nothing to proceed with
         # (once after a refused -50 ml: "Let's try -200 ml. Would you like me to proceed?").
         answer = no_card_offers(answer)
+    before_reboot = answer
     if not re.search(r"(?i)\b(reboot|restart|reset|power cycle)\b", q):        # ("do something" counts as a request)
         # "The cactus is dying!!!" got "Would you like to reboot the node?" - not what helps a plant.
         answer = re.sub(r"(?im)^[ \t]*[-*]?[ \t]*\**reboot\**[^\n]*\?[ \t]*$\n?", "", answer)
@@ -8145,6 +8146,11 @@ def ask(hive, messages, q, on_tool=None):
         # "If not, I can reboot the node or provide more information on its current state." (2026-10-17)
         answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\b(I|we) (can|could|will|'ll|might)\b[^.!?\n]*\breboot\w*\b[^.!?\n]*[.!?]?",
                         "", answer)
+        # ...and the other way round: "If you decide to reboot node 6, I can do that for you now." (hive-full36)
+        answer = re.sub(r"(?i)[ \t]*[^.!?\n]*\breboot\w*\b[^.!?\n]*\b((I|we) (can|could|will|'ll|might)|let me know)\b"
+                        r"[^.!?\n]*[.!?]?", "", answer)
+        if answer != before_reboot:
+            answer = renumber_lists(answer)       # "Actions: 2. ... 3. ..." once step 1 (the reboot) is gone
     answer = no_false_agree(q, answer)
     try:
         answer = must_report_silent(hive, q, answer)
@@ -8211,6 +8217,20 @@ def no_card_offers(answer):
     if answer.count("```") % 2:
         answer = answer[:answer.rindex("```")].rstrip()     # a code fence left open at the end: debris
     return answer
+
+
+def renumber_lists(text):
+    """Numbered steps renumbered 1, 2, 3... in each run of them, after a line was taken out of the middle."""
+    out, n = [], 0
+    for line in text.split("\n"):
+        m = re.match(r"^([ \t]*)\d+([.)][ \t])", line)
+        if m:
+            n += 1
+            line = "%s%d%s" % (m.group(1), n, m.group(2)) + line[m.end():]
+        elif line.strip():
+            n = 0
+        out.append(line)
+    return "\n".join(out)
 
 
 def must_say(hive, q, answer):
