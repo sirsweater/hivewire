@@ -195,8 +195,16 @@ HivewireLight light(node, LIGHT_PIN, LIGHT_ACTIVE_LOW);
 // does not belong there. loop() reads, samplers report the last result.
 static int16_t  tempCenti = 0;       // 0.01 C
 static uint16_t humCenti  = 0;       // 0.01 %RH
-static uint16_t soilRaw   = 0;       // ADC counts, 0-4095
+static uint16_t soilRaw   = 0;       // ADC counts, 0-4095: this read (the pump and the dose check use it)
 static uint8_t  soilPct   = 0;
+// What slots 3 and 4 publish: the soil reading averaged over the last few minutes. A probe's reads scatter by ~20
+// counts from one minute to the next (nodes 6 and 7, Oct 2026: ~50 counts each hour around a flat mean), so at the
+// 15-count threshold nearly every read went out - ~900 a day per node, bouncing up and down by 1%. 1/8 per 30 s read
+// (about 4 minutes) holds still to a few counts. A real step - a probe pulled out or pushed in, a big watering -
+// jumps straight to the new reading, and in troubleshoot mode the average is off: the page shows each read.
+static uint16_t soilPub   = 0;
+static uint32_t soilAvg16 = 0;       // the average, x16
+static const uint16_t SOIL_SNAP = 150;   // counts: more than this at once is a step, not noise
 static uint16_t battMv    = 0;       // 0 = no divider fitted / not measured
 static uint8_t  battPct   = 0;       // from the LiPo curve, not a linear scale
 // bit0 AHT20, bit1 soil, bit2 battery, bit3 soil temp, bit4 soil temp probe
@@ -584,7 +592,13 @@ static void readSensors() {
   if (!soilPlausible && ++soilBadReads % 20 == 1)
     hwErr(node, soilSteady ? HW_E_VALUE_OUT_OF_RANGE : HW_E_INPUT_FLOATING, 3,
           "soil: median %u spread %u", soilRaw, spread);   // subject: slot 3, soil raw
-  float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilRaw) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
+  uint16_t step = soilRaw > soilPub ? soilRaw - soilPub : soilPub - soilRaw;
+  if (!soilPlausible || !soilAvg16 || step >= SOIL_SNAP || node.troubleshooting())
+    soilAvg16 = (uint32_t)soilRaw * 16;                       // start again from this read
+  else
+    soilAvg16 = soilAvg16 - soilAvg16 / 8 + (uint32_t)soilRaw * 2;   // += (read - average) / 8
+  soilPub = (soilAvg16 + 8) / 16;
+  float pct = 100.0f * (float)(SOIL_ADC_DRY - (int)soilPub) / (float)(SOIL_ADC_DRY - SOIL_ADC_WET);
   soilPct = pct < 0 ? 0 : pct > 100 ? 100 : (uint8_t)lroundf(pct);
 
   readSoilTemp();
@@ -610,7 +624,7 @@ static void readSensors() {
 // ---- samplers ---------------------------------------------------------------
 static void sTemp(void *o)     { memcpy(o, &tempCenti, 2); }
 static void sHum(void *o)      { memcpy(o, &humCenti, 2); }
-static void sSoilRaw(void *o)  { memcpy(o, &soilRaw, 2); }
+static void sSoilRaw(void *o)  { memcpy(o, &soilPub, 2); }
 static void sSoilPct(void *o)  { memcpy(o, &soilPct, 1); }
 static void sSoilTemp(void *o) { memcpy(o, &soilTempCenti, 2); }
 static void sBatt(void *o)     { memcpy(o, &battMv, 2); }
@@ -942,14 +956,17 @@ void loop() {
   // No sensor I/O while an image is arriving: the transfer is what this node
   // must not stall, and the readings can wait a minute.
   static uint32_t lastRead = 0;
-  if (!fw.active() && !fwTx.active() && millis() - lastRead >= READ_EVERY_MS) {
+  // Every 2 s while the admin's Troubleshoot page is open: its fast sampling only copies the last read.
+  uint32_t every = READ_EVERY_MS;
+  if (node.troubleshooting()) every = HivewireNode::TROUBLE_SAMPLE_MS;
+  if (!fw.active() && !fwTx.active() && millis() - lastRead >= every) {
     lastRead = millis();
     readSensors();
     char st[12];
     if (soilTempCenti == INT16_MIN) snprintf(st, sizeof(st), "none");
     else snprintf(st, sizeof(st), "%.2fC", soilTempCenti / 100.0f);
-    Serial.printf("t=%.2fC rh=%.2f%% soil=%u (%u%%) soilT=%s batt=%s ok=%u nb=%u ep=%lu\n",
-                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPct, st,
+    Serial.printf("t=%.2fC rh=%.2f%% soil=%u avg %u (%u%%) soilT=%s batt=%s ok=%u nb=%u ep=%lu\n",
+                  tempCenti / 100.0f, humCenti / 100.0f, soilRaw, soilPub, soilPct, st,
                   battFitted ? battStr(battMv, battPct) : "none fitted",
                   sensorOk, node.neighbors(), (unsigned long)node.epoch());
   }
