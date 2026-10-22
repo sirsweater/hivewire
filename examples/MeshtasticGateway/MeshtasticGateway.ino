@@ -85,6 +85,13 @@ static const HwWritableSlot WRITABLE[] = {
   { 50, HW_U16 },    // water below this soil raw reading
   { 51, HW_U16 },    // automatic watering amount, ml
   { 52, HW_U16 },    // minimum gap between automatic waterings, minutes
+  { 55, HW_U8 },     // automatic watering pulses (1-10)
+  // Grow light (HivewireLight.h: GrowNode). Without 60 the admin's clock sync was refused
+  // ("ERR slot 60 not writable") and a light on its schedule never came on.
+  { 57, HW_U8 },     // light mode: 0 off, 1 on, 2 schedule
+  { 58, HW_U16 },    // lights on at, minute of the day
+  { 59, HW_U16 },    // lights off at, minute of the day
+  { 60, HW_U16 },    // clock: the local minute of the day now
 };
 static const uint8_t N_WRITABLE = sizeof(WRITABLE) / sizeof(WRITABLE[0]);
 
