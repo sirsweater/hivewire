@@ -1582,7 +1582,7 @@ views.settings = async (el) => {
             <select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label></div></div>
     </div>`;
   const tbl = $("#nodes-table");
-  tbl.innerHTML = `<tr><th>#</th><th>Name</th><th>Location</th><th>Type</th><th>Soil dry / wet (raw)</th><th>Battery correction</th><th>Hide</th><th></th></tr>` +
+  tbl.innerHTML = `<tr><th>#</th><th>Name</th><th>Location</th><th>Type</th><th>Soil dry / wet (raw)</th><th>Battery correction</th><th>Hide</th><th title="Not attached to a plant: no phone alerts, never sent to g4rden">Test board</th><th></th></tr>` +
     nodes.map((n) => {
       const c = cfg.nodes[n.id] || {};
       // Any type with a soil probe (SoilNode, WaterNode...), not one name.
@@ -1604,6 +1604,7 @@ views.settings = async (el) => {
           <button type="button" data-battfull>It is fully charged</button>
           <button type="button" data-battmeas>Enter measured V</button></div>` : '<span class="muted">—</span>'}</td>
         <td><input data-k="hidden" type="checkbox" ${c.hidden ? "checked" : ""}></td>
+        <td><input data-k="test" type="checkbox" ${c.test ? "checked" : ""} title="Not attached to a plant: no phone alerts, never sent to g4rden"></td>
         <td><button class="primary" data-save>Save</button></td></tr>`;
     }).join("");
   // Each probe's wettest and driest readings it held in the last 30 days (lower raw = wetter):

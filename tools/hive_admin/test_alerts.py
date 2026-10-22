@@ -35,7 +35,7 @@ class Store:
 
 class Cfg:
     def __init__(self):
-        self.nodes = {5: {"name": "Rhubarb"}, 3: {}, 12: {"hidden": True}}
+        self.nodes = {5: {"name": "Rhubarb"}, 3: {}, 12: {"hidden": True}, 30: {"test": True}}
         self.data = {"stale_seconds": 300, "g4rden": {"token": "t" * 64, "enabled": True}}
 
     def node(self, nid):
@@ -116,6 +116,13 @@ check(sent == [], "still quiet: not repeated", sent)
 # 6. Hidden (retired) nodes never alert.
 sent = run({12: node(code=307, count=9), 12.0: node(age=99999)}, T0 + 2300)
 check(sent == [], "hidden node: no alerts", sent)
+
+# 6b. A test board (not attached to a plant) never alerts either: a bare input or going quiet isn't news.
+run({30: node(code=303, count=1)}, T0 + 2310)
+sent = run({30: node(code=303, count=4)}, T0 + 2320)
+check(sent == [], "test board: an unconnected-input error doesn't alert", sent)
+sent = run({30: node(age=99999)}, T0 + 2330)
+check(sent == [], "test board: going quiet doesn't alert", sent)
 
 # 7. Reboot: count restarts at 1 with an application code (E1001) -> alert.
 run({3: node(code=208, count=7)}, T0 + 2400)

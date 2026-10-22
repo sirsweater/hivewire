@@ -834,7 +834,8 @@ class HiveAlerts:
         stale = self.app.cfg.data.get("stale_seconds", 300)
         for nid, rec in ((snap or {}).get("nodes") or {}).items():
             meta = self.app.cfg.node(nid) or {}
-            if meta.get("hidden"):
+            if meta.get("hidden") or meta.get("test"):
+                # a test board isn't attached to a plant: its bare inputs aren't news on anyone's phone
                 continue
             age = rec.get("age") or 0
             if age > self.QUIET_S:
@@ -896,7 +897,7 @@ class HiveAlerts:
         for w in ws:
             n = by_id.get(w.get("node"))
             soil = ((n or {}).get("derived") or {}).get("soil")
-            if n is None or soil is None or n.get("hidden") or (n.get("age") or 0) > stale:
+            if n is None or soil is None or n.get("hidden") or n.get("test") or (n.get("age") or 0) > stale:
                 continue
             below, above = w.get("below"), w.get("above")
             over = soil < below if below is not None else soil > above
@@ -1301,6 +1302,8 @@ class Uploader(threading.Thread):
         nodes, marks = [], {}
         for key, ieee in sorted(g.get("devices", {}).items()):
             nid = int(key)
+            if (self.app.cfg.node(nid) or {}).get("test"):
+                continue                    # a test board's readings never leave the hive
             since = self.app.store.upload_mark(nid)
             samples = self.samples_for(nid, since, now_ts, min_gap, max_n)
             readings = []
@@ -2003,7 +2006,8 @@ class App:
                               "location": meta.get("location") or "", "age": age,
                               "hops": rec["hops"], "slots": rec["slots"],
                               "derived": self.derived(nid, kind, rec["slots"]),
-                              "warnings": warnings, "hidden": bool(meta.get("hidden"))})
+                              "warnings": warnings, "hidden": bool(meta.get("hidden")),
+                              "test": bool(meta.get("test"))})
         return {"time": now(), "snapshot_time": snap["time"] if snap else None,
                 "health": snap["health"] if snap else None, "nodes": nodes,
                 "silent": self.silent_nodes({n["id"] for n in nodes}) if snap else [],
@@ -2834,7 +2838,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/node":
             b = self.jbody()
             nid = int(b.pop("id"))
-            allowed = {"name", "location", "kind", "soil_dry", "soil_wet", "hidden", "band_scale",
+            allowed = {"name", "location", "kind", "soil_dry", "soil_wet", "hidden", "test", "band_scale",
                        "notes", "batt_scale"}
             patch = {k: v for k, v in b.items() if k in allowed}
             if patch.get("band_scale") not in (None, "", "fc"):
