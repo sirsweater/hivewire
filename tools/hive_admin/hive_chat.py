@@ -1111,7 +1111,8 @@ def t_recent_events(hive, hours_back=24, day=None, include_routine=False, includ
     else:
         hours_back = max(1, min(24 * 30, int(hours_back)))
         t0, label = t1 - hours_back * 3600, "the last %d h" % hours_back
-    evs = hive.call("GET", "/api/events", {"limit": 3000}) or []
+    # the newest before the window's end, not the newest overall: a busy day since would push it out of reach
+    evs = hive.call("GET", "/api/events", {"limit": 3000, "until": t1}) or []
     evs = [e for e in evs if t0 <= e.get("ts", 0) < t1]
     routine = [e for e in evs if e.get("kind") == "upload" or
                (e.get("kind") == "system" and e.get("text", "").startswith(ROUTINE))]

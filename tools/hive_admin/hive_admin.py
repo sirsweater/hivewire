@@ -116,8 +116,13 @@ class Store:
                 "SELECT * FROM events WHERE kind='note' AND ts BETWEEN ? AND ? ORDER BY ts",
                 (t0, t1))]
 
-    def events(self, limit=200):
+    def events(self, limit=200, until=None):
+        """The newest `limit` events, or the newest before `until` (a past day's, which a burst of newer events
+        - 1443 clock retries in a day, Oct 2026 - would otherwise push out of reach)."""
         with self.db() as c:
+            if until:
+                return [dict(r) for r in c.execute(
+                    "SELECT * FROM events WHERE ts < ? ORDER BY ts DESC LIMIT ?", (until, limit))]
             return [dict(r) for r in c.execute(
                 "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (limit,))]
 
@@ -591,6 +596,7 @@ class Poller(threading.Thread):
         self.plausible = None           # set by App: (nid, slot, value) -> bool
         self.fails = 0                  # polls in a row that got no dump
         self.clock_sent = {}            # node -> when its light clock was last sent
+        self.clock_logged = {}          # node -> when a missing clock was last written to the events
 
     WRITE_RETRY_S = 45
     WRITE_TRIES = 5
@@ -769,9 +775,11 @@ class Poller(threading.Thread):
             m = lt.tm_hour * 60 + lt.tm_min
             ack = self.gw.command("set %d %d %d" % (nid, self.CLOCK_SLOT, m), r"ACK set|ERR")
             self.clock_sent[nid] = t
-            if v == self.CLOCK_UNSET:
+            if v == self.CLOCK_UNSET and (ack and ack.startswith("ACK") or t - self.clock_logged.get(nid, 0) >= 3600):
                 # Worth a line: the light was dark for want of it. The routine
-                # re-send every few hours is not news.
+                # re-send every few hours is not news, and neither is the same
+                # refusal every minute (an old gateway refused slot 60: 1443 lines a day).
+                self.clock_logged[nid] = t
                 self.store.event("command", "node %d had no clock: sent %02d:%02d -> %s" % (
                     nid, m // 60, m % 60, ack or "no reply"))
 
@@ -2540,7 +2548,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json({"messages": msgs, "pending": [{"id": k, "summary": v["summary"]}
                                                                  for k, v in conv.pending.items()]})
         if path == "/api/events":
-            return self.send_json(app.store.events(int(q.get("limit", 200))))
+            return self.send_json(app.store.events(int(q.get("limit", 200)), int(q["until"]) if q.get("until") else None))
         if path == "/api/firmware":
             with app.store.db() as c:
                 hist = [dict(r) for r in c.execute(
