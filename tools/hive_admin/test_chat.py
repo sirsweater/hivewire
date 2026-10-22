@@ -619,7 +619,7 @@ x = C.adjust_reply("/api/state", {"nodes": [{"id": pump["id"], "derived": {"soil
 check(x["nodes"][0]["derived"]["soil"] is None and C.PROBE_OUT_WARNING in x["nodes"][0]["warnings"] and
       x["nodes"][1]["derived"]["soil"] == 2.0, "a probe the known issues say is out: no soil %, and why", x)
 x = C.adjust_reply("/api/state", {"nodes": [{"id": pump["id"], "derived": {"soil": 47.0}, "warnings": []}]})
-check(x["nodes"][0]["derived"]["soil"] == 47.0, "...back in the soil (47 %), its reading counts again by itself", x)
+check(x["nodes"][0]["derived"]["soil"] is None, "...whatever it reads (47 %): the note decides, not the number (an unplugged probe read 94 %)", x)
 check(C.derived(hive, {"kind": pump["kind"], "derived": {"soil": None}, "warnings": [C.PROBE_OUT_WARNING]})
       .get("Soil moisture", "").startswith("no reading - the probe is out"), "...and it's described that way, not 'not calibrated'")
 C.KNOWN_ISSUES_FILE = _old_ki

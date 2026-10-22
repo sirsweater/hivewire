@@ -375,8 +375,10 @@ PROBE_OUT_WARNING = "probe out of the soil (known issue) - no reading of the pot
 
 def adjust_reply(path, obj):
     """What the chat reads from /api/state, with what the site's known-issues file says the hive can't see: a probe
-    out of the soil has its soil % dropped (and a warning saying why), so nothing calls the bed dry or offers to water
-    it. Only while it still reads like air (5 % or less): back in the soil, its reading counts again by itself."""
+    out of the soil has its soil % dropped (and a warning saying why), so nothing calls the bed dry or wet, ranks it, or
+    offers to water it - whatever it reads. (It used to count again above 5 %, as if back in the soil; but a probe out
+    of the pot reads anything - the Rhubarb's read 94 % and was ranked the wettest plant. The note comes off when the
+    probe goes back in.)"""
     if path != "/api/state" or not isinstance(obj, dict):
         return obj
     for n in obj.get("nodes") or []:
@@ -385,7 +387,7 @@ def adjust_reply(path, obj):
             # node, so "stop all pumps" or "is there a grow light?" answers about the garden only
             n["hidden"] = True
         soil = (n.get("derived") or {}).get("soil")
-        if soil is not None and soil <= 5 and PROBE_OUT.search(known_issue(n.get("id")) or ""):
+        if soil is not None and PROBE_OUT.search(known_issue(n.get("id")) or ""):
             n["derived"] = dict(n["derived"], soil=None)
             n["warnings"] = list(n.get("warnings") or []) + [PROBE_OUT_WARNING]
     return obj
