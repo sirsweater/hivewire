@@ -1955,5 +1955,8 @@ C.SAID[:] = []
 check(C.WEEK_VS_Q.search("how dry is the cactus compared to last week?") and C.SOIL_VS_DAY_Q.search(
       "is the strawberry wetter than yesterday?") and C.RESTART_TODAY_Q.search("did anything restart today?") and
       C.DOSES_TODAY_Q.search("how many doses will the strawberry get today?"), "round-7 questions route")
+_st = {"nodes": [{"id": 30, "test": True, "slots": {}}, {"id": 7, "slots": {}}]}
+C.adjust_reply("/api/state", _st)
+check(_st["nodes"][0].get("hidden") and not _st["nodes"][1].get("hidden"), "a test board reads as hidden to the chat")
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

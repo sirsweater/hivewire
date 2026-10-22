@@ -380,6 +380,10 @@ def adjust_reply(path, obj):
     if path != "/api/state" or not isinstance(obj, dict):
         return obj
     for n in obj.get("nodes") or []:
+        if n.get("test"):
+            # a test board (Settings > Test board) isn't a plant in the garden: the chat treats it like a hidden
+            # node, so "stop all pumps" or "is there a grow light?" answers about the garden only
+            n["hidden"] = True
         soil = (n.get("derived") or {}).get("soil")
         if soil is not None and soil <= 5 and PROBE_OUT.search(known_issue(n.get("id")) or ""):
             n["derived"] = dict(n["derived"], soil=None)
