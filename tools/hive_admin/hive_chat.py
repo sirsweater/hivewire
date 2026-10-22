@@ -4519,7 +4519,7 @@ def probe_out_soil_reply(hive, nodes, q):
         return None
     m = re.search(r"PROBE OUT OF THE SOIL since ([0-9-]+ [0-9:]+)", issue)
     nm = n.get("name") or "node %s" % n["id"]
-    return ("%s's probe is out of the soil%s, so its readings since then are the probe in the air (near 0 %%), not the bed - "
+    return ("%s's probe is out of the soil%s, so its readings since then are the probe out of the bed (in the air, or unplugged), not the soil - "
             "there's no soil reading to give. Once the probe is back in, its readings count again." % (
                 nm, " (since %s)" % m.group(1) if m else ""))
 
