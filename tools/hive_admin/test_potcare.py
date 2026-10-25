@@ -110,6 +110,35 @@ pumped["45"] = 20                       # the node reports the dose
 s2.run_once(now=T + 12 * 3600 + 700)
 check(len(sent2) == 3, "...while a dose that shows up is left alone (no re-send)", sent2)
 
+# The node's total is a rolling 24 h. Doses every 6 h: each new one lands as the one from 24 h before ages out, so the
+# total doesn't move - that must not read as a lost dose (it did, and every dose was sent twice). Modelled like the real
+# thing: the hive passes once a minute, and the node reports its total every 10 minutes and right after it pumps.
+def rolling_run(seed_cls, lose=None):
+    cfg4, sent4, ev4, log4, rep = _Cfg(), [], [], [], {"value": 0}
+    clock = {"now": T}
+    total = lambda now: sum(ml for ts, ml in log4 if now - ts < 86400)  # noqa: E731
+    def cmd4(nid, slot, v):
+        sent4.append(v)
+        if len(sent4) - 1 == lose:                                      # this one never reaches the pump
+            return True
+        log4.append((clock["now"] + 20, v))                             # it pumps a few seconds later...
+        rep["value"] = total(clock["now"] + 25); return True            # ...and reports straight after
+    s4 = seed_cls(cfg4, cmd4, lambda nid: True, lambda kind, text: ev4.append(text), slots=lambda nid: {45: rep["value"]})
+    s4.start(7, 5, 6, 10, now=T)
+    for minute in range(0, 3 * 24 * 60):
+        clock["now"] = T + minute * 60
+        if minute % 10 == 0:
+            rep["value"] = total(clock["now"])                          # the regular report
+        s4.run_once(now=clock["now"])
+    return sent4, ev4
+sent4, ev4 = rolling_run(P.SeedMode)
+lost_sent, lost_ev = rolling_run(P.SeedMode, lose=6)                  # day two, with the 24 h window full
+check(len(lost_sent) == 13 and sum("sent once more" in e for e in lost_ev) == 1 and not any("even after" in e for e in lost_ev),
+      "...while a dose really lost once the window is full is still sent once more (and the re-send counts)", (len(lost_sent), lost_ev[-2:]))
+check(not any("sent once more" in e or "even after" in e for e in ev4) and len(sent4) == 12,
+      "doses every 6 h for three days: none mistaken for lost once the 24 h window is full, none sent twice",
+      (len(sent4), [e for e in ev4 if "once more" in e or "even after" in e][:2]))
+
 # A node that restarted lost its 24 h total: whether the dose arrived is unknown, so no re-send.
 cfg3, sent3, ev3, pumped3 = _Cfg(), [], [], {"45": 40}
 s3 = P.SeedMode(cfg3, lambda nid, slot, v: (sent3.append(v), True)[1], lambda nid: True,

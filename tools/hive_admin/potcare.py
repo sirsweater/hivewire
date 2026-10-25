@@ -29,6 +29,7 @@ import time
 WATER_NOW = 40       # slot: water N ml now
 PUMPED_24H = 45      # slot: ml pumped in the last 24 h
 CONFIRM_S = 600      # a dose not seen in the node's own total by then is sent once more
+REPORT_S = 900       # how stale the node's last reported 24 h total can be (it reports every few minutes)
 
 SEED_MIN_ML, SEED_MAX_ML = 1, 200
 SEED_MIN_EVERY_H, SEED_MAX_EVERY_H = 1, 72
@@ -106,6 +107,12 @@ class SeedMode:
                 cur = {k: v for k, v in cur.items() if v is not None or k == "last"}
                 self.cfg.set_node(nid, {"seed_mode": cur})
 
+    @staticmethod
+    def _sent(conf, now):
+        """The doses the hive has sent this node in the last 26 h, with this one: [[ts, ml], ...] - what is due to
+        age out of the node's rolling 24 h total when a dose is checked."""
+        return [d for d in (conf.get("sent") or []) if now - d[0] < 26 * 3600] + [[int(now), int(conf["ml"])]]
+
     def run_once(self, now=None):
         """One pass: end what's expired, water what's due. Returns [(nid, ml)] sent."""
         now = now or time.time()
@@ -122,9 +129,16 @@ class SeedMode:
             chk = conf.get("check")
             if chk and now - chk["at"] >= CONFIRM_S:
                 total = self.slots(nid).get(PUMPED_24H)
-                seen = total is not None and total >= chk["before"] + conf["ml"] / 2.0
+                # The node's total is a ROLLING 24 h: since "before" was read, whatever the hive sent 24 h
+                # earlier has dropped out of it. With doses every 6 h, yesterday's dose left exactly as today's
+                # arrived and the total didn't move - every dose looked lost and was sent twice.
+                # ("before" is the node's last report, up to REPORT_S old: a dose sent a little over 24 h before it
+                # can still be in it and gone from the total now)
+                aged = sum(ml for ts, ml in conf.get("sent") or [] if chk["at"] - 86400 - REPORT_S <= ts <= now - 86400)
+                base = chk["before"] - aged
+                seen = total is not None and total >= base + conf["ml"] / 2.0
                 self.update(nid, check=None)
-                if total is not None and total < chk["before"]:
+                if total is not None and total < base:
                     # The node's 24 h total went DOWN: it restarted and lost the count,
                     # so it can't say whether the dose arrived. A re-send could double it.
                     self.event("command", "node %d %s: the node restarted, so whether the last %d ml dose "
@@ -132,7 +146,8 @@ class SeedMode:
                     seen = True
                 if not seen and not chk.get("retry"):
                     if self.live(nid) and self.command(nid, WATER_NOW, int(conf["ml"])):
-                        self.update(nid, check={"at": int(now), "before": total or 0, "retry": True})
+                        self.update(nid, check={"at": int(now), "before": total or 0, "retry": True},
+                                    sent=self._sent(conf, now))
                         self.event("command", "node %d %s: the last %d ml dose didn't show up in the node's "
                                    "pumped total; sent once more" % (nid, what, conf["ml"]))
                     continue
@@ -159,7 +174,7 @@ class SeedMode:
                         nid, what, "%.0f%%" % pct if pct is not None else "no reading"))
             before = self.slots(nid).get(PUMPED_24H) or 0
             if self.command(nid, WATER_NOW, int(conf["ml"])):
-                self.update(nid, last=int(now), check={"at": int(now), "before": before})
+                self.update(nid, last=int(now), check={"at": int(now), "before": before}, sent=self._sent(conf, now))
                 self.event("command", "node %d %s: %d ml (every %g h until %s)" % (
                     nid, what, conf["ml"], conf["every_h"], time.strftime("%b %d", time.localtime(conf["until"]))))
                 sent.append((nid, conf["ml"]))
