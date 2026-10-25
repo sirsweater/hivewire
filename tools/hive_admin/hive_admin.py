@@ -2468,7 +2468,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "recommendation": rec})
         if path == "/api/forecast":
             # The newest run of each public model, from this hour on (the chat's "will it rain tomorrow?").
-            return self.send_json(app.forecasts.latest())
+            # ...and what the scoreboard says to do with each model at this station (forecasts.corrections)
+            out = app.forecasts.latest()
+            nid = app.station_node()
+            out["corrections"] = app.forecasts.corrections(nid) if nid is not None else {}
+            return self.send_json(out)
         if path == "/api/forecast/score":
             # How each public model has done against the station: mean error and
             # bias per variable and lead time (forecast - measured).

@@ -6657,6 +6657,13 @@ def forecast_reply(hive, q):
         return None
     rng = lambda k: [d[k] for d in per.values() if d[k] is not None]  # noqa: E731
     rains, his, los, gusts = rng("rain"), rng("hi"), rng("lo"), rng("gust")
+    # The model the scoreboard rates best against the station, with its learned corrections (forecasts.corrections):
+    # its temperatures shifted by the offset, every model's gusts scaled to how sheltered the station is.
+    corr = fc.get("corrections") or {}
+    best = corr.get("best") if corr.get("best") in models else None
+    bname = MODEL_NAME.get(best, best) if best else None
+    off = (((corr.get("models") or {}).get(best) or {}).get("temp") or {}).get("offset", 0.0) if best else 0.0
+    gscale = {MODEL_NAME.get(m, m): ((v.get("gust") or {}).get("scale")) for m, v in (corr.get("models") or {}).items()}
     out = []
     if rains:
         wet = [m for m, d in per.items() if (d["rain"] or 0) >= 0.5]
@@ -6668,7 +6675,17 @@ def forecast_reply(hive, q):
             out.append("**Rain:** uncertain - %s give%s some (up to %.1f mm), %s don't." % (
                 ", ".join(wet), "s" if len(wet) == 1 else "", max(rains),
                 ", ".join(m for m in per if m not in wet)))
-    if his and label.startswith("tonight (to"):
+    b = per.get(bname) if bname else None
+    if b and b["lo"] is not None and label.startswith("tonight (to"):
+        out.append("**Temperature:** falling to a low of about %s - %s's forecast, corrected for your station (it has "
+                   "been the most accurate here); the %d models give %s." % (
+                       c_f(b["lo"] + off), bname, len(los), c_range(min(los), max(los))))
+    elif b and b["hi"] is not None:
+        out.append("**Temperature:** high about %s, low about %s - %s's forecast, corrected for your station (it has "
+                   "been the most accurate here); the %d models give highs of %s and lows of %s." % (
+                       c_f(b["hi"] + off), c_f(b["lo"] + off), bname, len(his), c_range(min(his), max(his)),
+                       c_range(min(los), max(los))))
+    elif his and label.startswith("tonight (to"):
         out.append("**Temperature:** falling to a low of %s." % c_range(min(los), max(los)))
     elif his:
         out.append("**Temperature:** high %s, low %s." % (c_range(min(his), max(his)), c_range(min(los), max(los))))
@@ -6677,7 +6694,12 @@ def forecast_reply(hive, q):
             out.append("**Frost:** %s" % ("below freezing in %d of %d models - protect tender plants." % (
                 sum(x <= 0 for x in los), len(los)) if min(los) <= 0 else "possible on plants - the lowest model "
                 "low is %s." % c_f(min(los)) if min(los) < 3 else "no - the coldest model low is %s." % c_f(min(los))))
-    if gusts:
+    at_station = [d["gust"] * gscale[m] for m, d in per.items() if d["gust"] is not None and gscale.get(m)]
+    if gusts and at_station and b and b["gust"] is not None and gscale.get(bname):
+        out.append("**Gusts:** up to about %.0f km/h at your station (%s's forecast scaled to how sheltered the station "
+                   "is - it reads about %.0f %% of the open-country gusts the models give, %.0f-%.0f km/h)." % (
+                       b["gust"] * gscale[bname], bname, 100 * gscale[bname], min(gusts), max(gusts)))
+    elif gusts:
         note = ""
         try:
             sc = (hive.call("GET", "/api/forecast/score") or {}).get("score") or {}

@@ -157,6 +157,56 @@ class Forecasts:
                     out[model][var][b] = {"n": n, "mae": round(ae / n, 2), "bias": round(e / n, 2)}
         return out
 
+    def corrections(self, station_node, days=14, now=None, min_n=48):
+        """What the scoreboard says to do with each model, re-learned from the last `days` days so it follows the
+        seasons: a temperature offset (the station minus the model), and for wind and gusts a scale (the station is
+        sheltered: it measures a fraction of the open-country wind the models give), from forecasts made up to 24 h
+        ahead. "best": the model with the best summed rank on temperature, humidity and gusts after correcting.
+        {} until there are min_n matching hours. Recomputed at most every 3 hours (the Pi has 35 days of runs)."""
+        now = int(now or time.time())
+        cached = getattr(self, "_corr", None)
+        if cached and cached[0] == station_node and now - cached[1] < 3 * HOUR and cached[3] == (days, min_n):
+            return cached[2]
+        since = now - days * 86400
+        pairs = {}                                    # model -> var -> [(forecast, measured)]
+        with self.store.db() as db:
+            for var in ("temp", "hum", "wind", "gust"):
+                slot, col, scale = OBSERVED[var]
+                obs = {r[0]: r[1] * scale for r in db.execute(
+                    "SELECT ts, %s FROM rollup_hour WHERE node=? AND slot=? AND ts>=? AND %s IS NOT NULL"
+                    % (col, col), (station_node, slot, since))}
+                for model, valid, value in db.execute(
+                        "SELECT model, valid, value FROM forecasts WHERE var=? AND valid>=? AND valid<? AND valid-issued < 86400",
+                        (var, since, now)):
+                    if valid in obs:
+                        pairs.setdefault(model, {}).setdefault(var, []).append((value, obs[valid]))
+        models, mae = {}, {}
+        for model, vs in pairs.items():
+            c, m = {}, {}
+            for var, pv in vs.items():
+                if len(pv) < min_n:
+                    continue
+                if var == "temp":
+                    off = sum(o - f for f, o in pv) / len(pv)
+                    c[var] = {"offset": round(off, 2), "n": len(pv)}
+                    m[var] = sum(abs(f + off - o) for f, o in pv) / len(pv)
+                elif var in ("wind", "gust"):
+                    tot = sum(f for f, o in pv)
+                    k = sum(o for f, o in pv) / tot if tot > 0 else 1.0
+                    c[var] = {"scale": round(k, 2), "n": len(pv)}
+                    m[var] = sum(abs(f * k - o) for f, o in pv) / len(pv)
+                else:
+                    m[var] = sum(abs(f - o) for f, o in pv) / len(pv)
+            if c:
+                models[model], mae[model] = c, m
+        ranked = [mdl for mdl in mae if all(v in mae[mdl] for v in ("temp", "hum", "gust"))]
+        best = min(ranked, key=lambda mdl: sum(sorted(mae[o][v] for o in ranked).index(mae[mdl][v])
+                                               for v in ("temp", "hum", "gust"))) if ranked else None
+        out = {"best": best, "days": days, "models": models,
+               "mae": {mdl: {v: round(x, 2) for v, x in mv.items()} for mdl, mv in mae.items()}} if models else {}
+        self._corr = (station_node, now, out, (days, min_n))
+        return out
+
     def latest(self, now=None):
         """Each model's most recent run, from the current hour on: {"issued": {model: ts},
         "models": {model: {var: [[valid, value], ...]}}}."""

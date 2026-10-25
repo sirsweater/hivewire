@@ -1958,5 +1958,23 @@ check(C.WEEK_VS_Q.search("how dry is the cactus compared to last week?") and C.S
 _st = {"nodes": [{"id": 30, "test": True, "slots": {}}, {"id": 7, "slots": {}}]}
 C.adjust_reply("/api/state", _st)
 check(_st["nodes"][0].get("hidden") and not _st["nodes"][1].get("hidden"), "a test board reads as hidden to the chat")
+# The forecast leads with the model the scoreboard rates best, corrected for the station; gusts scaled to its shelter.
+class _FcHive:
+    def __init__(self, fc): self.fc = fc
+    def call(self, method, path, *a, **k):
+        return self.fc if path == "/api/forecast" else {}
+_t0 = int(_tm.time()) // 3600 * 3600 + 86400
+_lo_hi = lambda m, lo, hi, g: {"temp": [[_t0 + h * 3600, hi if h % 2 else lo] for h in range(48)],  # noqa: E731
+                               "rain": [[_t0 + h * 3600, 0.0] for h in range(48)], "gust": [[_t0 + h * 3600, g] for h in range(48)]}
+_fc = {"issued": {"icon_seamless": _t0 - 3600}, "models": {"icon_seamless": _lo_hi("icon", 8.0, 18.0, 30.0), "gfs_global": _lo_hi("gfs", 9.0, 20.0, 40.0)},
+       "corrections": {"best": "icon_seamless", "models": {"icon_seamless": {"temp": {"offset": 1.0}, "gust": {"scale": 0.5}},
+                                                           "gfs_global": {"temp": {"offset": -0.5}, "gust": {"scale": 0.4}}}}}
+_r = C.forecast_reply(_FcHive(_fc), "what's the forecast for tomorrow?")
+check(_r and "ICON's forecast, corrected for your station" in _r and "19 °C" in _r, "the forecast leads with the best model, corrected", _r)
+check(_r and "up to about 15 km/h at your station" in _r and "30-40 km/h" in _r, "gusts scaled to the sheltered station, with the models' own", _r)
+_fc.pop("corrections")
+_r = C.forecast_reply(_FcHive(_fc), "what's the forecast for tomorrow?")
+check(_r and "corrected" not in _r and "**Temperature:** high" in _r, "without a scoreboard yet: the models' ranges, as before", _r)
+
 print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
 sys.exit(1 if failed else 0)

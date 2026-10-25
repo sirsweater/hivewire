@@ -94,5 +94,18 @@ check(set(lt["models"]) == {"gfs_global", "ecmwf_ifs025"} and lt["issued"]["gfs_
 check(all(v >= issued for m in lt["models"].values() for rows_ in m.values() for v, _ in rows_) and
       lt["models"]["gfs_global"]["temp"][0][1] == 22, "...from the current hour on, values as stored")
 
+# Corrections: GFS 22 C vs 21 measured -> offset -1; ECMWF 19 -> +2; wind 10 km/h forecast vs 3 measured -> scale 0.3.
+with store.db() as c:
+    for k in range(0, 7):
+        c.execute("INSERT OR REPLACE INTO rollup_hour VALUES(?,?,?,?,?,?,?,?,?)", (20, 11, times[k], 3600, 1, 30.0, 30, 30, None))
+        c.execute("INSERT OR REPLACE INTO rollup_hour VALUES(?,?,?,?,?,?,?,?,?)", (20, 2, times[k], 3600, 1, 6000.0, 6000, 6000, None))
+co = fc.corrections(20, days=1, now=later, min_n=3)
+check(abs(co["models"]["gfs_global"]["temp"]["offset"] + 1.0) < 1e-6 and abs(co["models"]["ecmwf_ifs025"]["temp"]["offset"] - 2.0) < 1e-6,
+      "temperature offsets: the station minus each model", co["models"])
+check(abs(co["models"]["gfs_global"]["wind"]["scale"] - 0.3) < 1e-6, "wind scale: the sheltered station reads 3 of the model's 10 km/h", co["models"]["gfs_global"])
+check(fc.corrections(20, days=1, now=later + 60, min_n=3) is co, "cached for a while (the Pi has 35 days of runs to read)")
+check(F.Forecasts(store, lambda: cfg, fetch=lambda u: {}).corrections(20, days=1, now=later, min_n=500) == {},
+      "nothing until there are enough matching hours")
+
 print("\n%d failed" % failed if failed else "\nall passed")
 sys.exit(1 if failed else 0)
